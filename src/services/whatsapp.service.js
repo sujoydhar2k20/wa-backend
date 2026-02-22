@@ -22,7 +22,17 @@ async function request(wabaId, method, path, data = null) {
   const url = `${BASE_URL}${path}`;
   const opts = { method, url, headers: { Authorization: `Bearer ${token}` } };
   if (data) opts.data = data;
-  const res = await axios(opts);
+  let res;
+  try {
+    res = await axios(opts);
+  } catch (error) {
+    if (error.response) {
+      logger.error(`WhatsApp API Error: ${JSON.stringify(error.response.data)}`);
+    } else {
+      logger.error(`WhatsApp API Request Error: ${error.message}`);
+    }
+    throw error;
+  }
   return res.data;
 }
 
@@ -41,7 +51,10 @@ async function sendTextMessage(wabaId, phoneNumberId, to, text) {
 async function sendMediaMessage(wabaId, phoneNumberId, to, type, urlOrId, caption = '') {
   const path = `/${phoneNumberId}/messages`;
   const key = type === 'document' ? 'document' : type;
-  const payload = type === 'document' ? { link: urlOrId, caption } : { link: urlOrId, caption: caption || undefined };
+  const isId = !urlOrId.startsWith('http');
+  const payload = type === 'document'
+    ? (isId ? { id: urlOrId, caption } : { link: urlOrId, caption })
+    : (isId ? { id: urlOrId, caption: caption || undefined } : { link: urlOrId, caption: caption || undefined });
   const body = {
     messaging_product: 'whatsapp',
     recipient_type: 'individual',
@@ -88,15 +101,15 @@ async function markMessageAsRead(wabaId, messageId) {
   });
 }
 
-async function reactToMessage(wabaId, messageId, emoji) {
-  const waba = await getWaba(wabaId);
-  const phoneNumberId = waba.phoneNumbers?.[0]?.phoneNumberId;
-  if (!phoneNumberId) throw new Error('No phone number');
+async function reactToMessage(wabaId, phoneNumberId, to, messageId, emoji) {
   const path = `/${phoneNumberId}/messages`;
+  // According to Meta API, an empty string emoji removes the reaction
   return request(wabaId, 'POST', path, {
     messaging_product: 'whatsapp',
+    recipient_type: 'individual',
+    to: to.replace(/\D/g, ''),
     type: 'reaction',
-    reaction: { message_id: messageId, emoji },
+    reaction: { message_id: messageId, emoji: emoji || "" },
   });
 }
 
@@ -108,15 +121,26 @@ async function downloadMedia(wabaId, mediaId) {
   return res.data;
 }
 
-async function uploadMedia(wabaId, type, fileBuffer, mimeType) {
+async function uploadMedia(wabaId, phoneNumberId, fileBuffer, mimeType) {
   const FormData = require('form-data');
   const form = new FormData();
-  form.append('file', fileBuffer, { filename: 'file', contentType: mimeType });
+  form.append('file', fileBuffer, { filename: 'file', contentType: mimeType, knownLength: fileBuffer.length });
+  form.append('messaging_product', 'whatsapp');
   const token = await getAccessToken(wabaId);
-  const path = `${BASE_URL}/${wabaId}/media`;
-  const res = await axios.post(path, form, {
-    headers: { ...form.getHeaders(), Authorization: `Bearer ${token}` },
-  });
+  const path = `${BASE_URL}/${phoneNumberId}/media`;
+
+  let res;
+  try {
+    res = await axios.post(path, form, {
+      headers: { ...form.getHeaders(), Authorization: `Bearer ${token}` },
+    });
+  } catch (error) {
+    if (error.response) {
+      const { logger } = require('../utils/logger');
+      logger.error(`Media Upload Error: ${JSON.stringify(error.response.data)}`);
+    }
+    throw error;
+  }
   return res.data.id;
 }
 
@@ -151,6 +175,66 @@ function verifyWebhook(mode, token, challenge) {
   return null;
 }
 
+async function exchangeEmbeddedSignupCode(code, redirectUri) {
+  const url = `${BASE_URL}/oauth/access_token`;
+  // When using FB.login() with the JS SDK and response_type: 'code',
+  // the SDK uses an internal redirect. We must use the exact same URI here.
+  // If caller passes one, use it; otherwise fall back to FB's well-known JS SDK URI.
+  const finalRedirectUri = redirectUri || 'https://www.facebook.com/connect/login_success.html';
+  console.log('[DEBUG] exchangeEmbeddedSignupCode:', { code: code?.substring(0, 30) + '...', redirectUri, finalRedirectUri });
+  const res = await axios.get(url, {
+    params: {
+      client_id: config.meta.appId,
+      client_secret: config.meta.appSecret,
+      code,
+      redirect_uri: finalRedirectUri,
+    }
+  });
+  return res.data;
+}
+
+async function getWabasFromToken(inputToken) {
+  const url = `${BASE_URL}/debug_token`;
+  const appAccessToken = `${config.meta.appId}|${config.meta.appSecret}`;
+  const res = await axios.get(url, {
+    params: {
+      input_token: inputToken,
+      access_token: appAccessToken,
+    }
+  });
+
+  const granularScopes = res.data.data.granular_scopes || [];
+  const wabaScope = granularScopes.find(s => s.scope === 'whatsapp_business_management' || s.scope === 'whatsapp_business_messaging');
+  if (!wabaScope || !wabaScope.target_ids || wabaScope.target_ids.length === 0) {
+    return [];
+  }
+  return wabaScope.target_ids;
+}
+
+async function getWabaDetails(wabaId, accessToken) {
+  const url = `${BASE_URL}/${wabaId}`;
+  const res = await axios.get(url, {
+    params: {
+      fields: 'id,name,phone_numbers{id,display_phone_number,verified_name,quality_rating}',
+      access_token: accessToken,
+    }
+  });
+  return res.data;
+}
+
+async function registerPhoneNumber(phoneNumberId, pin, accessToken) {
+  const url = `${BASE_URL}/${phoneNumberId}/register`;
+  const res = await axios.post(url, {
+    messaging_product: 'whatsapp',
+    pin: pin
+  }, {
+    headers: {
+      Authorization: `Bearer ${accessToken}`
+    }
+  });
+  return res.data;
+}
+
 module.exports = {
   getWaba,
   getAccessToken,
@@ -165,4 +249,8 @@ module.exports = {
   syncTemplates,
   verifyWebhook,
   request,
+  exchangeEmbeddedSignupCode,
+  getWabasFromToken,
+  getWabaDetails,
+  registerPhoneNumber,
 };

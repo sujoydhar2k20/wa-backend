@@ -1,4 +1,4 @@
-const { Tag, Chat, ChatActivity } = require('../models');
+const { Tag, Chat, ChatActivity, Message } = require('../models');
 
 async function list(req, res, next) {
     try {
@@ -72,6 +72,24 @@ async function addToChat(req, res, next) {
                 performedBy: req.user._id,
                 details: { tagId: tag._id, tagName: tag.name },
             });
+
+            const sysMessage = await Message.create({
+                chatId: chat._id,
+                wabaId: chat.wabaId,
+                phoneNumberId: chat.phoneNumberId,
+                waId: chat.waId,
+                direction: 'internal',
+                type: 'system',
+                text: `[Tag] ${tag.name}`,
+                status: 'sent',
+                sentBy: req.user._id,
+            });
+
+            const { getIO } = require('../websocket/socket.server');
+            getIO().emit('message:new', {
+                chatId: chat._id,
+                message: await sysMessage.populate('sentBy', 'name phone')
+            });
         }
 
         res.json({ success: true, chat: await chat.populate('tags', 'name color') });
@@ -101,6 +119,24 @@ async function removeFromChat(req, res, next) {
                 type: 'tag_removed',
                 performedBy: req.user._id,
                 details: { tagId: tag._id, tagName: tag.name },
+            });
+
+            const sysMessage = await Message.create({
+                chatId: chat._id,
+                wabaId: chat.wabaId,
+                phoneNumberId: chat.phoneNumberId,
+                waId: chat.waId,
+                direction: 'internal',
+                type: 'system',
+                text: `[Removed Tag] ${tag.name}`,
+                status: 'sent',
+                sentBy: req.user._id,
+            });
+
+            const { getIO } = require('../websocket/socket.server');
+            getIO().emit('message:new', {
+                chatId: chat._id,
+                message: await sysMessage.populate('sentBy', 'name phone')
             });
         }
 

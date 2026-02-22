@@ -62,6 +62,72 @@ async function getTemplates(req, res, next) {
     }
 }
 
+async function embeddedSignup(req, res, next) {
+    try {
+        const { accessToken } = req.body;
+        if (!accessToken) {
+            return res.status(400).json({ success: false, message: 'Access token is required' });
+        }
+
+        // Access token comes directly from the FB JS SDK - no code exchange needed
+
+        // 2. Fetch WABA IDs associated with the token
+        const wabaIds = await whatsappService.getWabasFromToken(accessToken);
+        if (!wabaIds || wabaIds.length === 0) {
+            return res.status(404).json({ success: false, message: 'No WhatsApp Business Accounts found for this token' });
+        }
+
+        const savedWabas = [];
+
+        // 3. Process each WABA
+        for (const wabaId of wabaIds) {
+            const wabaDetails = await whatsappService.getWabaDetails(wabaId, accessToken);
+
+            // Format phone numbers
+            const phoneNumbers = (wabaDetails.phone_numbers?.data || []).map(pn => ({
+                phoneNumberId: pn.id,
+                phoneNumber: pn.display_phone_number,
+                verifiedName: pn.verified_name,
+                qualityRating: pn.quality_rating
+            }));
+
+            const wabaData = {
+                wabaId: wabaDetails.id,
+                businessName: wabaDetails.name || 'WhatsApp Business',
+                accessToken: accessToken,
+                phoneNumbers: phoneNumbers,
+                isActive: true
+            };
+
+            // 4. Update or Create WABA in DB
+            const waba = await Waba.findOneAndUpdate(
+                { wabaId: wabaDetails.id },
+                wabaData,
+                { new: true, upsert: true, runValidators: true }
+            );
+
+            // 5. Optionally Register Phone Numbers
+            for (const pn of phoneNumbers) {
+                try {
+                    // Using a dummy pin since we assume new registration.
+                    // If the number is already registered, this might throw but it's fine.
+                    const dummyPin = Math.floor(100000 + Math.random() * 900000).toString();
+                    await whatsappService.registerPhoneNumber(pn.phoneNumberId, dummyPin, accessToken);
+                } catch (registerErr) {
+                    console.error('Failed to register phone number (may already be registered):', registerErr.response?.data || registerErr.message);
+                }
+            }
+
+            savedWabas.push(waba);
+        }
+
+        res.json({ success: true, wabas: savedWabas });
+    } catch (e) {
+        console.error('Embedded Signup Error:', e.response?.data || e.message);
+        next(e);
+    }
+}
+
 module.exports = {
     list,
     create,
@@ -69,4 +135,5 @@ module.exports = {
     update,
     syncTemplates,
     getTemplates,
+    embeddedSignup,
 };

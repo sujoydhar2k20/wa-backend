@@ -28,16 +28,18 @@ async function handle(req, res, next) {
         logger.info('Incoming WhatsApp Webhook: %o', JSON.stringify(body, null, 2));
 
         if (body.object) {
-            if (
-                body.entry &&
-                body.entry[0].changes &&
-                body.entry[0].changes[0] &&
-                body.entry[0].changes[0].value.messages &&
-                body.entry[0].changes[0].value.messages[0]
-            ) {
-                // Here we would typically process the message
-                // For now, we return 200 to acknowledge receipt
-                logger.info('Received a message via webhook');
+            const changes = body.entry?.[0]?.changes?.[0];
+            const value = changes?.value;
+
+            if (value && (
+                (value.messages && value.messages.length > 0) ||
+                (value.statuses && value.statuses.length > 0)
+            )) {
+                // Process the webhook asynchronously
+                require('../services/webhook.service').processWebhook(body.entry[0])
+                    .catch(e => logger.error('Error in webhook service:', e));
+
+                logger.info('Received a valid message/status via webhook');
             }
             return res.status(200).send('EVENT_RECEIVED');
         } else {

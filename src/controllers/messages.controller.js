@@ -9,6 +9,18 @@ async function send(req, res, next) {
         const chat = await Chat.findById(chatId);
         if (!chat) return res.status(404).json({ success: false, message: 'Chat not found' });
 
+        // Enforce 24-hour customer service window rule for non-template messages
+        if (type !== 'template') {
+            const now = new Date();
+            // If sessionExpiresAt exists and we are past it, block the message
+            if (chat.sessionExpiresAt && chat.sessionExpiresAt < now) {
+                return res.status(403).json({
+                    success: false,
+                    message: 'WhatsApp 24-hour session window has expired. You must use a Template Message.',
+                });
+            }
+        }
+
         let waResult;
         if (type === 'text') {
             if (!text) return res.status(400).json({ success: false, message: 'text is required for text messages' });
@@ -18,7 +30,26 @@ async function send(req, res, next) {
             waResult = await whatsappService.sendTemplateMessage(chat.wabaId, chat.phoneNumberId, chat.waId, templateName, language || 'en', components || []);
         } else if (['image', 'video', 'audio', 'document'].includes(type)) {
             if (!mediaUrl) return res.status(400).json({ success: false, message: 'mediaUrl is required for media messages' });
-            waResult = await whatsappService.sendMediaMessage(chat.wabaId, chat.phoneNumberId, chat.waId, type, mediaUrl, caption || '');
+
+            let mediaIdToSend = mediaUrl;
+            try {
+                const axios = require('axios');
+                const response = await axios.get(mediaUrl, { responseType: 'arraybuffer' });
+                const buffer = Buffer.from(response.data, 'binary');
+                let mimeType = response.headers['content-type'] || 'application/octet-stream';
+
+                // WhatsApp explicitly requires 'audio/...' for voice notes
+                if (type === 'audio' && mimeType === 'video/mp4') {
+                    mimeType = 'audio/mp4';
+                }
+
+                mediaIdToSend = await whatsappService.uploadMedia(chat.wabaId, chat.phoneNumberId, buffer, mimeType);
+            } catch (err) {
+                const { logger } = require('../utils/logger');
+                logger.error(`Error uploading media to Meta before sending: ${err.message}`);
+            }
+
+            waResult = await whatsappService.sendMediaMessage(chat.wabaId, chat.phoneNumberId, chat.waId, type, mediaIdToSend, caption || '');
         } else {
             return res.status(400).json({ success: false, message: `Unsupported message type: ${type}` });
         }
@@ -73,7 +104,7 @@ async function search(req, res, next) {
 async function react(req, res, next) {
     try {
         const { emoji } = req.body;
-        if (!emoji) return res.status(400).json({ success: false, message: 'emoji is required' });
+        if (emoji === undefined) return res.status(400).json({ success: false, message: 'emoji is required' });
 
         const message = await Message.findById(req.params.id);
         if (!message) return res.status(404).json({ success: false, message: 'Message not found' });
@@ -81,8 +112,25 @@ async function react(req, res, next) {
         const chat = await Chat.findById(message.chatId);
         if (!chat) return res.status(404).json({ success: false, message: 'Chat not found' });
 
-        await whatsappService.reactToMessage(chat.wabaId, message.messageId, emoji);
-        res.json({ success: true });
+        await whatsappService.reactToMessage(chat.wabaId, chat.phoneNumberId, chat.waId, message.messageId, emoji);
+
+        // Update database: remove existing reaction by this user, then add new one if not unreacting
+        const userId = req.user._id.toString();
+        message.reactions = message.reactions.filter(r => r.by !== userId);
+        if (emoji) {
+            message.reactions.push({ emoji, by: userId });
+        }
+        await message.save();
+
+        // Emit socket event globally so frontend updates instantly
+        const { getIO } = require('../websocket/socket.server');
+        getIO().emit('message:reaction', {
+            chatId: chat._id,
+            messageId: message._id,
+            reactions: message.reactions
+        });
+
+        res.json({ success: true, reactions: message.reactions });
     } catch (e) {
         next(e);
     }
@@ -104,4 +152,37 @@ async function markRead(req, res, next) {
     }
 }
 
-module.exports = { send, search, react, markRead };
+async function addNote(req, res, next) {
+    try {
+        const { chatId } = req.params;
+        const { text } = req.body;
+        if (!text) return res.status(400).json({ success: false, message: 'text is required' });
+
+        const chat = await Chat.findById(chatId);
+        if (!chat) return res.status(404).json({ success: false, message: 'Chat not found' });
+
+        const message = await Message.create({
+            chatId,
+            wabaId: chat.wabaId,
+            phoneNumberId: chat.phoneNumberId,
+            waId: chat.waId,
+            direction: 'internal',
+            type: 'note',
+            text,
+            status: 'sent',
+            sentBy: req.user._id,
+        });
+
+        const { getIO } = require('../websocket/socket.server');
+        getIO().emit('message:new', {
+            chatId: chat._id,
+            message: await message.populate('sentBy', 'name phone')
+        });
+
+        res.status(201).json(message);
+    } catch (e) {
+        next(e);
+    }
+}
+
+module.exports = { send, search, react, markRead, addNote };

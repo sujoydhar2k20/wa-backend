@@ -1,0 +1,33 @@
+{
+  "message": {
+    "_id": "6997f27984564d4a1d1927a5",
+    "chatId": "6997f27984564d4a1d1927a3",
+    "wabaId": "6997f18984564d4a1d192787",
+    "phoneNumberId": "1050676708123255",
+    "messageId": "wamid.HBgMOTIzMTU0MjM5NDIxFQIAEhgUM0E3MTQxMTcxQUE5RTA0QTc1OTgA",
+    "waId": "923154239421",
+    "direction": "inbound",
+    "type": "text",
+    "text": "Hlo",
+    "status": "delivered",
+    "createdAt": "2026-02-20T05:34:49.874Z",
+    "updatedAt": "2026-02-20T05:34:49.874Z",
+    "__v": 0
+  },
+  "chat": {
+    "_id": "6997f27984564d4a1d1927a3",
+    "wabaId": "6997f18984564d4a1d192787",
+    "phoneNumberId": "1050676708123255",
+    "phoneNumber": "923154239421",
+    "waId": "923154239421",
+    "status": "open",
+    "isUnread": true,
+    "collaborators": [],
+    "tags": [],
+    "lastCustomerMessageAt": "2026-02-20T05:34:49.734Z",
+    "lastMessageAt": "2026-02-20T05:34:49.734Z",
+    "createdAt": "2026-02-20T05:34:49.736Z",
+    "updatedAt": "2026-02-20T05:34:49.736Z",
+    "__v": 0
+  }
+}

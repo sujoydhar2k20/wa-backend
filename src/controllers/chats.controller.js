@@ -3,7 +3,7 @@ const { Chat, Message, ChatActivity } = require('../models');
 async function list(req, res, next) {
     try {
         const {
-            page = 1, limit = 20, wabaId, status, assignedTo, tag, isUnread,
+            page = 1, limit = 20, wabaId, status, assignedTo, tag, isUnread, isWaiting
         } = req.query;
         const skip = (parseInt(page, 10) - 1) * parseInt(limit, 10);
         const filter = {};
@@ -12,6 +12,14 @@ async function list(req, res, next) {
         if (assignedTo) filter.assignedTo = assignedTo;
         if (tag) filter.tags = tag;
         if (isUnread !== undefined) filter.isUnread = isUnread === 'true';
+        if (isWaiting === 'true') {
+            filter.$or = [
+                { lastStaffMessageAt: null },
+                { $expr: { $gt: ['$lastCustomerMessageAt', '$lastStaffMessageAt'] } }
+            ];
+            // Usually waiting only applies to open chats
+            if (!status) filter.status = { $ne: 'closed' };
+        }
 
         const [chats, total] = await Promise.all([
             Chat.find(filter)
@@ -223,6 +231,38 @@ async function getActivities(req, res, next) {
     }
 }
 
+async function stats(req, res, next) {
+    try {
+        const { wabaId } = req.query;
+        const filter = wabaId ? { wabaId } : {};
+
+        const results = await Promise.all([
+            Chat.countDocuments(filter),
+            Chat.countDocuments({ ...filter, status: 'open' }),
+            Chat.countDocuments({ ...filter, isUnread: true }),
+            Chat.countDocuments({ ...filter, status: 'closed' }),
+            Chat.countDocuments({
+                ...filter,
+                $or: [
+                    { lastStaffMessageAt: null },
+                    { $expr: { $gt: ['$lastCustomerMessageAt', '$lastStaffMessageAt'] } }
+                ],
+                status: { $ne: 'closed' }
+            })
+        ]);
+
+        res.json({
+            all: results[0],
+            open: results[1],
+            unread: results[2],
+            closed: results[3],
+            waiting: results[4]
+        });
+    } catch (e) {
+        next(e);
+    }
+}
+
 module.exports = {
     list,
     search,
@@ -235,4 +275,5 @@ module.exports = {
     markUnread,
     getMessages,
     getActivities,
+    stats,
 };

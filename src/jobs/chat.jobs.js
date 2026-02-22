@@ -4,5 +4,5 @@ module.exports = function (agenda) {
     await chatService.checkAndCloseExpiredChats();
   });
 
-  agenda.every('0 * * * *', 'auto-close-expired-chats'); // every hour
+  agenda.every('*/5 * * * *', 'auto-close-expired-chats'); // every 5 minutes
 };

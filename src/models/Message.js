@@ -19,8 +19,8 @@ const messageSchema = new mongoose.Schema(
     phoneNumberId: { type: String },
     messageId: { type: String, index: true },
     waId: { type: String },
-    direction: { type: String, enum: ['inbound', 'outbound'], required: true },
-    type: { type: String, enum: ['text', 'image', 'video', 'audio', 'document', 'location', 'sticker', 'reaction'], default: 'text' },
+    direction: { type: String, enum: ['inbound', 'outbound', 'internal'], required: true },
+    type: { type: String, enum: ['text', 'image', 'video', 'audio', 'document', 'location', 'sticker', 'reaction', 'note', 'system'], default: 'text' },
     text: { type: String },
     mediaUrl: { type: String },
     mediaId: { type: String },
@@ -29,7 +29,10 @@ const messageSchema = new mongoose.Schema(
     fileSize: { type: Number },
     caption: { type: String },
     location: locationSchema,
-    reaction: reactionSchema,
+    reactions: [{
+      emoji: String,
+      by: String // waId or Staff ID representing who reacted
+    }],
     status: { type: String, enum: ['sent', 'delivered', 'read', 'failed'] },
     statusTimestamp: { type: Date },
     errorCode: { type: Number },

@@ -13,5 +13,6 @@ router.post('/:id/sync-templates', requireAdmin, wabasController.syncTemplates);
 router.get('/:id/templates', wabasController.getTemplates);
 router.get('/:id/webhook', webhookController.verify);
 router.post('/:id/webhook', webhookController.handle);
+router.post('/embedded-signup/register', requireAdmin, wabasController.embeddedSignup);
 
 module.exports = router;

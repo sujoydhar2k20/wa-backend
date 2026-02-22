@@ -5,6 +5,7 @@ const { authenticate } = require('../middleware/auth.middleware');
 
 router.use(authenticate);
 router.get('/', chatsController.list);
+router.get('/stats', chatsController.stats);
 router.get('/search', chatsController.search);
 router.get('/:id', chatsController.get);
 router.post('/:id/assign', chatsController.assign);
