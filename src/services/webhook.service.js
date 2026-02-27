@@ -221,7 +221,7 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
             await pushService.sendPushNotificationToUsers(userIdsToNotify, {
                 title: profileName ? `New message from ${profileName}` : `New message from ${waId}`,
                 body: messageData.text || (messageData.mediaId ? `Received a ${msg.type}` : 'Received a new message'),
-                url: `/dashboard/chats/${chat._id}`
+                url: `/chats/${chat._id}`
             });
         }
     } catch (pushErr) {
