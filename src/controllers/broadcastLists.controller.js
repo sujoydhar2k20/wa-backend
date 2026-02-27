@@ -76,12 +76,43 @@ async function importMembers(req, res, next) {
         // Skip header row if present; detect by checking if first line has a letter
         const dataLines = /[a-zA-Z]/.test(lines[0]?.split(',')[0]) ? lines.slice(1) : lines;
 
+        // Get column indices from frontend mapping (if provided)
+        const phoneColIdx = req.body.phoneColumn !== undefined ? parseInt(req.body.phoneColumn, 10) : 0;
+        const nameColIdx = req.body.nameColumn !== undefined ? parseInt(req.body.nameColumn, 10) : -1;
+
         let importedCount = 0;
         const ops = [];
         for (const line of dataLines) {
-            const phoneNumber = line.split(',')[0]?.trim().replace(/\D/g, '');
+            const cols = line.split(',');
+            if (cols.length <= phoneColIdx) continue;
+
+            const phoneNumber = cols[phoneColIdx]?.trim().replace(/\D/g, '');
             if (!phoneNumber || phoneNumber.length < 7) continue;
-            const contact = await Contact.findOne({ phoneNumber });
+
+            let contact = await Contact.findOne({ phoneNumber });
+
+            // Auto-create or update Contact if Name column was mapped
+            if (nameColIdx !== -1 && cols.length > nameColIdx) {
+                const name = cols[nameColIdx]?.trim();
+                if (name) {
+                    if (contact) {
+                        // Optionally update name if blank, but typically we keep existing 
+                        if (!contact.name || contact.name === phoneNumber) {
+                            contact.name = name;
+                            await contact.save();
+                        }
+                    } else {
+                        // Create brand new contact
+                        contact = new Contact({
+                            phoneNumber,
+                            waId: phoneNumber,
+                            name,
+                        });
+                        await contact.save();
+                    }
+                }
+            }
+
             ops.push({
                 updateOne: {
                     filter: { broadcastListId: broadcastList._id, phoneNumber },
