@@ -69,8 +69,7 @@ async function importMembers(req, res, next) {
         if (!broadcastList) return res.status(404).json({ success: false, message: 'Broadcast list not found' });
         if (!req.file) return res.status(400).json({ success: false, message: 'No file uploaded' });
 
-        const filePath = req.file.path;
-        const content = fs.readFileSync(filePath, 'utf8');
+        const content = req.file.buffer.toString('utf8');
         const lines = content.split('\n').filter(Boolean);
 
         // Skip header row if present; detect by checking if first line has a letter
@@ -133,9 +132,6 @@ async function importMembers(req, res, next) {
 
         const memberCount = await BroadcastListMember.countDocuments({ broadcastListId: broadcastList._id });
         await BroadcastList.findByIdAndUpdate(broadcastList._id, { memberCount, importedFile: req.file.originalname, source: 'import' });
-
-        // Clean up uploaded file
-        try { fs.unlinkSync(filePath); } catch (_) { }
 
         res.json({ success: true, imported: importedCount, total: memberCount });
     } catch (e) {
