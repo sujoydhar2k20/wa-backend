@@ -24,7 +24,13 @@ async function sendOtp(phone) {
 
   // Super admin does not need OTP
   if (isSuperAdmin(normalized)) {
-    return { success: true, message: 'OTP sent' };
+    return { success: true, message: 'OTP bypassed', bypassed: true };
+  }
+
+  // Environment bypass
+  if (!config.sendOtp) {
+    logger.info(`OTP bypassed for ${normalized} due to SEND_OTP env var`);
+    return { success: true, message: 'OTP bypassed', bypassed: true };
   }
 
   const otp = smsService.generateOtp();
@@ -37,8 +43,8 @@ async function verifyOtp(phone, otp, deviceType = 'web', deviceId = '') {
   const normalized = phone.replace(/\D/g, '');
   const superAdmin = isSuperAdmin(normalized);
 
-  // Super admin bypasses OTP verification
-  if (!superAdmin) {
+  // Super admin and disabled OTP bypasses OTP verification
+  if (!superAdmin && config.sendOtp) {
     if (!smsService.verifyOtp(normalized, otp)) throw Object.assign(new Error('Invalid or expired OTP'), { statusCode: 400 });
   }
 
@@ -74,7 +80,7 @@ async function verifyOtp(phone, otp, deviceType = 'web', deviceId = '') {
     user: { id: user._id, phone: user.phone, role: user.role, name: user.name, email: user.email },
     accessToken,
     refreshToken,
-    expiresIn: 3600,
+    expiresIn: 365 * 24 * 3600,
   };
 }
 
@@ -87,7 +93,7 @@ async function refresh(refreshToken) {
   const { accessToken, refreshToken: newRefresh } = generateTokens(user._id);
   session.refreshToken = newRefresh;
   await session.save();
-  return { accessToken, refreshToken: newRefresh, expiresIn: 3600 };
+  return { accessToken, refreshToken: newRefresh, expiresIn: 365 * 24 * 3600 };
 }
 
 async function logout(userId, refreshToken) {

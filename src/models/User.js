@@ -10,6 +10,8 @@ const userSchema = new mongoose.Schema(
     lastLogin: { type: Date },
     loginExpiry: { type: Date },
     refreshToken: { type: String },
+    assignedWabaId: { type: mongoose.Schema.Types.ObjectId, ref: 'Waba', default: null, index: true },
+    pushSubscriptions: { type: Array, default: [] },
   },
   { timestamps: true }
 );

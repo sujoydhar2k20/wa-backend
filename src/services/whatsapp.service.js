@@ -235,6 +235,24 @@ async function registerPhoneNumber(phoneNumberId, pin, accessToken) {
   return res.data;
 }
 
+/**
+ * Exchange a short-lived FB JS SDK token for a long-lived user token (~60 days).
+ * Always call this before storing any token from embedded signup.
+ */
+async function getLongLivedToken(shortLivedToken) {
+  const url = `https://graph.facebook.com/oauth/access_token`;
+  const res = await axios.get(url, {
+    params: {
+      grant_type: 'fb_exchange_token',
+      client_id: config.meta.appId,
+      client_secret: config.meta.appSecret,
+      fb_exchange_token: shortLivedToken,
+    }
+  });
+  // Returns { access_token, token_type, expires_in }
+  return res.data.access_token;
+}
+
 module.exports = {
   getWaba,
   getAccessToken,
@@ -250,6 +268,7 @@ module.exports = {
   verifyWebhook,
   request,
   exchangeEmbeddedSignupCode,
+  getLongLivedToken,
   getWabasFromToken,
   getWabaDetails,
   registerPhoneNumber,

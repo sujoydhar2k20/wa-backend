@@ -15,5 +15,7 @@ router.use('/products', require('./products.routes'));
 router.use('/notes', require('./notes.routes'));
 router.use('/upload', require('./upload.routes'));
 router.use('/webhooks/whatsapp', require('./webhook.routes'));
+router.use('/push', require('./push.routes'));
+router.use('/proxy', require('./proxy.routes'));
 
 module.exports = router;

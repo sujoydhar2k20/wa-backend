@@ -72,21 +72,55 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
 
     // Find or create chat
     let chat = await Chat.findOne({ wabaId: waba._id, waId });
+    const isNewChat = !chat;
 
     if (!chat) {
         chat = new Chat({
             wabaId: waba._id,
             phoneNumberId,
-            phoneNumber: waId, // Assuming waId is the phone number
+            phoneNumber: waId,
             waId,
             contactId: contact._id,
             status: 'open',
             isUnread: true,
             lastCustomerMessageAt: new Date(),
         });
-        // Try to find if user exists? Maybe later.
     } else if (!chat.contactId) {
         chat.contactId = contact._id;
+    }
+
+    // Auto-assign new chat to the least-loaded active staff member on this WABA (round-robin by open chat count)
+    if (isNewChat && !chat.assignedTo) {
+        try {
+            const staffMembers = await User.find({
+                isActive: true,
+                role: 'staff',
+                assignedWabaId: waba._id,
+            }).select('_id').lean();
+
+            if (staffMembers.length > 0) {
+                // Count open chats per staff member, pick the one with fewest
+                const chatCounts = await Promise.all(
+                    staffMembers.map(async (staff) => {
+                        const count = await Chat.countDocuments({
+                            assignedTo: staff._id,
+                            status: { $ne: 'closed' },
+                        });
+                        return { staffId: staff._id, count };
+                    })
+                );
+
+                // Sort by count ascending, pick the least loaded staff
+                chatCounts.sort((a, b) => a.count - b.count);
+                const leastLoaded = chatCounts[0];
+                chat.assignedTo = leastLoaded.staffId;
+                logger.info(
+                    `Auto-assigned new chat (waId: ${waId}) to staff ${leastLoaded.staffId} (open chats: ${leastLoaded.count})`
+                );
+            }
+        } catch (err) {
+            logger.error('Error auto-assigning staff to chat:', err);
+        }
     }
 
     // Update chat metadata
@@ -165,6 +199,34 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
     // Add other types as needed
 
     const message = await Message.create(messageData);
+
+    // Send push notification
+    try {
+        const pushService = require('./push.service');
+        let userIdsToNotify = [];
+
+        if (chat.assignedTo) {
+            // Notify the assigned staff
+            userIdsToNotify.push(chat.assignedTo.toString());
+        } else {
+            // Notify superadmins/admins who can see unassigned chats
+            const admins = await User.find({
+                isActive: true,
+                role: { $in: ['admin', 'superadmin'] }
+            }).select('_id').lean();
+            userIdsToNotify = admins.map(u => u._id.toString());
+        }
+
+        if (userIdsToNotify.length > 0) {
+            await pushService.sendPushNotificationToUsers(userIdsToNotify, {
+                title: profileName ? `New message from ${profileName}` : `New message from ${waId}`,
+                body: messageData.text || (messageData.mediaId ? `Received a ${msg.type}` : 'Received a new message'),
+                url: `/dashboard/chats/${chat._id}`
+            });
+        }
+    } catch (pushErr) {
+        logger.error(`Error triggering push notification: ${pushErr.message}`);
+    }
 
     // Emit socket event
     try {
@@ -271,15 +333,28 @@ async function processMediaAsync(chat, messageData, type) {
             logger.error(`Cloudinary upload failed for ${mediaId}`, uploadError);
         }
 
-        // Update the message and also save locally for redundancy/audit if needed
-        const mediaDoc = await mediaService.saveFile(buffer, mimeType, {
-            // messageId cannot be passed here because Media model expects an ObjectId,
-            // but messageData.messageId is a string WAMID and the Message isn't created yet.
+        if (!uploadedUrl) {
+            logger.error(`Failed to get Cloudinary URL for media ${mediaId}, dropping media`);
+            return null;
+        }
+
+        const expiresAt = new Date();
+        expiresAt.setFullYear(expiresAt.getFullYear() + 3);
+
+        const mediaType = ['image', 'video', 'audio'].includes(type) ? type : 'document';
+
+        // Save media metadata using the Cloudinary URL
+        const mediaDoc = await mediaService.saveMediaMetadata({
             mediaId: mediaId,
-            fileName: messageData.fileName
+            url: uploadedUrl,
+            type: mediaType,
+            mimeType: mimeType,
+            fileName: messageData.fileName,
+            fileSize: buffer.length,
+            expiresAt: expiresAt
         });
 
-        const finalUrl = uploadedUrl || mediaDoc.url;
+        const finalUrl = uploadedUrl;
         logger.info(`Successfully processed and uploaded inbound media ${type} for message ${messageData.messageId}`);
 
         return finalUrl;

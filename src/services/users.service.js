@@ -1,37 +1,45 @@
 const User = require('../models/User');
 const Session = require('../models/Session');
 
-async function list({ page, limit, role }) {
-  const filter = role ? { role } : {};
+async function list({ page, limit, role, wabaId, isActive }) {
+  const filter = {};
+  if (role) filter.role = role;
+  if (wabaId) filter.assignedWabaId = wabaId;
+  if (isActive !== undefined) filter.isActive = isActive === 'true' || isActive === true;
   const [users, total] = await Promise.all([
-    User.find(filter).select('-refreshToken').skip((page - 1) * limit).limit(limit).lean(),
+    User.find(filter)
+      .select('-refreshToken')
+      .populate('assignedWabaId', 'wabaId businessName phoneNumbers')
+      .skip((page - 1) * limit)
+      .limit(limit)
+      .lean(),
     User.countDocuments(filter),
   ]);
   return { users, total, page, limit };
 }
 
 async function create(data) {
-  const { phone, role, name, email } = data;
+  const { phone, role, name, email, assignedWabaId } = data;
   const existing = await User.findOne({ phone });
   if (existing) throw Object.assign(new Error('Phone already registered'), { statusCode: 400 });
-  const user = await User.create({ phone, role: role || 'staff', name, email });
+  const user = await User.create({ phone, role: role || 'staff', name, email, assignedWabaId: assignedWabaId || null });
   return user.toObject();
 }
 
 async function get(id, currentUser) {
-  const user = await User.findById(id).select('-refreshToken');
+  const user = await User.findById(id).select('-refreshToken').populate('assignedWabaId', 'wabaId businessName phoneNumbers');
   if (!user) throw Object.assign(new Error('User not found'), { statusCode: 404 });
-  if (currentUser.role !== 'admin' && currentUser._id.toString() !== id) throw Object.assign(new Error('Forbidden'), { statusCode: 403 });
+  if (!['admin', 'superadmin'].includes(currentUser.role) && currentUser._id.toString() !== id) throw Object.assign(new Error('Forbidden'), { statusCode: 403 });
   return user;
 }
 
 async function update(id, data, currentUser) {
   const user = await User.findById(id);
   if (!user) throw Object.assign(new Error('User not found'), { statusCode: 404 });
-  if (currentUser.role !== 'admin' && currentUser._id.toString() !== id) throw Object.assign(new Error('Forbidden'), { statusCode: 403 });
+  if (!['admin', 'superadmin'].includes(currentUser.role) && currentUser._id.toString() !== id) throw Object.assign(new Error('Forbidden'), { statusCode: 403 });
   const allowed = ['name', 'email'];
-  if (currentUser.role === 'admin') allowed.push('role', 'isActive');
-  allowed.forEach((k) => { if (data[k] !== undefined) user[k] = data[k]; });
+  if (['admin', 'superadmin'].includes(currentUser.role)) allowed.push('role', 'isActive', 'assignedWabaId');
+  allowed.forEach((k) => { if (data[k] !== undefined) user[k] = data[k] === '' ? null : data[k]; });
   await user.save();
   return user.toObject();
 }

@@ -32,22 +32,48 @@ async function send(req, res, next) {
             if (!mediaUrl) return res.status(400).json({ success: false, message: 'mediaUrl is required for media messages' });
 
             let mediaIdToSend = mediaUrl;
-            try {
-                const axios = require('axios');
-                const response = await axios.get(mediaUrl, { responseType: 'arraybuffer' });
-                const buffer = Buffer.from(response.data, 'binary');
-                let mimeType = response.headers['content-type'] || 'application/octet-stream';
 
-                // WhatsApp explicitly requires 'audio/...' for voice notes
-                if (type === 'audio' && mimeType === 'video/mp4') {
-                    mimeType = 'audio/mp4';
+            // WhatsApp only supports JPEG/PNG as image type messages.
+            // WebP and other formats MUST be converted to JPEG before uploading to Meta.
+            // So we download the file, convert if needed, then re-upload to get a Meta media ID.
+            if (mediaUrl.startsWith('http')) {
+                try {
+                    const axios = require('axios');
+                    const response = await axios.get(mediaUrl, {
+                        responseType: 'arraybuffer',
+                        timeout: 30000,
+                        headers: {
+                            'User-Agent': 'Mozilla/5.0 (compatible; WhatsApp-Bot/1.0)',
+                        }
+                    });
+                    let buffer = Buffer.from(response.data, 'binary');
+                    let mimeType = response.headers['content-type'] || 'image/jpeg';
+                    mimeType = mimeType.split(';')[0].trim();
+
+                    // WhatsApp explicitly requires 'audio/mp4' for voice notes
+                    if (type === 'audio' && mimeType === 'video/mp4') {
+                        mimeType = 'audio/mp4';
+                    }
+
+                    // Convert WebP (and other unsupported image formats) to JPEG
+                    // WhatsApp only accepts image/jpeg and image/png for image messages
+                    if (type === 'image' && !['image/jpeg', 'image/png'].includes(mimeType)) {
+                        const sharp = require('sharp');
+                        buffer = await sharp(buffer).jpeg({ quality: 90 }).toBuffer();
+                        mimeType = 'image/jpeg';
+                    }
+
+                    mediaIdToSend = await whatsappService.uploadMedia(chat.wabaId, chat.phoneNumberId, buffer, mimeType);
+                } catch (err) {
+                    const { logger } = require('../utils/logger');
+                    logger.error(`Error processing/uploading media to Meta: ${err.message}`);
+                    return res.status(500).json({
+                        success: false,
+                        message: `Failed to upload media to WhatsApp: ${err.message}`
+                    });
                 }
-
-                mediaIdToSend = await whatsappService.uploadMedia(chat.wabaId, chat.phoneNumberId, buffer, mimeType);
-            } catch (err) {
-                const { logger } = require('../utils/logger');
-                logger.error(`Error uploading media to Meta before sending: ${err.message}`);
             }
+
 
             waResult = await whatsappService.sendMediaMessage(chat.wabaId, chat.phoneNumberId, chat.waId, type, mediaIdToSend, caption || '');
         } else {
@@ -72,6 +98,16 @@ async function send(req, res, next) {
 
         // Update chat last message timestamp
         await Chat.findByIdAndUpdate(chatId, { lastMessageAt: new Date(), lastStaffMessageAt: new Date() });
+
+        // Populate sentBy so the response includes sender name for the chat UI
+        await message.populate('sentBy', 'name phone');
+
+        // Emit socket event globally so frontend updates instantly for other clients
+        const { getIO } = require('../websocket/socket.server');
+        getIO().emit('message:new', {
+            chatId: chat._id,
+            message: message
+        });
 
         res.status(201).json(message);
     } catch (e) {

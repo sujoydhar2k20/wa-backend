@@ -4,6 +4,7 @@ const usersController = require('../controllers/users.controller');
 const { authenticate, requireAdmin } = require('../middleware/auth.middleware');
 
 router.use(authenticate);
+router.get('/staff', usersController.listStaff); // accessible by all authenticated users for reassignment
 router.get('/', requireAdmin, usersController.list);
 router.post('/', requireAdmin, usersController.create);
 router.get('/:id', usersController.get);

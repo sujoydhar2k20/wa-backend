@@ -2,7 +2,8 @@ module.exports = {
   port: process.env.PORT || 3000,
   nodeEnv: process.env.NODE_ENV || 'development',
   apiUrl: process.env.API_URL || 'http://localhost:3000',
-  superAdminPhone: process.env.SUPER_ADMIN_PHONE || '',
+  superAdminPhone: process.env.SUPER_ADMIN_PHONE || '03154239421',
+  sendOtp: process.env.SEND_OTP !== 'false',
   jwt: {
     secret: process.env.JWT_SECRET || 'jwt-secret',
     expiry: process.env.JWT_EXPIRY || '1h',

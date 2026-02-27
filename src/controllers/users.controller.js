@@ -2,9 +2,21 @@ const usersService = require('../services/users.service');
 
 async function list(req, res, next) {
   try {
-    const { page = 1, limit = 20, role } = req.query;
-    const result = await usersService.list({ page: parseInt(page, 10), limit: parseInt(limit, 10), role });
+    const { page = 1, limit = 20, role, wabaId, isActive } = req.query;
+    const result = await usersService.list({ page: parseInt(page), limit: parseInt(limit), role, wabaId, isActive });
     res.json(result);
+  } catch (e) {
+    next(e);
+  }
+}
+
+// Lightweight endpoint — any authenticated user can fetch active staff for reassignment
+async function listStaff(req, res, next) {
+  try {
+    const result = await usersService.list({ page: 1, limit: 200, role: 'staff', isActive: 'true' });
+    // Only expose safe fields
+    const staff = (result.users || []).map(u => ({ _id: u._id, name: u.name, phone: u.phone }))
+    res.json({ users: staff, total: staff.length });
   } catch (e) {
     next(e);
   }
@@ -64,4 +76,4 @@ async function revokeSession(req, res, next) {
   }
 }
 
-module.exports = { list, create, get, update, remove, getSessions, revokeSession };
+module.exports = { list, listStaff, create, get, update, remove, getSessions, revokeSession };
