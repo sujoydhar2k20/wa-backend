@@ -83,7 +83,7 @@ async function send(req, res, next) {
             for (const member of members) {
                 try {
                     const template = broadcast.templateId;
-                    await whatsappService.sendTemplateMessage(
+                    const result = await whatsappService.sendTemplateMessage(
                         broadcast.wabaId,
                         broadcast.phoneNumberId,
                         member.phoneNumber,
@@ -91,9 +91,32 @@ async function send(req, res, next) {
                         template.language,
                         req.body.components || []
                     );
+
+                    let messageId = null;
+                    if (result && result.messages && result.messages.length > 0) {
+                        messageId = result.messages[0].id;
+                    }
+
+                    await BroadcastMessage.create({
+                        broadcastId: broadcast._id,
+                        contactId: member.contactId,
+                        phoneNumber: member.phoneNumber,
+                        messageId: messageId,
+                        status: 'sent',
+                    });
+
                     await BroadcastListMember.findByIdAndUpdate(member._id, { status: 'sent' });
                     sentCount++;
-                } catch (_err) {
+                } catch (err) {
+                    await BroadcastMessage.create({
+                        broadcastId: broadcast._id,
+                        contactId: member.contactId,
+                        phoneNumber: member.phoneNumber,
+                        status: 'failed',
+                        errorCode: err.response?.data?.error?.code || 500,
+                        errorMessage: err.response?.data?.error?.message || err.message,
+                    });
+
                     await BroadcastListMember.findByIdAndUpdate(member._id, { status: 'failed' });
                     failedCount++;
                 }
@@ -136,4 +159,25 @@ async function test(req, res, next) {
     }
 }
 
-module.exports = { list, create, get, getStats, send, test };
+async function getMessages(req, res, next) {
+    try {
+        const { page = 1, limit = 50 } = req.query;
+        const skip = (parseInt(page, 10) - 1) * parseInt(limit, 10);
+        const filter = { broadcastId: req.params.id };
+
+        const [messages, total] = await Promise.all([
+            BroadcastMessage.find(filter)
+                .sort({ createdAt: -1 })
+                .skip(skip)
+                .limit(parseInt(limit, 10))
+                .populate('contactId', 'name nameOnWhatsApp profilePicture'),
+            BroadcastMessage.countDocuments(filter),
+        ]);
+
+        res.json({ data: messages, total, page: parseInt(page, 10), limit: parseInt(limit, 10) });
+    } catch (e) {
+        next(e);
+    }
+}
+
+module.exports = { list, create, get, getStats, send, test, getMessages };

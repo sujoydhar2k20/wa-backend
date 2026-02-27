@@ -281,7 +281,44 @@ async function handleStatusUpdate(statusObj) {
                 status: status
             });
         } else {
-            logger.warn(`No message found in DB for Meta ID: ${messageId}`);
+            const { BroadcastMessage, Broadcast, BroadcastListMember } = require('../models');
+            const broadcastMessage = await BroadcastMessage.findOneAndUpdate(
+                { messageId },
+                { $set: { status: status } } // 'sent', 'delivered', 'read', 'failed'
+            );
+
+            if (broadcastMessage) {
+                logger.info(`Successfully updated broadcast message ${broadcastMessage._id} to ${status}`);
+
+                // Find Broadcast to get the list ID
+                const broadcast = await Broadcast.findById(broadcastMessage.broadcastId).select('broadcastListId');
+                if (broadcast) {
+                    await BroadcastListMember.findOneAndUpdate(
+                        { broadcastListId: broadcast.broadcastListId, phoneNumber: broadcastMessage.phoneNumber },
+                        { $set: { status: status } }
+                    );
+                }
+
+                // Re-aggregate and update stats safely
+                if (['delivered', 'read', 'failed', 'sent'].includes(status)) {
+                    const statsObj = await BroadcastMessage.aggregate([
+                        { $match: { broadcastId: broadcastMessage.broadcastId } },
+                        { $group: { _id: "$status", count: { $sum: 1 } } }
+                    ]);
+                    const statsUpdate = {};
+                    statsObj.forEach(s => {
+                        if (['sent', 'delivered', 'read', 'failed'].includes(s._id)) {
+                            statsUpdate[`statistics.${s._id}`] = s.count;
+                        }
+                    });
+
+                    if (Object.keys(statsUpdate).length > 0) {
+                        await Broadcast.findByIdAndUpdate(broadcastMessage.broadcastId, { $set: statsUpdate });
+                    }
+                }
+            } else {
+                logger.warn(`No message found in DB for Meta ID: ${messageId}`);
+            }
         }
     } catch (e) {
         logger.error('Error handling status update:', e.message);
