@@ -1,5 +1,6 @@
 const { Broadcast, BroadcastList, BroadcastListMember, BroadcastMessage, Template } = require('../models');
 const whatsappService = require('../services/whatsapp.service');
+const { getIO } = require('../websocket/socket.server');
 
 async function list(req, res, next) {
     try {
@@ -121,12 +122,19 @@ async function send(req, res, next) {
                     failedCount++;
                 }
             }
-            await Broadcast.findByIdAndUpdate(broadcast._id, {
+            const updatedBroadcast = await Broadcast.findByIdAndUpdate(broadcast._id, {
                 status: 'completed',
                 completedAt: new Date(),
                 'statistics.sent': sentCount,
                 'statistics.failed': failedCount,
-            });
+            }, { new: true });
+
+            try {
+                const io = getIO();
+                io.emit('broadcast:update', updatedBroadcast);
+            } catch (e) {
+                console.warn('Socket emit failed for broadcast completion:', e.message);
+            }
         });
 
         res.json({ success: true, message: 'Broadcast sending initiated', total: members.length });

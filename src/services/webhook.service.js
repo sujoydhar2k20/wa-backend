@@ -313,8 +313,26 @@ async function handleStatusUpdate(statusObj) {
                     });
 
                     if (Object.keys(statsUpdate).length > 0) {
-                        await Broadcast.findByIdAndUpdate(broadcastMessage.broadcastId, { $set: statsUpdate });
+                        const updatedBroadcast = await Broadcast.findByIdAndUpdate(broadcastMessage.broadcastId, { $set: statsUpdate }, { new: true });
+
+                        try {
+                            const io = getIO();
+                            io.emit('broadcast:update', updatedBroadcast);
+                        } catch (emitError) {
+                            logger.warn('Socket emit failed for broadcast update:', emitError.message);
+                        }
                     }
+                }
+
+                try {
+                    const io = getIO();
+                    io.emit('broadcast:message:status', {
+                        broadcastId: broadcastMessage.broadcastId,
+                        messageId: broadcastMessage._id,
+                        status: status
+                    });
+                } catch (emitError) {
+                    logger.warn('Socket emit failed for broadcast message status:', emitError.message);
                 }
             } else {
                 logger.warn(`No message found in DB for Meta ID: ${messageId}`);
