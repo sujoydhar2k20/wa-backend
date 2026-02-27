@@ -22,6 +22,14 @@ async function sendOtp(phone) {
   const normalized = phone.replace(/\D/g, '');
   if (!normalized) throw Object.assign(new Error('Invalid phone'), { statusCode: 400 });
 
+  const superAdmin = isSuperAdmin(normalized);
+  if (!superAdmin) {
+    const isIndianNumber = normalized.length === 10 || (normalized.length === 12 && normalized.startsWith('91'));
+    if (!isIndianNumber) {
+      throw Object.assign(new Error('OTP can only be sent to Indian numbers'), { statusCode: 400 });
+    }
+  }
+
   // Super admin does not need OTP
   if (isSuperAdmin(normalized)) {
     return { success: true, message: 'OTP bypassed', bypassed: true };
@@ -42,6 +50,13 @@ async function sendOtp(phone) {
 async function verifyOtp(phone, otp, deviceType = 'web', deviceId = '') {
   const normalized = phone.replace(/\D/g, '');
   const superAdmin = isSuperAdmin(normalized);
+
+  if (!superAdmin) {
+    const isIndianNumber = normalized.length === 10 || (normalized.length === 12 && normalized.startsWith('91'));
+    if (!isIndianNumber) {
+      throw Object.assign(new Error('Only Indian numbers are allowed'), { statusCode: 400 });
+    }
+  }
 
   // Super admin and disabled OTP bypasses OTP verification
   if (!superAdmin && config.sendOtp) {

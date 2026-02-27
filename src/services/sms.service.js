@@ -23,8 +23,17 @@ function verifyOtp(phone, otp) {
 }
 
 async function sendOtp(phone, otp) {
+  let targetPhone = phone;
+  if (targetPhone.length === 10) {
+    targetPhone = `+91${targetPhone}`;
+  } else if (targetPhone.startsWith('91') && targetPhone.length === 12) {
+    targetPhone = `+${targetPhone}`;
+  } else if (!targetPhone.startsWith('+')) {
+    targetPhone = `+${targetPhone}`;
+  }
+
   const text = `Your OTP is ${otp}`;
-  const url = `https://bhashsms.com/api/sendmsg.php?user=${BHS_USER}&pass=${BHS_PASS}&sender=${BHS_SENDER}&phone=${phone}&text=${encodeURIComponent(text)}&priority=dnd&stype=normal`;
+  const url = `https://bhashsms.com/api/sendmsg.php?user=${BHS_USER}&pass=${BHS_PASS}&sender=${BHS_SENDER}&phone=${encodeURIComponent(targetPhone)}&text=${encodeURIComponent(text)}&priority=dnd&stype=normal`;
   try {
     await axios.get(url);
   } catch (err) {
