@@ -3,7 +3,7 @@ const { logger } = require('../utils/logger');
 
 const BHS_USER = process.env.BHASHSMS_USER || '7278665321';
 const BHS_PASS = process.env.BHASHSMS_PASS || 'a485bc9';
-const BHS_SENDER = process.env.BHASHSMS_SENDER || 'BJSTXT';
+const BHS_SENDER = process.env.BHASHSMS_SENDER || 'BJSBIL';
 
 const otpStore = new Map();
 
@@ -23,15 +23,20 @@ function verifyOtp(phone, otp) {
 }
 
 async function sendOtp(phone, otp) {
-  let targetPhone = phone;
-  if (targetPhone.length === 10) {
-    targetPhone = `91${targetPhone}`;
-  } else if (targetPhone.startsWith('+')) {
-    targetPhone = targetPhone.substring(1);
-  }
+  let targetPhone = phone.replace('+91', '').replace('91', '');
 
-  const text = `Your OTP is ${otp}`;
-  const url = `https://bhashsms.com/api/sendmsg.php?user=${BHS_USER}&pass=${BHS_PASS}&sender=${BHS_SENDER}&phone=${encodeURIComponent(targetPhone)}&text=${encodeURIComponent(text)}&priority=dnd&stype=normal`;
+  const text = `Use this OTP ${otp} to log in to your Biswakarma Jewellery Shilpalaya account and continue shopping`;
+  const urlParams = new URLSearchParams({
+    user: BHS_USER,
+    pass: BHS_PASS,
+    sender: "BJSBIL",
+    phone: targetPhone,
+    text: text,
+    priority: 'ndnd',
+    stype: 'normal'
+  });
+
+  const url = `https://bhashsms.com/api/sendmsg.php?${urlParams.toString()}`;
   try {
     await axios.get(url);
   } catch (err) {
