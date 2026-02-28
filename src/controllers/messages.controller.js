@@ -89,7 +89,7 @@ async function send(req, res, next) {
             waId: chat.waId,
             direction: 'outbound',
             type,
-            text: type === 'text' ? text : undefined,
+            text: type === 'text' ? text : type === 'template' ? `[template message] ${templateName}` : undefined,
             mediaUrl: mediaUrl || undefined,
             caption: caption || undefined,
             status: 'sent',
