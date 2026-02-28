@@ -67,7 +67,7 @@ async function send(req, res, next) {
 
         const members = await BroadcastListMember.find({
             broadcastListId: broadcast.broadcastListId,
-            status: 'pending',
+            status: { $ne: 'opted_out' } // Send to everyone except those who opted out
         });
 
         // Mark as sending first
