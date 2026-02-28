@@ -20,7 +20,7 @@ const messageSchema = new mongoose.Schema(
     messageId: { type: String, index: true },
     waId: { type: String },
     direction: { type: String, enum: ['inbound', 'outbound', 'internal'], required: true },
-    type: { type: String, enum: ['text', 'image', 'video', 'audio', 'document', 'location', 'sticker', 'reaction', 'note', 'system'], default: 'text' },
+    type: { type: String, enum: ['text', 'image', 'video', 'audio', 'document', 'location', 'sticker', 'reaction', 'note', 'system', 'template'], default: 'text' },
     text: { type: String },
     mediaUrl: { type: String },
     mediaId: { type: String },
