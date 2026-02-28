@@ -65,10 +65,16 @@ async function send(req, res, next) {
             return res.status(400).json({ success: false, message: 'Broadcast cannot be sent in its current status' });
         }
 
-        const members = await BroadcastListMember.find({
+        const filter = {
             broadcastListId: broadcast.broadcastListId,
             status: { $ne: 'opted_out' } // Send to everyone except those who opted out
-        });
+        };
+
+        if (req.body.targetPhoneNumbers && Array.isArray(req.body.targetPhoneNumbers) && req.body.targetPhoneNumbers.length > 0) {
+            filter.phoneNumber = { $in: req.body.targetPhoneNumbers };
+        }
+
+        const members = await BroadcastListMember.find(filter);
 
         // Mark as sending first
         await Broadcast.findByIdAndUpdate(broadcast._id, {
