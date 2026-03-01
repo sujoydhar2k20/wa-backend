@@ -38,6 +38,7 @@ const messageSchema = new mongoose.Schema(
     errorCode: { type: Number },
     errorMessage: { type: String },
     sentBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    replyToMessageId: { type: mongoose.Schema.Types.ObjectId, ref: 'Message' },
   },
   { timestamps: true }
 );

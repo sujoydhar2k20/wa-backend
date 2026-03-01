@@ -3,7 +3,7 @@ const whatsappService = require('../services/whatsapp.service');
 
 async function send(req, res, next) {
     try {
-        const { chatId, type = 'text', text, mediaUrl, caption, templateName, language, components } = req.body;
+        const { chatId, type = 'text', text, mediaUrl, caption, templateName, language, components, replyToMessageId } = req.body;
         if (!chatId) return res.status(400).json({ success: false, message: 'chatId is required' });
 
         const chat = await Chat.findById(chatId);
@@ -21,10 +21,18 @@ async function send(req, res, next) {
             }
         }
 
+        let metaMessageIdToReply = null;
+        if (replyToMessageId) {
+            const parentMsg = await Message.findById(replyToMessageId);
+            if (parentMsg && parentMsg.messageId) {
+                metaMessageIdToReply = parentMsg.messageId;
+            }
+        }
+
         let waResult;
         if (type === 'text') {
             if (!text) return res.status(400).json({ success: false, message: 'text is required for text messages' });
-            waResult = await whatsappService.sendTextMessage(chat.wabaId, chat.phoneNumberId, chat.waId, text);
+            waResult = await whatsappService.sendTextMessage(chat.wabaId, chat.phoneNumberId, chat.waId, text, metaMessageIdToReply);
         } else if (type === 'template') {
             if (!templateName) return res.status(400).json({ success: false, message: 'templateName is required for template messages' });
             waResult = await whatsappService.sendTemplateMessage(chat.wabaId, chat.phoneNumberId, chat.waId, templateName, language || 'en', components || []);
@@ -75,7 +83,7 @@ async function send(req, res, next) {
             }
 
 
-            waResult = await whatsappService.sendMediaMessage(chat.wabaId, chat.phoneNumberId, chat.waId, type, mediaIdToSend, caption || '');
+            waResult = await whatsappService.sendMediaMessage(chat.wabaId, chat.phoneNumberId, chat.waId, type, mediaIdToSend, caption || '', metaMessageIdToReply);
         } else {
             return res.status(400).json({ success: false, message: `Unsupported message type: ${type}` });
         }
@@ -94,6 +102,7 @@ async function send(req, res, next) {
             caption: caption || undefined,
             status: 'sent',
             sentBy: req.user._id,
+            replyToMessageId: replyToMessageId || undefined,
         });
 
         // Update chat last message timestamp

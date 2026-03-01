@@ -36,7 +36,7 @@ async function request(wabaId, method, path, data = null) {
   return res.data;
 }
 
-async function sendTextMessage(wabaId, phoneNumberId, to, text) {
+async function sendTextMessage(wabaId, phoneNumberId, to, text, replyToMessageId = null) {
   const path = `/${phoneNumberId}/messages`;
   const body = {
     messaging_product: 'whatsapp',
@@ -45,10 +45,13 @@ async function sendTextMessage(wabaId, phoneNumberId, to, text) {
     type: 'text',
     text: { body: text },
   };
+  if (replyToMessageId) {
+    body.context = { message_id: replyToMessageId };
+  }
   return request(wabaId, 'POST', path, body);
 }
 
-async function sendMediaMessage(wabaId, phoneNumberId, to, type, urlOrId, caption = '') {
+async function sendMediaMessage(wabaId, phoneNumberId, to, type, urlOrId, caption = '', replyToMessageId = null) {
   const path = `/${phoneNumberId}/messages`;
   const key = type === 'document' ? 'document' : type;
   const isId = !urlOrId.startsWith('http');
@@ -62,6 +65,9 @@ async function sendMediaMessage(wabaId, phoneNumberId, to, type, urlOrId, captio
     type,
     [key]: payload,
   };
+  if (replyToMessageId) {
+    body.context = { message_id: replyToMessageId };
+  }
   return request(wabaId, 'POST', path, body);
 }
 
