@@ -420,7 +420,50 @@ async function processMediaAsync(chat, messageData, type) {
     }
 }
 
+async function processTemplateStatusWebhook(entry) {
+    try {
+        const changes = entry.changes[0];
+        const value = changes.value;
+        const wabaIdMeta = entry.id; // The Meta WABA ID
+
+        const waba = await Waba.findOne({ wabaId: wabaIdMeta });
+        if (!waba) {
+            logger.warn(`WABA not found for ID: ${wabaIdMeta} during template status update`);
+            return;
+        }
+
+        const templateName = value.message_template_name;
+        const language = value.message_template_language;
+        let eventStatus = value.event; // e.g., 'APPROVED', 'REJECTED', 'PENDING'
+
+        // Sometimes the event might be different casing or format
+        if (eventStatus) eventStatus = eventStatus.toUpperCase();
+
+        const template = await require('../models/Template').findOneAndUpdate(
+            { wabaId: waba._id, name: templateName, language: language },
+            { $set: { status: eventStatus, templateId: value.message_template_id } },
+            { new: true }
+        );
+
+        if (template) {
+            logger.info(`Updated template ${templateName} status to ${eventStatus}`);
+            // Optionally emit a socket event to update the frontend Template page
+            try {
+                const io = getIO();
+                io.emit('template:status:update', template);
+            } catch (emitError) {
+                logger.warn('Socket emit failed for template status update:', emitError.message);
+            }
+        } else {
+            logger.info(`Template ${templateName} (${language}) not found in DB to update status. Sync might be needed.`);
+        }
+    } catch (error) {
+        logger.error('Error processing template status webhook:', error);
+    }
+}
+
 module.exports = {
     processWebhook,
-    handleStatusUpdate
+    handleStatusUpdate,
+    processTemplateStatusWebhook
 };

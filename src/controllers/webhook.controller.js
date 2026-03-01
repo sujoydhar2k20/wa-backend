@@ -30,6 +30,14 @@ async function handle(req, res, next) {
         if (body.object) {
             const changes = body.entry?.[0]?.changes?.[0];
             const value = changes?.value;
+            const field = changes?.field;
+
+            if (field === 'message_template_status_update' && value) {
+                logger.info(`Template status update received: ${value.message_template_name} is now ${value.event}`);
+                require('../services/webhook.service').processTemplateStatusWebhook(body.entry[0])
+                    .catch(e => logger.error('Error in template status webhook service:', e));
+                return res.status(200).send('EVENT_RECEIVED');
+            }
 
             if (value && (
                 (value.messages && value.messages.length > 0) ||

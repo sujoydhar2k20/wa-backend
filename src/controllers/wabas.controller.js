@@ -62,6 +62,37 @@ async function getTemplates(req, res, next) {
     }
 }
 
+async function getAllTemplates(req, res, next) {
+    try {
+        const { wabaId, status, category, search } = req.query;
+        let query = {};
+
+        // Handle filter by multiple wabaIds if needed, but for now exact match or array match
+        if (wabaId) {
+            if (Array.isArray(wabaId)) {
+                query.wabaId = { $in: wabaId };
+            } else if (wabaId.includes(',')) {
+                query.wabaId = { $in: wabaId.split(',') };
+            } else {
+                query.wabaId = wabaId;
+            }
+        }
+
+        if (status) query.status = status;
+        if (category) query.category = category;
+        if (search) query.name = { $regex: search, $options: 'i' };
+
+        // Populate wabaId to get the businessName and phoneNumbers
+        const templates = await Template.find(query)
+            .populate('wabaId', 'businessName phoneNumbers')
+            .sort({ createdAt: -1 });
+
+        res.json(templates);
+    } catch (e) {
+        next(e);
+    }
+}
+
 async function embeddedSignup(req, res, next) {
     try {
         const { accessToken: rawToken } = req.body;
@@ -144,5 +175,6 @@ module.exports = {
     update,
     syncTemplates,
     getTemplates,
+    getAllTemplates,
     embeddedSignup,
 };
