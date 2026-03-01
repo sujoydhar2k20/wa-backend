@@ -5,6 +5,7 @@ const contactSchema = new mongoose.Schema(
     phoneNumber: { type: String, required: true, index: true },
     waId: { type: String, index: true },
     name: { type: String },
+    nickname: { type: String },
     nameOnWhatsApp: { type: String },
     profilePicture: { type: String },
     isOptedOut: { type: Boolean, default: false },

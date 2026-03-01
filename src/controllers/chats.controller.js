@@ -33,7 +33,7 @@ async function list(req, res, next) {
                 .sort({ lastMessageAt: -1 })
                 .skip(skip)
                 .limit(parseInt(limit, 10))
-                .populate('contactId', 'name profilePicture isOptedOut isBlocked')
+                .populate('contactId', 'name nickname profilePicture isOptedOut isBlocked')
                 .populate('assignedTo', 'name phone')
                 .populate('tags', 'name color'),
             Chat.countDocuments(filter),
@@ -77,7 +77,7 @@ async function search(req, res, next) {
                 .sort({ lastMessageAt: -1 })
                 .skip(skip)
                 .limit(parseInt(limit, 10))
-                .populate('contactId', 'name profilePicture')
+                .populate('contactId', 'name nickname profilePicture')
                 .populate('assignedTo', 'name phone')
                 .populate('tags', 'name color'),
             Chat.countDocuments(baseFilter),
@@ -91,7 +91,7 @@ async function search(req, res, next) {
 async function get(req, res, next) {
     try {
         const chat = await Chat.findById(req.params.id)
-            .populate('contactId', 'name profilePicture isOptedOut isBlocked customFields')
+            .populate('contactId', 'name nickname profilePicture isOptedOut isBlocked customFields')
             .populate('assignedTo', 'name phone')
             .populate('collaborators', 'name phone')
             .populate('tags', 'name color');
@@ -121,7 +121,7 @@ async function assign(req, res, next) {
 
         // Re-fetch with full population so the response matches GET /chats/:id
         const populated = await Chat.findById(chat._id)
-            .populate('contactId', 'name profilePicture isOptedOut isBlocked customFields')
+            .populate('contactId', 'name nickname profilePicture isOptedOut isBlocked customFields')
             .populate('assignedTo', 'name phone')
             .populate('collaborators', 'name phone')
             .populate('tags', 'name color');
@@ -216,7 +216,7 @@ async function close(req, res, next) {
 
         // Re-fetch with full population so the frontend keeps contact info, assignment, and tags
         const populated = await Chat.findById(chat._id)
-            .populate('contactId', 'name profilePicture isOptedOut isBlocked customFields')
+            .populate('contactId', 'name nickname profilePicture isOptedOut isBlocked customFields')
             .populate('assignedTo', 'name phone')
             .populate('collaborators', 'name phone')
             .populate('tags', 'name color');
@@ -273,7 +273,7 @@ async function reopen(req, res, next) {
 
         // Re-fetch with full population so the frontend keeps contact info, assignment, and tags
         const populated = await Chat.findById(chat._id)
-            .populate('contactId', 'name profilePicture isOptedOut isBlocked customFields')
+            .populate('contactId', 'name nickname profilePicture isOptedOut isBlocked customFields')
             .populate('assignedTo', 'name phone')
             .populate('collaborators', 'name phone')
             .populate('tags', 'name color');
