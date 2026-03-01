@@ -158,4 +158,77 @@ async function getMembers(req, res, next) {
     }
 }
 
-module.exports = { list, create, get, update, remove, importMembers, getMembers };
+async function addMembers(req, res, next) {
+    try {
+        const broadcastList = await BroadcastList.findById(req.params.id);
+        if (!broadcastList) return res.status(404).json({ success: false, message: 'Broadcast list not found' });
+
+        const members = req.body.members; // Array of { name, phoneNumber }
+        if (!members || !Array.isArray(members)) {
+            return res.status(400).json({ success: false, message: 'Invalid payload: expected members array' });
+        }
+
+        let importedCount = 0;
+        const ops = [];
+
+        for (const member of members) {
+            const rawPhone = member.phoneNumber;
+            if (!rawPhone) continue;
+
+            const phoneNumber = rawPhone.toString().trim().replace(/\D/g, '');
+            if (phoneNumber.length < 7) continue;
+
+            let contact = await Contact.findOne({ phoneNumber });
+
+            const name = member.name?.trim() || '';
+            if (name) {
+                if (contact) {
+                    if (!contact.name || contact.name === phoneNumber) {
+                        contact.name = name;
+                        await contact.save();
+                    }
+                } else {
+                    contact = new Contact({
+                        phoneNumber,
+                        waId: phoneNumber,
+                        name,
+                    });
+                    await contact.save();
+                }
+            } else if (!contact) {
+                contact = new Contact({
+                    phoneNumber,
+                    waId: phoneNumber,
+                    name: phoneNumber,
+                });
+                await contact.save();
+            }
+
+            ops.push({
+                updateOne: {
+                    filter: { broadcastListId: broadcastList._id, phoneNumber },
+                    update: {
+                        $set: {
+                            broadcastListId: broadcastList._id,
+                            phoneNumber,
+                            ...(contact ? { contactId: contact._id } : {}),
+                        },
+                    },
+                    upsert: true,
+                },
+            });
+            importedCount++;
+        }
+
+        if (ops.length > 0) await BroadcastListMember.bulkWrite(ops);
+
+        const memberCount = await BroadcastListMember.countDocuments({ broadcastListId: broadcastList._id });
+        await BroadcastList.findByIdAndUpdate(broadcastList._id, { memberCount });
+
+        res.json({ success: true, added: importedCount, total: memberCount });
+    } catch (e) {
+        next(e);
+    }
+}
+
+module.exports = { list, create, get, update, remove, importMembers, getMembers, addMembers };
