@@ -221,4 +221,24 @@ async function addNote(req, res, next) {
     }
 }
 
-module.exports = { send, search, react, markRead, addNote };
+async function deleteMsg(req, res, next) {
+    try {
+        const message = await Message.findById(req.params.id);
+        if (!message) return res.status(404).json({ success: false, message: 'Message not found' });
+
+        const chatId = message.chatId;
+        await Message.findByIdAndDelete(req.params.id);
+
+        const { getIO } = require('../websocket/socket.server');
+        getIO().emit('message:delete', {
+            chatId,
+            messageId: req.params.id
+        });
+
+        res.json({ success: true });
+    } catch (e) {
+        next(e);
+    }
+}
+
+module.exports = { send, search, react, markRead, addNote, deleteMsg };

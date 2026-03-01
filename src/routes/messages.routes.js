@@ -9,5 +9,6 @@ router.get('/search', messagesController.search);
 router.post('/:id/react', messagesController.react);
 router.post('/:id/read', messagesController.markRead);
 router.post('/:chatId/note', messagesController.addNote);
+router.delete('/:id', messagesController.deleteMsg);
 
 module.exports = router;
