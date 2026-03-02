@@ -181,19 +181,17 @@ function verifyWebhook(mode, token, challenge) {
   return null;
 }
 
-async function exchangeEmbeddedSignupCode(code, redirectUri) {
+async function exchangeEmbeddedSignupCode(code) {
   const url = `${BASE_URL}/oauth/access_token`;
   // When using FB.login() with the JS SDK and response_type: 'code',
-  // the SDK uses an internal redirect. We must use the exact same URI here.
-  // If caller passes one, use it; otherwise fall back to FB's well-known JS SDK URI.
-  const finalRedirectUri = redirectUri || 'https://www.facebook.com/connect/login_success.html';
-  console.log('[DEBUG] exchangeEmbeddedSignupCode:', { code: code?.substring(0, 30) + '...', redirectUri, finalRedirectUri });
+  // the redirect_uri must be an empty string.
+  console.log('[DEBUG] exchangeEmbeddedSignupCode:', { code: code?.substring(0, 30) + '...' });
   const res = await axios.get(url, {
     params: {
       client_id: config.meta.appId,
       client_secret: config.meta.appSecret,
       code,
-      redirect_uri: finalRedirectUri,
+      redirect_uri: '',
     }
   });
   return res.data;
