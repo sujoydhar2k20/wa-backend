@@ -239,6 +239,16 @@ async function registerPhoneNumber(phoneNumberId, pin, accessToken) {
   return res.data;
 }
 
+async function subscribeAppToWaba(wabaId, accessToken) {
+  const url = `${BASE_URL}/${wabaId}/subscribed_apps`;
+  const res = await axios.post(url, {}, {
+    headers: {
+      Authorization: `Bearer ${accessToken}`
+    }
+  });
+  return res.data;
+}
+
 /**
  * Exchange a short-lived FB JS SDK token for a long-lived user token (~60 days).
  * Always call this before storing any token from embedded signup.
@@ -276,4 +286,5 @@ module.exports = {
   getWabasFromToken,
   getWabaDetails,
   registerPhoneNumber,
+  subscribeAppToWaba,
 };

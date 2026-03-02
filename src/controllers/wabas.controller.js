@@ -169,6 +169,14 @@ async function embeddedSignup(req, res, next) {
                 }
             }
 
+            // 6. Subscribe App to WABA webhooks
+            try {
+                await whatsappService.subscribeAppToWaba(wabaData.wabaId, accessToken);
+                console.log(`Subscribed app to webhooks for WABA ${wabaData.wabaId}`);
+            } catch (subErr) {
+                console.error(`Failed to subscribe app to WABA webhooks for ${wabaData.wabaId}:`, subErr.response?.data || subErr.message);
+            }
+
             savedWabas.push(waba);
         }
 
