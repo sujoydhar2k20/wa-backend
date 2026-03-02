@@ -95,20 +95,31 @@ async function getAllTemplates(req, res, next) {
 
 async function embeddedSignup(req, res, next) {
     try {
-        const { accessToken: rawToken } = req.body;
-        if (!rawToken) {
-            return res.status(400).json({ success: false, message: 'Access token is required' });
+        const { accessToken: rawToken, code } = req.body;
+        if (!rawToken && !code) {
+            return res.status(400).json({ success: false, message: 'Access token or code is required' });
         }
 
-        // Exchange the short-lived FB JS SDK token (~1-2 hours) for a long-lived token (~60 days)
         let accessToken;
-        try {
-            accessToken = await whatsappService.getLongLivedToken(rawToken);
-            console.log('[EmbeddedSignup] Successfully exchanged short-lived token for long-lived token.');
-        } catch (exchangeErr) {
-            console.warn('[EmbeddedSignup] Token exchange failed, using raw token:', exchangeErr.response?.data || exchangeErr.message);
-            // Fall back to raw token if exchange fails (e.g. already a long-lived token)
-            accessToken = rawToken;
+        if (code) {
+            try {
+                const tokenResponse = await whatsappService.exchangeEmbeddedSignupCode(code);
+                accessToken = tokenResponse.access_token;
+                console.log('[EmbeddedSignup] Successfully exchanged code for long-lived token.');
+            } catch (exchangeErr) {
+                console.error('[EmbeddedSignup] Code exchange failed:', exchangeErr.response?.data || exchangeErr.message);
+                return res.status(400).json({ success: false, message: 'Failed to exchange code for access token' });
+            }
+        } else {
+            // Exchange the short-lived FB JS SDK token (~1-2 hours) for a long-lived token (~60 days)
+            try {
+                accessToken = await whatsappService.getLongLivedToken(rawToken);
+                console.log('[EmbeddedSignup] Successfully exchanged short-lived token for long-lived token.');
+            } catch (exchangeErr) {
+                console.warn('[EmbeddedSignup] Token exchange failed, using raw token:', exchangeErr.response?.data || exchangeErr.message);
+                // Fall back to raw token if exchange fails (e.g. already a long-lived token)
+                accessToken = rawToken;
+            }
         }
 
         // 2. Fetch WABA IDs associated with the token
