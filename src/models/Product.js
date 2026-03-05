@@ -4,7 +4,6 @@ const productSchema = new mongoose.Schema(
   {
     code: { type: String, required: true, unique: true, index: true },
     category: { type: String, enum: ['gold', 'diamond', 'silver'], required: true, index: true },
-    type: { type: String, enum: ['single', 'multiple', 'other'], default: 'single', index: true },
     name: { type: String },
     sku: { type: String },
     carat: { type: Number },

@@ -1,6 +1,34 @@
 const path = require('path');
 const fs = require('fs');
-const { Product, ProductImport } = require('../models');
+const { Product, ProductImport, Rate } = require('../models');
+
+const GST = 0.03;
+
+function calculatePrice(productData, rate) {
+    const w = productData.weight;
+    const cat = productData.category;
+    if (!w || !cat || !rate) return undefined;
+
+    if (cat === 'gold') {
+        const karat = productData.carat;
+        const ratePerGram = karat ? (rate.gold[karat] || 0) : 0;
+        if (!ratePerGram) return undefined;
+        const making = productData.makingCharge ? productData.makingCharge / 100 : 0;
+        const extra = productData.extraCharge || 0;
+        return Math.round((w * ratePerGram * (1 + making) + extra) * (1 + GST));
+    }
+    if (cat === 'silver') {
+        if (!rate.silver) return undefined;
+        const making = productData.makingCharge ? productData.makingCharge / 100 : 0;
+        return Math.round(w * rate.silver * (1 + making) * (1 + GST));
+    }
+    if (cat === 'diamond') {
+        if (!rate.diamond) return undefined;
+        const extra = productData.extraCharge || 0;
+        return Math.round((w * rate.diamond + extra) * (1 + GST));
+    }
+    return undefined;
+}
 
 async function list(req, res, next) {
     try {
@@ -8,7 +36,6 @@ async function list(req, res, next) {
         const skip = (parseInt(page, 10) - 1) * parseInt(limit, 10);
         const filter = {};
         if (category) filter.category = category;
-        if (type) filter.type = type;
         if (isInStock !== undefined) filter.isInStock = isInStock === 'true';
         if (q) filter.$or = [
             { name: { $regex: q, $options: 'i' } },
@@ -49,7 +76,14 @@ async function get(req, res, next) {
 
 async function create(req, res, next) {
     try {
-        const product = new Product(req.body);
+        const productData = { ...req.body };
+        const rate = await Rate.findOne();
+        if (rate) {
+            const computedPrice = calculatePrice(productData, rate);
+            if (computedPrice !== undefined) productData.price = computedPrice;
+        }
+
+        const product = new Product(productData);
         await product.save();
         res.status(201).json(product);
     } catch (e) {
@@ -59,12 +93,24 @@ async function create(req, res, next) {
 
 async function update(req, res, next) {
     try {
+        const productData = { ...req.body };
+
+        // Fetch current product to safely compute price with merged data
+        const currentProduct = await Product.findById(req.params.id);
+        if (!currentProduct) return res.status(404).json({ success: false, message: 'Product not found' });
+
+        const mergedData = { ...currentProduct.toObject(), ...productData };
+        const rate = await Rate.findOne();
+        if (rate) {
+            const computedPrice = calculatePrice(mergedData, rate);
+            if (computedPrice !== undefined) productData.price = computedPrice;
+        }
+
         const product = await Product.findByIdAndUpdate(
             req.params.id,
-            req.body,
+            productData,
             { new: true, runValidators: true }
         );
-        if (!product) return res.status(404).json({ success: false, message: 'Product not found' });
         res.json(product);
     } catch (e) {
         next(e);
@@ -227,6 +273,8 @@ async function importProducts(req, res, next) {
                 let successCount = 0;
                 let errorCount = 0;
 
+                const rate = await Rate.findOne();
+
                 for (let i = 0; i < dataLines.length; i++) {
                     const cols = dataLines[i].split(',').map((c) => c.trim().replace(/^"|"$/g, ''));
                     try {
@@ -235,29 +283,30 @@ async function importProducts(req, res, next) {
                                 const idx = headerLine.indexOf(parsedMapping[field].toLowerCase());
                                 return idx >= 0 ? cols[idx] : undefined;
                             }
-                            // Default column order: code, name, sku, type, carat, weight, makingCharge, extraCharge, price
-                            const defaultOrder = { code: 0, name: 1, sku: 2, type: 3, carat: 4, weight: 5, makingCharge: 6, extraCharge: 7, price: 8 };
+                            // Default column order without type
+                            const defaultOrder = { code: 0, name: 1, sku: 2, carat: 3, weight: 4, makingCharge: 5, extraCharge: 6, price: 7 };
                             return cols[defaultOrder[field]];
                         };
 
                         const code = getCol('code');
                         if (!code) throw new Error('Missing product code');
 
-                        const typeVal = getCol('type');
-                        const validTypes = ['single', 'multiple', 'other'];
-
                         const productData = {
                             category,
                             code,
                             name: getCol('name') || undefined,
                             sku: getCol('sku') || undefined,
-                            type: validTypes.includes(typeVal) ? typeVal : 'single',
                             carat: getCol('carat') ? parseFloat(getCol('carat')) : undefined,
                             weight: getCol('weight') ? parseFloat(getCol('weight')) : undefined,
                             makingCharge: getCol('makingCharge') ? parseFloat(getCol('makingCharge')) : undefined,
                             extraCharge: getCol('extraCharge') ? parseFloat(getCol('extraCharge')) : undefined,
                             price: getCol('price') ? parseFloat(getCol('price')) : undefined,
                         };
+
+                        if (rate) {
+                            const computedPrice = calculatePrice(productData, rate);
+                            if (computedPrice !== undefined) productData.price = computedPrice;
+                        }
 
                         await Product.findOneAndUpdate({ code }, productData, { upsert: true, new: true, runValidators: true });
                         logs.push({ rowNumber: i + 2, status: 'success', data: productData });

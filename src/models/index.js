@@ -17,6 +17,7 @@ module.exports = {
   BotExecution: require('./BotExecution'),
   Product: require('./Product'),
   ProductImport: require('./ProductImport'),
+  Rate: require('./Rate'),
   ProductReplyLog: require('./ProductReplyLog'),
   Media: require('./Media'),
 };
