@@ -1,12 +1,14 @@
+const path = require('path');
 const fs = require('fs');
 const { Product, ProductImport } = require('../models');
 
 async function list(req, res, next) {
     try {
-        const { page = 1, limit = 20, category, isInStock, q } = req.query;
+        const { page = 1, limit = 20, category, isInStock, q, type } = req.query;
         const skip = (parseInt(page, 10) - 1) * parseInt(limit, 10);
         const filter = {};
         if (category) filter.category = category;
+        if (type) filter.type = type;
         if (isInStock !== undefined) filter.isInStock = isInStock === 'true';
         if (q) filter.$or = [
             { name: { $regex: q, $options: 'i' } },
@@ -14,11 +16,11 @@ async function list(req, res, next) {
             { sku: { $regex: q, $options: 'i' } },
         ];
 
-        const [products, total] = await Promise.all([
+        const [data, total] = await Promise.all([
             Product.find(filter).sort({ createdAt: -1 }).skip(skip).limit(parseInt(limit, 10)),
             Product.countDocuments(filter),
         ]);
-        res.json({ data: products, total, page: parseInt(page, 10), limit: parseInt(limit, 10) });
+        res.json({ data, total, page: parseInt(page, 10), limit: parseInt(limit, 10) });
     } catch (e) {
         next(e);
     }
@@ -74,6 +76,65 @@ async function remove(req, res, next) {
         const product = await Product.findByIdAndDelete(req.params.id);
         if (!product) return res.status(404).json({ success: false, message: 'Product not found' });
         res.json({ success: true });
+    } catch (e) {
+        next(e);
+    }
+}
+
+async function bulkUpdateKarat(req, res, next) {
+    try {
+        const { codes, carat } = req.body;
+        if (!codes || !Array.isArray(codes) || codes.length === 0) {
+            return res.status(400).json({ success: false, message: 'codes array is required' });
+        }
+        if (carat === undefined || carat === null) {
+            return res.status(400).json({ success: false, message: 'carat is required' });
+        }
+        const result = await Product.updateMany(
+            { code: { $in: codes } },
+            { $set: { carat: parseFloat(carat) } }
+        );
+        res.json({ success: true, modifiedCount: result.modifiedCount });
+    } catch (e) {
+        next(e);
+    }
+}
+
+async function addImage(req, res, next) {
+    try {
+        if (!req.file) return res.status(400).json({ success: false, message: 'No file uploaded' });
+        const product = await Product.findById(req.params.id);
+        if (!product) return res.status(404).json({ success: false, message: 'Product not found' });
+
+        // Save file to disk in uploads/products/
+        const uploadDir = path.join(__dirname, '../../uploads/products');
+        if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
+        const ext = path.extname(req.file.originalname) || '.jpg';
+        const filename = `${product._id}_${Date.now()}${ext}`;
+        const filePath = path.join(uploadDir, filename);
+        fs.writeFileSync(filePath, req.file.buffer);
+
+        const imageUrl = `/uploads/products/${filename}`;
+        product.images.push(imageUrl);
+        await product.save();
+        res.json({ success: true, url: imageUrl, images: product.images });
+    } catch (e) {
+        next(e);
+    }
+}
+
+async function removeImage(req, res, next) {
+    try {
+        const { url } = req.body;
+        const product = await Product.findById(req.params.id);
+        if (!product) return res.status(404).json({ success: false, message: 'Product not found' });
+        product.images = product.images.filter(img => img !== url);
+        await product.save();
+        // Try to delete file from disk
+        if (url && url.startsWith('/uploads/')) {
+            try { fs.unlinkSync(path.join(__dirname, '../..', url)); } catch (_) { }
+        }
+        res.json({ success: true, images: product.images });
     } catch (e) {
         next(e);
     }
@@ -142,21 +203,25 @@ async function importProducts(req, res, next) {
 
         const productImport = await ProductImport.create({
             fileName: req.file.originalname,
-            filePath: req.file.path,
+            filePath: req.file.originalname, // memory storage — no real path
             category,
             status: 'queued',
             importedBy: req.user._id,
             mapping: parsedMapping,
         });
 
+        // Buffer from memory storage
+        const fileBuffer = req.file.buffer;
+
         // Process the import asynchronously
         setImmediate(async () => {
             try {
                 await ProductImport.findByIdAndUpdate(productImport._id, { status: 'processing' });
-                const content = fs.readFileSync(req.file.path, 'utf8');
-                const lines = content.split('\n').filter(Boolean);
-                const dataLines = /[a-zA-Z]/.test(lines[0]?.split(',')[0]) ? lines.slice(1) : lines;
-                const headerLine = /[a-zA-Z]/.test(lines[0]?.split(',')[0]) ? lines[0].split(',').map((h) => h.trim().toLowerCase()) : null;
+                const content = fileBuffer.toString('utf8');
+                const lines = content.split('\n').filter(l => l.trim());
+                const hasHeader = /[a-zA-Z]/.test(lines[0]?.split(',')[0]);
+                const headerLine = hasHeader ? lines[0].split(',').map((h) => h.trim().toLowerCase().replace(/"/g, '')) : null;
+                const dataLines = hasHeader ? lines.slice(1) : lines;
 
                 const logs = [];
                 let successCount = 0;
@@ -170,21 +235,27 @@ async function importProducts(req, res, next) {
                                 const idx = headerLine.indexOf(parsedMapping[field].toLowerCase());
                                 return idx >= 0 ? cols[idx] : undefined;
                             }
-                            // Default column order: code, name, sku, carat, weight, price
-                            const defaultOrder = { code: 0, name: 1, sku: 2, carat: 3, weight: 4, price: 5 };
+                            // Default column order: code, name, sku, type, carat, weight, makingCharge, extraCharge, price
+                            const defaultOrder = { code: 0, name: 1, sku: 2, type: 3, carat: 4, weight: 5, makingCharge: 6, extraCharge: 7, price: 8 };
                             return cols[defaultOrder[field]];
                         };
 
                         const code = getCol('code');
                         if (!code) throw new Error('Missing product code');
 
+                        const typeVal = getCol('type');
+                        const validTypes = ['single', 'multiple', 'other'];
+
                         const productData = {
                             category,
                             code,
-                            name: getCol('name'),
-                            sku: getCol('sku'),
+                            name: getCol('name') || undefined,
+                            sku: getCol('sku') || undefined,
+                            type: validTypes.includes(typeVal) ? typeVal : 'single',
                             carat: getCol('carat') ? parseFloat(getCol('carat')) : undefined,
                             weight: getCol('weight') ? parseFloat(getCol('weight')) : undefined,
+                            makingCharge: getCol('makingCharge') ? parseFloat(getCol('makingCharge')) : undefined,
+                            extraCharge: getCol('extraCharge') ? parseFloat(getCol('extraCharge')) : undefined,
                             price: getCol('price') ? parseFloat(getCol('price')) : undefined,
                         };
 
@@ -207,8 +278,6 @@ async function importProducts(req, res, next) {
                 });
             } catch (err) {
                 await ProductImport.findByIdAndUpdate(productImport._id, { status: 'failed' });
-            } finally {
-                try { fs.unlinkSync(req.file.path); } catch (_) { }
             }
         });
 
@@ -225,6 +294,9 @@ module.exports = {
     create,
     update,
     remove,
+    bulkUpdateKarat,
+    addImage,
+    removeImage,
     listImports,
     getImport,
     getImportLogs,

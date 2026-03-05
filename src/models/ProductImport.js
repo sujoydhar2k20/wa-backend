@@ -11,8 +11,11 @@ const mappingSchema = new mongoose.Schema({
   code: String,
   name: String,
   sku: String,
+  type: String,
   carat: String,
   weight: String,
+  makingCharge: String,
+  extraCharge: String,
   price: String,
   images: String,
 }, { _id: false });
