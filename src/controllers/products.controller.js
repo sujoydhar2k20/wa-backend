@@ -44,9 +44,18 @@ async function list(req, res, next) {
         ];
 
         const [data, total] = await Promise.all([
-            Product.find(filter).sort({ createdAt: -1 }).skip(skip).limit(parseInt(limit, 10)),
+            Product.find(filter).sort({ createdAt: -1 }).skip(skip).limit(parseInt(limit, 10)).lean(),
             Product.countDocuments(filter),
         ]);
+
+        const rate = await Rate.findOne();
+        if (rate) {
+            data.forEach(p => {
+                const computed = calculatePrice(p, rate);
+                if (computed !== undefined) p.price = computed;
+            });
+        }
+
         res.json({ data, total, page: parseInt(page, 10), limit: parseInt(limit, 10) });
     } catch (e) {
         next(e);
@@ -57,7 +66,15 @@ async function searchByCode(req, res, next) {
     try {
         const { code } = req.query;
         if (!code) return res.status(400).json({ success: false, message: 'code query param is required' });
-        const products = await Product.find({ code: { $regex: code, $options: 'i' } }).limit(10);
+        const products = await Product.find({ code: { $regex: code, $options: 'i' } }).limit(10).lean();
+
+        const rate = await Rate.findOne();
+        if (rate) {
+            products.forEach(p => {
+                const computed = calculatePrice(p, rate);
+                if (computed !== undefined) p.price = computed;
+            });
+        }
         res.json(products);
     } catch (e) {
         next(e);
@@ -66,8 +83,15 @@ async function searchByCode(req, res, next) {
 
 async function get(req, res, next) {
     try {
-        const product = await Product.findById(req.params.id);
+        const product = await Product.findById(req.params.id).lean();
         if (!product) return res.status(404).json({ success: false, message: 'Product not found' });
+
+        const rate = await Rate.findOne();
+        if (rate) {
+            const computed = calculatePrice(product, rate);
+            if (computed !== undefined) product.price = computed;
+        }
+
         res.json(product);
     } catch (e) {
         next(e);
@@ -146,45 +170,7 @@ async function bulkUpdateKarat(req, res, next) {
     }
 }
 
-async function addImage(req, res, next) {
-    try {
-        if (!req.file) return res.status(400).json({ success: false, message: 'No file uploaded' });
-        const product = await Product.findById(req.params.id);
-        if (!product) return res.status(404).json({ success: false, message: 'Product not found' });
-
-        // Save file to disk in uploads/products/
-        const uploadDir = path.join(__dirname, '../../uploads/products');
-        if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
-        const ext = path.extname(req.file.originalname) || '.jpg';
-        const filename = `${product._id}_${Date.now()}${ext}`;
-        const filePath = path.join(uploadDir, filename);
-        fs.writeFileSync(filePath, req.file.buffer);
-
-        const imageUrl = `/uploads/products/${filename}`;
-        product.images.push(imageUrl);
-        await product.save();
-        res.json({ success: true, url: imageUrl, images: product.images });
-    } catch (e) {
-        next(e);
-    }
-}
-
-async function removeImage(req, res, next) {
-    try {
-        const { url } = req.body;
-        const product = await Product.findById(req.params.id);
-        if (!product) return res.status(404).json({ success: false, message: 'Product not found' });
-        product.images = product.images.filter(img => img !== url);
-        await product.save();
-        // Try to delete file from disk
-        if (url && url.startsWith('/uploads/')) {
-            try { fs.unlinkSync(path.join(__dirname, '../..', url)); } catch (_) { }
-        }
-        res.json({ success: true, images: product.images });
-    } catch (e) {
-        next(e);
-    }
-}
+// Images functions removed.
 
 async function listImports(req, res, next) {
     try {
@@ -344,8 +330,6 @@ module.exports = {
     update,
     remove,
     bulkUpdateKarat,
-    addImage,
-    removeImage,
     listImports,
     getImport,
     getImportLogs,

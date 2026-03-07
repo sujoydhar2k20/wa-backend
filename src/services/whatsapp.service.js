@@ -208,11 +208,13 @@ async function getWabasFromToken(inputToken) {
   });
 
   const granularScopes = res.data.data.granular_scopes || [];
-  const wabaScope = granularScopes.find(s => s.scope === 'whatsapp_business_management' || s.scope === 'whatsapp_business_messaging');
-  if (!wabaScope || !wabaScope.target_ids || wabaScope.target_ids.length === 0) {
-    return [];
-  }
-  return wabaScope.target_ids;
+  const wabaScope = granularScopes.find(s => s.scope === 'whatsapp_business_management');
+  const messagingScope = granularScopes.find(s => s.scope === 'whatsapp_business_messaging');
+
+  const wabaIds = wabaScope?.target_ids || [];
+  const phoneIds = messagingScope?.target_ids || [];
+
+  return { wabaIds, phoneIds };
 }
 
 async function getWabaDetails(wabaId, accessToken) {

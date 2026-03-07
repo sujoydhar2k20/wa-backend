@@ -16,7 +16,5 @@ router.get('/:id', productsController.get);
 router.post('/', requireAdmin, productsController.create);
 router.put('/:id', requireAdmin, productsController.update);
 router.delete('/:id', requireAdmin, productsController.remove);
-router.post('/:id/images', requireAdmin, upload.single('image'), productsController.addImage);
-router.delete('/:id/images', requireAdmin, productsController.removeImage);
 
 module.exports = router;

@@ -11,7 +11,6 @@ const productSchema = new mongoose.Schema(
     makingCharge: { type: Number },
     extraCharge: { type: Number },
     price: { type: Number },
-    images: [{ type: String }],
     isInStock: { type: Boolean, default: true },
     description: { type: String },
     metadata: mongoose.Schema.Types.Mixed,

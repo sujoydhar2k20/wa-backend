@@ -44,6 +44,18 @@ async function update(req, res, next) {
     }
 }
 
+async function remove(req, res, next) {
+    try {
+        const waba = await Waba.findByIdAndDelete(req.params.id);
+        if (!waba) {
+            return res.status(404).json({ success: false, message: 'WABA not found' });
+        }
+        res.json({ success: true, message: 'WABA removed successfully' });
+    } catch (e) {
+        next(e);
+    }
+}
+
 async function syncTemplates(req, res, next) {
     try {
         const templates = await whatsappService.syncTemplates(req.params.id);
@@ -123,7 +135,7 @@ async function embeddedSignup(req, res, next) {
         }
 
         // 2. Fetch WABA IDs associated with the token
-        const wabaIds = await whatsappService.getWabasFromToken(accessToken);
+        const { wabaIds, phoneIds } = await whatsappService.getWabasFromToken(accessToken);
         if (!wabaIds || wabaIds.length === 0) {
             return res.status(404).json({ success: false, message: 'No WhatsApp Business Accounts found for this token' });
         }
@@ -135,12 +147,14 @@ async function embeddedSignup(req, res, next) {
             const wabaDetails = await whatsappService.getWabaDetails(wabaId, accessToken);
 
             // Format phone numbers
-            const phoneNumbers = (wabaDetails.phone_numbers?.data || []).map(pn => ({
-                phoneNumberId: pn.id,
-                phoneNumber: pn.display_phone_number,
-                verifiedName: pn.verified_name,
-                qualityRating: pn.quality_rating
-            }));
+            const phoneNumbers = (wabaDetails.phone_numbers?.data || [])
+                .filter(pn => phoneIds.length > 0 ? phoneIds.includes(pn.id) : true)
+                .map(pn => ({
+                    phoneNumberId: pn.id,
+                    phoneNumber: pn.display_phone_number,
+                    verifiedName: pn.verified_name,
+                    qualityRating: pn.quality_rating
+                }));
 
             const wabaData = {
                 wabaId: wabaDetails.id,
@@ -192,6 +206,7 @@ module.exports = {
     create,
     get,
     update,
+    remove,
     syncTemplates,
     getTemplates,
     getAllTemplates,
