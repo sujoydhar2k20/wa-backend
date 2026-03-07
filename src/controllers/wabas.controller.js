@@ -146,15 +146,24 @@ async function embeddedSignup(req, res, next) {
         for (const wabaId of wabaIds) {
             const wabaDetails = await whatsappService.getWabaDetails(wabaId, accessToken);
 
-            // Format phone numbers
+            // Ensure type-safe comparison for phone IDs
+            const safePhoneIds = phoneIds.map(String);
             const phoneNumbers = (wabaDetails.phone_numbers?.data || [])
-                .filter(pn => phoneIds.length > 0 ? phoneIds.includes(pn.id) : true)
+                .filter(pn => safePhoneIds.length > 0 ? safePhoneIds.includes(String(pn.id)) : true)
                 .map(pn => ({
-                    phoneNumberId: pn.id,
+                    phoneNumberId: String(pn.id),
                     phoneNumber: pn.display_phone_number,
                     verifiedName: pn.verified_name,
                     qualityRating: pn.quality_rating
                 }));
+
+            // Skip saving WABAs that do not have any authorized phone numbers
+            // This prevents saving multiple empty/duplicate WABA entries
+            if (phoneNumbers.length === 0) {
+                console.log(`[EmbeddedSignup] Skipping WABA ${wabaDetails.id} - no authorized phone numbers found.`);
+                continue;
+            }
+
 
             const wabaData = {
                 wabaId: wabaDetails.id,
