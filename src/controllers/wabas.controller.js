@@ -107,7 +107,7 @@ async function getAllTemplates(req, res, next) {
 
 async function embeddedSignup(req, res, next) {
     try {
-        const { accessToken: rawToken, code } = req.body;
+        const { accessToken: rawToken, code, wabaId: sessionWabaId, phoneNumberId: sessionPhoneNumberId } = req.body;
         if (!rawToken && !code) {
             return res.status(400).json({ success: false, message: 'Access token or code is required' });
         }
@@ -134,8 +134,23 @@ async function embeddedSignup(req, res, next) {
             }
         }
 
-        // 2. Fetch WABA IDs associated with the token
-        const { wabaIds, phoneIds } = await whatsappService.getWabasFromToken(accessToken);
+        // Determine WABA IDs and phone IDs to process
+        let wabaIds = [];
+        let phoneIds = [];
+
+        if (sessionWabaId) {
+            // Use session info from Facebook embedded signup message event (preferred)
+            wabaIds = [sessionWabaId];
+            phoneIds = sessionPhoneNumberId ? [sessionPhoneNumberId] : [];
+            console.log('[EmbeddedSignup] Using session info - WABA:', sessionWabaId, 'Phone:', sessionPhoneNumberId);
+        } else {
+            // Fallback: Fetch WABA IDs from debug_token
+            const tokenData = await whatsappService.getWabasFromToken(accessToken);
+            wabaIds = tokenData.wabaIds || [];
+            phoneIds = tokenData.phoneIds || [];
+            console.log('[EmbeddedSignup] Using debug_token - WABAs:', wabaIds, 'Phones:', phoneIds);
+        }
+
         if (!wabaIds || wabaIds.length === 0) {
             return res.status(404).json({ success: false, message: 'No WhatsApp Business Accounts found for this token' });
         }
