@@ -195,17 +195,26 @@ async function embeddedSignup(req, res, next) {
                 { new: true, upsert: true, runValidators: true }
             );
 
-            // 5. Register Phone Numbers (v25.0 supports data_localization_region directly in register body)
+            // 5. Register Phone Numbers
+            // For Indian (+91) numbers: call settings endpoint FIRST to set storage_configuration,
+            // then register WITHOUT data_localization_region (deprecated in register body for v21+)
             for (const pn of phoneNumbers) {
                 try {
                     const dummyPin = Math.floor(100000 + Math.random() * 900000).toString();
-                    // Detect data localization region from phone number country code
-                    let region = null;
+
+                    // Step A: Set storage configuration for Indian numbers
                     if (pn.phoneNumber && pn.phoneNumber.replace(/\s/g, '').startsWith('+91')) {
-                        region = 'IN';
+                        try {
+                            await whatsappService.setStorageConfiguration(pn.phoneNumberId, 'in', accessToken);
+                            console.log(`[EmbeddedSignup] Set storage configuration to IN for ${pn.phoneNumber}`);
+                        } catch (settingsErr) {
+                            console.error(`[EmbeddedSignup] Failed to set storage config for ${pn.phoneNumber}:`, settingsErr.response?.data || settingsErr.message);
+                        }
                     }
-                    await whatsappService.registerPhoneNumber(pn.phoneNumberId, dummyPin, accessToken, region);
-                    console.log(`[EmbeddedSignup] Registered phone ${pn.phoneNumber}${region ? ` with data_localization_region: ${region}` : ''}`);
+
+                    // Step B: Register the phone number
+                    await whatsappService.registerPhoneNumber(pn.phoneNumberId, dummyPin, accessToken);
+                    console.log(`[EmbeddedSignup] Registered phone ${pn.phoneNumber}`);
                 } catch (registerErr) {
                     console.error('Failed to register phone number (may already be registered):', registerErr.response?.data || registerErr.message);
                 }
