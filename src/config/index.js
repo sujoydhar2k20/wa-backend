@@ -17,6 +17,6 @@ module.exports = {
     appId: process.env.META_APP_ID,
     appSecret: process.env.META_APP_SECRET,
     webhookVerifyToken: process.env.META_WEBHOOK_VERIFY_TOKEN,
-    apiVersion: 'v21.0',
+    apiVersion: 'v25.0',
   },
 };

@@ -1,9 +1,6 @@
 /**
  * Register a PENDING migrated phone number with WhatsApp Cloud API.
- * 
- * For Indian (+91) numbers on API v21+:
- * Step 1: POST /{PHONE_NUMBER_ID}/settings with storage_configuration
- * Step 2: POST /{PHONE_NUMBER_ID}/register
+ * Uses v25.0 which supports data_localization_region directly in the register body.
  * 
  * Usage: node register-phone.js
  */
@@ -15,7 +12,7 @@ const axios = require('axios');
 const PHONE_NUMBER_ID = '1069429599593165';
 const WABA_ID = '1874918729815134';
 const PIN = '123456';
-const API_VERSION = 'v21.0';
+const API_VERSION = 'v25.0';
 
 async function main() {
     const uri = process.env.MONGODB_URI || 'mongodb://localhost:27017/whatsapp-system';
@@ -34,29 +31,13 @@ async function main() {
     const token = waba.accessToken;
     const BASE = `https://graph.facebook.com/${API_VERSION}`;
 
-    // Step 1: Set storage configuration (data localization)
-    console.log('🌍 Step 1: Setting storage configuration to IN (India)...');
-    try {
-        const res = await axios.post(`${BASE}/${PHONE_NUMBER_ID}/settings`, {
-            storage_configuration: {
-                status: 'in_country_storage_enabled',
-                enabled: true,
-                region: 'in'
-            }
-        }, {
-            headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
-        });
-        console.log('   ✅ Success:', JSON.stringify(res.data));
-    } catch (err) {
-        console.log('   ❌ Failed:', JSON.stringify(err.response?.data || err.message));
-    }
-
-    // Step 2: Register
-    console.log('\n📱 Step 2: Registering phone number...');
+    // Register with data_localization_region directly in body (v25.0)
+    console.log(`📱 Registering phone ${PHONE_NUMBER_ID} with v25.0 + data_localization_region: IN...`);
     try {
         const res = await axios.post(`${BASE}/${PHONE_NUMBER_ID}/register`, {
             messaging_product: 'whatsapp',
-            pin: PIN
+            pin: PIN,
+            data_localization_region: 'IN'
         }, {
             headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
         });
@@ -65,8 +46,8 @@ async function main() {
         console.log('   ❌ Failed:', JSON.stringify(err.response?.data || err.message));
     }
 
-    // Step 3: Check status
-    console.log('\n🔍 Step 3: Checking phone status...');
+    // Check status
+    console.log('\n🔍 Checking phone status...');
     try {
         const statusRes = await axios.get(`${BASE}/${PHONE_NUMBER_ID}`, {
             headers: { Authorization: `Bearer ${token}` },
