@@ -242,7 +242,7 @@ async function setStorageConfiguration(phoneNumberId, region, accessToken) {
     storage_configuration: {
       status: 'in_country_storage_enabled',
       enabled: true,
-      region: region.toLowerCase()
+      data_localization_region: region.toLowerCase()
     }
   }, {
     headers: {

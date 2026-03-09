@@ -40,7 +40,7 @@ async function main() {
             storage_configuration: {
                 status: 'in_country_storage_enabled',
                 enabled: true,
-                region: 'in'
+                data_localization_region: 'in'
             }
         }, {
             headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
