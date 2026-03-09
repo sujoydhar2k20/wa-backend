@@ -195,22 +195,17 @@ async function embeddedSignup(req, res, next) {
                 { new: true, upsert: true, runValidators: true }
             );
 
-            // 5. Optionally Register Phone Numbers
+            // 5. Register Phone Numbers
             for (const pn of phoneNumbers) {
                 try {
-                    // Using a dummy pin since we assume new registration.
-                    // If the number is already registered, this might throw but it's fine.
                     const dummyPin = Math.floor(100000 + Math.random() * 900000).toString();
-
-                    // Determine data localization region based on phone prefix
-                    // Meta API v21+ requires 'IN' for +91 numbers
-                    let dataLocalizationRegion = undefined;
-                    if (pn.phoneNumber && pn.phoneNumber.startsWith('+91')) {
-                        dataLocalizationRegion = 'IN';
-                        console.log(`[EmbeddedSignup] Detected +91 number ${pn.phoneNumber}, setting data_localization_region to IN`);
+                    // Detect data localization region from phone number country code
+                    let region = null;
+                    if (pn.phoneNumber && pn.phoneNumber.replace(/\s/g, '').startsWith('+91')) {
+                        region = 'IN';
                     }
-
-                    await whatsappService.registerPhoneNumber(pn.phoneNumberId, dummyPin, accessToken, dataLocalizationRegion);
+                    await whatsappService.registerPhoneNumber(pn.phoneNumberId, dummyPin, accessToken, region);
+                    console.log(`[EmbeddedSignup] Registered phone ${pn.phoneNumber}${region ? ` with region ${region}` : ''}`);
                 } catch (registerErr) {
                     console.error('Failed to register phone number (may already be registered):', registerErr.response?.data || registerErr.message);
                 }
