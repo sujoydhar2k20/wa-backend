@@ -39,6 +39,7 @@ async function main() {
     try {
         const res = await axios.post(`${BASE}/${PHONE_NUMBER_ID}/settings`, {
             storage_configuration: {
+                status: 'in_country_storage_enabled',
                 enabled: true,
                 region: 'in'
             }
