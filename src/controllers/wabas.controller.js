@@ -201,7 +201,15 @@ async function embeddedSignup(req, res, next) {
                     // Using a dummy pin since we assume new registration.
                     // If the number is already registered, this might throw but it's fine.
                     const dummyPin = Math.floor(100000 + Math.random() * 900000).toString();
-                    await whatsappService.registerPhoneNumber(pn.phoneNumberId, dummyPin, accessToken);
+
+                    // Meta API v21+ requires data_localization_region for Indian numbers (+91)
+                    let region = undefined;
+                    const cleanPhone = pn.phoneNumber.replace(/\D/g, '');
+                    if (cleanPhone.startsWith('91')) {
+                        region = 'IN';
+                    }
+
+                    await whatsappService.registerPhoneNumber(pn.phoneNumberId, dummyPin, accessToken, region);
                 } catch (registerErr) {
                     console.error('Failed to register phone number (may already be registered):', registerErr.response?.data || registerErr.message);
                 }
