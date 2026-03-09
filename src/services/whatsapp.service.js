@@ -228,12 +228,17 @@ async function getWabaDetails(wabaId, accessToken) {
   return res.data;
 }
 
-async function registerPhoneNumber(phoneNumberId, pin, accessToken) {
+async function registerPhoneNumber(phoneNumberId, pin, accessToken, dataLocalizationRegion) {
   const url = `${BASE_URL}/${phoneNumberId}/register`;
-  const res = await axios.post(url, {
+  const body = {
     messaging_product: 'whatsapp',
     pin: pin
-  }, {
+  };
+  // For API v21+, Indian (+91) numbers require data_localization_region: 'IN'
+  if (dataLocalizationRegion) {
+    body.data_localization_region = dataLocalizationRegion;
+  }
+  const res = await axios.post(url, body, {
     headers: {
       Authorization: `Bearer ${accessToken}`
     }
