@@ -1,6 +1,9 @@
 /**
- * Register a PENDING phone number with WhatsApp Cloud API.
- * Handles data localization requirement for Indian (+91) numbers.
+ * Register a PENDING migrated phone number with WhatsApp Cloud API.
+ * 
+ * For Indian (+91) numbers on API v21+:
+ * Step 1: POST /{PHONE_NUMBER_ID}/settings with storage_configuration
+ * Step 2: POST /{PHONE_NUMBER_ID}/register
  * 
  * Usage: node register-phone.js
  */
@@ -9,11 +12,10 @@ require('dotenv').config();
 const mongoose = require('mongoose');
 const axios = require('axios');
 
-const API_VERSION = 'v21.0';
-const BASE_URL = `https://graph.facebook.com/${API_VERSION}`;
-
 const PHONE_NUMBER_ID = '1069429599593165';
 const WABA_ID = '1874918729815134';
+const PIN = '123456';
+const API_VERSION = 'v21.0';
 
 async function main() {
     const uri = process.env.MONGODB_URI || 'mongodb://localhost:27017/whatsapp-system';
@@ -30,32 +32,49 @@ async function main() {
     }
 
     const token = waba.accessToken;
+    const BASE = `https://graph.facebook.com/${API_VERSION}`;
 
-    // Step 1: Register with data_localization_region: 'IN' (required for +91 numbers on API v21+)
-    console.log('📱 Registering phone number with data_localization_region: IN...');
+    // Step 1: Set storage configuration (data localization)
+    console.log('🌍 Step 1: Setting storage configuration to IN (India)...');
     try {
-        const regRes = await axios.post(`${BASE_URL}/${PHONE_NUMBER_ID}/register`, {
-            messaging_product: 'whatsapp',
-            pin: '123456',
-            data_localization_region: 'IN'
+        const res = await axios.post(`${BASE}/${PHONE_NUMBER_ID}/settings`, {
+            storage_configuration: {
+                enabled: true,
+                region: 'in'
+            }
         }, {
-            headers: { Authorization: `Bearer ${token}` }
+            headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
         });
-        console.log('   ✅ Registration successful:', JSON.stringify(regRes.data));
+        console.log('   ✅ Success:', JSON.stringify(res.data));
     } catch (err) {
-        console.log('   ❌ Registration failed:', JSON.stringify(err.response?.data || err.message, null, 2));
+        console.log('   ❌ Failed:', JSON.stringify(err.response?.data || err.message));
     }
 
-    // Step 2: Check final status
-    console.log('\n🔍 Checking phone status...');
+    // Step 2: Register
+    console.log('\n📱 Step 2: Registering phone number...');
     try {
-        const statusRes = await axios.get(`${BASE_URL}/${PHONE_NUMBER_ID}`, {
-            headers: { Authorization: `Bearer ${token}` },
-            params: { fields: 'id,display_phone_number,verified_name,quality_rating,status' }
+        const res = await axios.post(`${BASE}/${PHONE_NUMBER_ID}/register`, {
+            messaging_product: 'whatsapp',
+            pin: PIN
+        }, {
+            headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
         });
-        console.log(`   Status: ${statusRes.data.status}`);
-        console.log(`   Phone:  ${statusRes.data.display_phone_number}`);
-        console.log(`   Name:   ${statusRes.data.verified_name}`);
+        console.log('   ✅ Registered!', JSON.stringify(res.data));
+    } catch (err) {
+        console.log('   ❌ Failed:', JSON.stringify(err.response?.data || err.message));
+    }
+
+    // Step 3: Check status
+    console.log('\n🔍 Step 3: Checking phone status...');
+    try {
+        const statusRes = await axios.get(`${BASE}/${PHONE_NUMBER_ID}`, {
+            headers: { Authorization: `Bearer ${token}` },
+            params: { fields: 'id,display_phone_number,verified_name,quality_rating,status,platform_type' }
+        });
+        console.log(`   Status:   ${statusRes.data.status}`);
+        console.log(`   Phone:    ${statusRes.data.display_phone_number}`);
+        console.log(`   Name:     ${statusRes.data.verified_name}`);
+        console.log(`   Platform: ${statusRes.data.platform_type}`);
     } catch (err) {
         console.log('   ❌ Error:', err.response?.data || err.message);
     }

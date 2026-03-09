@@ -228,19 +228,41 @@ async function getWabaDetails(wabaId, accessToken) {
   return res.data;
 }
 
-async function registerPhoneNumber(phoneNumberId, pin, accessToken, dataLocalizationRegion) {
+/**
+ * Set data localization (storage configuration) for a phone number.
+ * Must be called BEFORE registerPhoneNumber() for migrated numbers
+ * in regions that require data localization (e.g. India → 'in').
+ *
+ * Official Meta docs format:
+ *   POST /{PHONE_NUMBER_ID}/settings
+ *   { "storage_configuration": { "enabled": true, "region": "in" } }
+ */
+async function setStorageConfiguration(phoneNumberId, region, accessToken) {
+  const url = `${BASE_URL}/${phoneNumberId}/settings`;
+  const res = await axios.post(url, {
+    storage_configuration: {
+      enabled: true,
+      region: region.toLowerCase()
+    }
+  }, {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json'
+    }
+  });
+  return res.data;
+}
+
+async function registerPhoneNumber(phoneNumberId, pin, accessToken) {
   const url = `${BASE_URL}/${phoneNumberId}/register`;
   const body = {
     messaging_product: 'whatsapp',
     pin: pin
   };
-  // For API v21+, Indian (+91) numbers require data_localization_region: 'IN'
-  if (dataLocalizationRegion) {
-    body.data_localization_region = dataLocalizationRegion;
-  }
   const res = await axios.post(url, body, {
     headers: {
-      Authorization: `Bearer ${accessToken}`
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json'
     }
   });
   return res.data;
@@ -292,6 +314,7 @@ module.exports = {
   getLongLivedToken,
   getWabasFromToken,
   getWabaDetails,
+  setStorageConfiguration,
   registerPhoneNumber,
   subscribeAppToWaba,
 };

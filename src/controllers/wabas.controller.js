@@ -199,13 +199,20 @@ async function embeddedSignup(req, res, next) {
             for (const pn of phoneNumbers) {
                 try {
                     const dummyPin = Math.floor(100000 + Math.random() * 900000).toString();
-                    // Detect data localization region from phone number country code
-                    let region = null;
+
+                    // For Indian (+91) numbers: must call settings endpoint FIRST
+                    // to set storage_configuration before registering (required by API v21+)
                     if (pn.phoneNumber && pn.phoneNumber.replace(/\s/g, '').startsWith('+91')) {
-                        region = 'IN';
+                        try {
+                            await whatsappService.setStorageConfiguration(pn.phoneNumberId, 'in', accessToken);
+                            console.log(`[EmbeddedSignup] Set storage configuration to IN for ${pn.phoneNumber}`);
+                        } catch (settingsErr) {
+                            console.error(`[EmbeddedSignup] Failed to set storage config for ${pn.phoneNumber}:`, settingsErr.response?.data || settingsErr.message);
+                        }
                     }
-                    await whatsappService.registerPhoneNumber(pn.phoneNumberId, dummyPin, accessToken, region);
-                    console.log(`[EmbeddedSignup] Registered phone ${pn.phoneNumber}${region ? ` with region ${region}` : ''}`);
+
+                    await whatsappService.registerPhoneNumber(pn.phoneNumberId, dummyPin, accessToken);
+                    console.log(`[EmbeddedSignup] Registered phone ${pn.phoneNumber}`);
                 } catch (registerErr) {
                     console.error('Failed to register phone number (may already be registered):', registerErr.response?.data || registerErr.message);
                 }
