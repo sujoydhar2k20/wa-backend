@@ -296,7 +296,6 @@ module.exports = {
   getLongLivedToken,
   getWabasFromToken,
   getWabaDetails,
-  setStorageConfiguration,
   registerPhoneNumber,
   subscribeAppToWaba,
 };
