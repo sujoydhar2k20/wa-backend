@@ -240,8 +240,6 @@ async function setStorageConfiguration(phoneNumberId, region, accessToken) {
   const url = `${BASE_URL}/${phoneNumberId}/settings`;
   const res = await axios.post(url, {
     storage_configuration: {
-      status: 'in_country_storage_enabled',
-      enabled: true,
       data_localization_region: region.toLowerCase()
     }
   }, {

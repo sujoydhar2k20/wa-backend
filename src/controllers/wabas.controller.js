@@ -216,7 +216,18 @@ async function embeddedSignup(req, res, next) {
                     await whatsappService.registerPhoneNumber(pn.phoneNumberId, dummyPin, accessToken);
                     console.log(`[EmbeddedSignup] Registered phone ${pn.phoneNumber}`);
                 } catch (registerErr) {
-                    console.error('Failed to register phone number (may already be registered):', registerErr.response?.data || registerErr.message);
+                    const errorData = registerErr.response?.data?.error || {};
+                    const errorCode = errorData.code;
+
+                    if (errorCode === 133016) {
+                        console.error(`[EmbeddedSignup] Registration failed due to RATE LIMIT for ${pn.phoneNumber}. Stopping further attempts.`);
+                        // Stop the loop for this WABA's phone numbers
+                        break; 
+                    } else if (errorCode === 133004) {
+                        console.log(`[EmbeddedSignup] Phone ${pn.phoneNumber} is already registered. Treating as success.`);
+                    } else {
+                        console.error(`[EmbeddedSignup] Failed to register phone ${pn.phoneNumber}:`, errorData.message || registerErr.message);
+                    }
                 }
             }
 

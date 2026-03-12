@@ -14,7 +14,7 @@ require('dotenv').config();
 const mongoose = require('mongoose');
 const axios = require('axios');
 
-const API_VERSION = 'v21.0';
+const API_VERSION = 'v25.0';
 const BASE_URL = `https://graph.facebook.com/${API_VERSION}`;
 
 async function main() {
