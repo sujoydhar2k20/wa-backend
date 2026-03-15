@@ -12,6 +12,7 @@ router.get('/:id', wabasController.get);
 router.put('/:id', requireAdmin, wabasController.update);
 router.delete('/:id', requireAdmin, wabasController.remove);
 router.post('/:id/sync-templates', requireAdmin, wabasController.syncTemplates);
+router.post('/:id/templates', requireAdmin, wabasController.createTemplate);
 router.get('/:id/templates', wabasController.getTemplates);
 router.get('/:id/webhook', webhookController.verify);
 router.post('/:id/webhook', webhookController.handle);

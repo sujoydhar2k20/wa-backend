@@ -175,6 +175,21 @@ async function syncTemplates(wabaId) {
   return templates;
 }
 
+async function createTemplate(wabaId, name, category, language, components) {
+  const waba = await getWaba(wabaId);
+  const wabaMetaId = waba.wabaId;
+  const path = `/${wabaMetaId}/message_templates`;
+  const body = {
+    name,
+    category,
+    language,
+    components
+  };
+  
+  const data = await request(wabaId, 'POST', path, body);
+  return data;
+}
+
 function verifyWebhook(mode, token, challenge) {
   const verifyToken = config.meta.webhookVerifyToken;
   if (mode === 'subscribe' && token === verifyToken) return challenge;
@@ -320,4 +335,5 @@ module.exports = {
   setStorageConfiguration,
   registerPhoneNumber,
   subscribeAppToWaba,
+  createTemplate,
 };

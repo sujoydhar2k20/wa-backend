@@ -74,6 +74,45 @@ async function getTemplates(req, res, next) {
     }
 }
 
+async function createTemplate(req, res, next) {
+    try {
+        const { name, category, language, components } = req.body;
+        const wabaId = req.params.id;
+
+        if (!name || !category || !language || !components) {
+            return res.status(400).json({ success: false, message: 'Missing required fields for template creation' });
+        }
+
+        const templateResponse = await whatsappService.createTemplate(wabaId, name, category, language, components);
+        
+        // Save the pending template to DB
+        const template = new Template({
+            wabaId,
+            templateId: templateResponse.id,
+            name,
+            language,
+            category,
+            status: templateResponse.status || 'PENDING',
+            components,
+            metaData: templateResponse
+        });
+        await template.save();
+
+        res.status(201).json({ success: true, template });
+    } catch (e) {
+        // More descriptive error for Meta API template creation failures
+        if (e.response && e.response.data && e.response.data.error) {
+            const metaError = e.response.data.error;
+            return res.status(400).json({ 
+                success: false, 
+                message: metaError.error_user_msg || metaError.message || 'Failed to create template with Meta API',
+                metaError 
+            });
+        }
+        next(e);
+    }
+}
+
 async function getAllTemplates(req, res, next) {
     try {
         const { wabaId, status, category, search } = req.query;
@@ -259,4 +298,5 @@ module.exports = {
     getTemplates,
     getAllTemplates,
     embeddedSignup,
+    createTemplate,
 };
