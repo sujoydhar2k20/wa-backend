@@ -1,10 +1,41 @@
-const { Waba, Chat, Message, User, Contact } = require('../models');
+const { Waba, Chat, Message, User, Contact, Product, ProductReplyLog, Rate } = require('../models');
 const { getIO } = require('../websocket/socket.server');
 const { logger } = require('../utils/logger');
 const whatsappService = require('./whatsapp.service');
 const mediaService = require('./media.service');
 const cloudinary = require('../config/cloudinary');
 const streamifier = require('streamifier');
+
+const GST = 0.03;
+
+/**
+ * Calculate product price from rates (mirrors products.controller.js logic).
+ */
+function calculatePrice(product, rate) {
+    const w = product.weight;
+    const cat = product.category;
+    if (!w || !cat || !rate) return undefined;
+
+    if (cat === 'gold') {
+        const karat = product.carat;
+        const ratePerGram = karat ? (rate.gold?.[karat] || 0) : 0;
+        if (!ratePerGram) return undefined;
+        const making = product.makingCharge ? product.makingCharge / 100 : 0;
+        const extra = product.extraCharge || 0;
+        return Math.round((w * ratePerGram * (1 + making) + extra) * (1 + GST));
+    }
+    if (cat === 'silver') {
+        if (!rate.silver) return undefined;
+        const making = product.makingCharge ? product.makingCharge / 100 : 0;
+        return Math.round(w * rate.silver * (1 + making) * (1 + GST));
+    }
+    if (cat === 'diamond') {
+        if (!rate.diamond) return undefined;
+        const extra = product.extraCharge || 0;
+        return Math.round((w * rate.diamond + extra) * (1 + GST));
+    }
+    return undefined;
+}
 
 async function processWebhook(entry) {
     try {
@@ -228,6 +259,12 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
         logger.error(`Error triggering push notification: ${pushErr.message}`);
     }
 
+    // Product code auto-reply (fire-and-forget)
+    if (msg.type === 'text' && msg.text?.body) {
+        handleProductCodeReply(waba, phoneNumberId, chat, message, msg.text.body)
+            .catch(e => logger.error('Product code auto-reply error:', e.message));
+    }
+
     // Emit socket event
     try {
         const io = getIO();
@@ -341,6 +378,92 @@ async function handleStatusUpdate(statusObj) {
     } catch (e) {
         logger.error('Error handling status update:', e.message);
     }
+}
+
+/**
+ * Detect if a WhatsApp text message looks like a product code or SKU.
+ * Codes are short, contain no spaces (e.g. "32/238", "GOLD-001", "SLV_45").
+ */
+function detectProductCode(text) {
+    const trimmed = text.trim();
+    // Max 40 chars, no whitespace, contains at least one alphanumeric char
+    if (trimmed.length === 0 || trimmed.length > 40) return null;
+    if (/\s/.test(trimmed)) return null;
+    if (!/[a-zA-Z0-9]/.test(trimmed)) return null;
+    return trimmed;
+}
+
+/**
+ * Look up a product by code or SKU and auto-reply with its details.
+ */
+async function handleProductCodeReply(waba, phoneNumberId, chat, message, text) {
+    const code = detectProductCode(text);
+    if (!code) return;
+
+    // Case-insensitive search on code or SKU
+    const escapedCode = code.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const codeRegex = new RegExp(`^${escapedCode}$`, 'i');
+    const product = await Product.findOne({ $or: [{ code: codeRegex }, { sku: codeRegex }] }).lean();
+
+    if (!product) {
+        // No match → silent, no reply
+        return;
+    }
+
+    // Compute latest price using current rates
+    let displayPrice = product.price;
+    try {
+        const rate = await Rate.findOne().lean();
+        if (rate) {
+            const computed = calculatePrice(product, rate);
+            if (computed !== undefined) displayPrice = computed;
+        }
+    } catch (_) {
+        // Use stored price if rate lookup fails
+    }
+
+    const CATEGORY_ICON = { gold: '🥇', silver: '🥈', diamond: '💎' };
+    const icon = CATEGORY_ICON[product.category] || '📦';
+
+    const lines = [
+        `🔍 *Product Found*`,
+        ``,
+        `${icon} *Code:* ${product.code}${product.sku ? `  |  *SKU:* ${product.sku}` : ''}`,
+        `🏷️ *Category:* ${product.category.charAt(0).toUpperCase() + product.category.slice(1)}${product.carat ? ` (${product.carat}K)` : ''}`,
+        product.weight != null ? `⚖️ *Weight:* ${product.weight}g` : null,
+        product.makingCharge != null ? `🔨 *Making Charge:* ${product.makingCharge}%` : null,
+        product.extraCharge != null ? `➕ *Extra Charge:* ₨${product.extraCharge}` : null,
+        displayPrice != null ? `💰 *Price:* ₨${displayPrice.toLocaleString()}` : null,
+        `📊 *Stock:* ${product.isInStock ? 'In Stock ✅' : 'Out of Stock ❌'}`,
+    ].filter(l => l !== null).join('\n');
+
+    let replyStatus = 'success';
+    let replyError = null;
+
+    try {
+        await whatsappService.sendTextMessage(
+            waba._id,
+            phoneNumberId,
+            chat.waId,
+            lines,
+            message.messageId  // reply to the original message
+        );
+        logger.info(`Product code auto-reply sent for code "${code}" to ${chat.waId}`);
+    } catch (err) {
+        replyStatus = 'error';
+        replyError = err.message;
+        logger.error(`Failed to send product code auto-reply for "${code}": ${err.message}`);
+    }
+
+    // Log the attempt
+    await ProductReplyLog.create({
+        chatId: chat._id,
+        messageId: message._id,
+        productCode: code,
+        productId: product._id,
+        status: replyStatus,
+        errorMessage: replyError,
+    }).catch(e => logger.error('Failed to save ProductReplyLog:', e.message));
 }
 
 async function processMediaAsync(chat, messageData, type) {
@@ -465,5 +588,7 @@ async function processTemplateStatusWebhook(entry) {
 module.exports = {
     processWebhook,
     handleStatusUpdate,
-    processTemplateStatusWebhook
+    processTemplateStatusWebhook,
+    detectProductCode,
+    handleProductCodeReply,
 };
