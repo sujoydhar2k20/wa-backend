@@ -441,13 +441,40 @@ async function handleProductCodeReply(waba, phoneNumberId, chat, message, text) 
     let replyError = null;
 
     try {
-        await whatsappService.sendTextMessage(
+        const waResult = await whatsappService.sendTextMessage(
             waba._id,
             phoneNumberId,
             chat.waId,
             lines,
             message.messageId  // reply to the original message
         );
+
+        // Save the outbound auto-reply as a Message so it appears in the chat
+        const msgId = waResult?.messages?.[0]?.id;
+        const outboundMsg = await Message.create({
+            chatId: chat._id,
+            wabaId: waba._id,
+            phoneNumberId,
+            messageId: msgId,
+            waId: chat.waId,
+            direction: 'outbound',
+            type: 'text',
+            text: lines,
+            status: 'sent',
+            replyToMessageId: message._id,
+        });
+
+        // Update chat last message timestamp
+        await Chat.findByIdAndUpdate(chat._id, { lastMessageAt: new Date(), lastStaffMessageAt: new Date() });
+
+        // Emit socket event so frontend updates in real-time
+        try {
+            const io = getIO();
+            io.emit('message:new', { chatId: chat._id, message: outboundMsg });
+        } catch (e) {
+            logger.warn('Socket emit failed for product auto-reply:', e.message);
+        }
+
         logger.info(`Product code auto-reply sent for code "${code}" to ${chat.waId}`);
     } catch (err) {
         replyStatus = 'error';
