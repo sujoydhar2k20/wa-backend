@@ -249,11 +249,30 @@ async function importProducts(req, res, next) {
         setImmediate(async () => {
             try {
                 await ProductImport.findByIdAndUpdate(productImport._id, { status: 'processing' });
-                const content = fileBuffer.toString('utf8');
-                const lines = content.split('\n').filter(l => l.trim());
-                const hasHeader = /[a-zA-Z]/.test(lines[0]?.split(',')[0]);
-                const headerLine = hasHeader ? lines[0].split(',').map((h) => h.trim().toLowerCase().replace(/"/g, '')) : null;
-                const dataLines = hasHeader ? lines.slice(1) : lines;
+                
+                let dataLines = [];
+                let headerLine = null;
+                const isExcel = req.file.originalname.match(/\.(xlsx|xls)$/i) || 
+                                req.file.mimetype === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
+                                req.file.mimetype === 'application/vnd.ms-excel';
+
+                if (isExcel) {
+                    const XLSX = require('xlsx');
+                    const workbook = XLSX.read(fileBuffer, { type: 'buffer' });
+                    const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
+                    const jsonData = XLSX.utils.sheet_to_json(firstSheet, { header: 1 });
+                    
+                    if (jsonData.length > 0) {
+                        headerLine = jsonData[0].map(h => String(h || '').trim().toLowerCase());
+                        dataLines = jsonData.slice(1);
+                    }
+                } else {
+                    const content = fileBuffer.toString('utf8');
+                    const lines = content.split('\n').filter(l => l.trim());
+                    const hasHeader = /[a-zA-Z]/.test(lines[0]?.split(',')[0]);
+                    headerLine = hasHeader ? lines[0].split(',').map((h) => h.trim().toLowerCase().replace(/"/g, '')) : null;
+                    dataLines = hasHeader ? lines.slice(1) : lines;
+                }
 
                 const logs = [];
                 let successCount = 0;
@@ -262,7 +281,9 @@ async function importProducts(req, res, next) {
                 const rate = await Rate.findOne();
 
                 for (let i = 0; i < dataLines.length; i++) {
-                    const cols = dataLines[i].split(',').map((c) => c.trim().replace(/^"|"$/g, ''));
+                    const row = dataLines[i];
+                    const cols = isExcel ? row : row.split(',').map((c) => c.trim().replace(/^"|"$/g, ''));
+                    
                     try {
                         const getCol = (field) => {
                             if (parsedMapping[field] && headerLine) {
@@ -286,7 +307,8 @@ async function importProducts(req, res, next) {
                             weight: getCol('weight') ? parseFloat(getCol('weight')) : undefined,
                             makingCharge: getCol('makingCharge') ? parseFloat(getCol('makingCharge')) : undefined,
                             extraCharge: getCol('extraCharge') ? parseFloat(getCol('extraCharge')) : undefined,
-                            price: getCol('price') ? parseFloat(getCol('price')) : undefined,
+                            // Ignore price from file to favor system calculation
+                            price: undefined, 
                         };
 
                         if (rate) {
@@ -294,6 +316,9 @@ async function importProducts(req, res, next) {
                             if (computedPrice !== undefined) productData.price = computedPrice;
                         }
 
+                        // If still no price (e.g. rate not found), and the file HAS a price, 
+                        // we still ignore it as per user requirement: "we will not import the price from it"
+                        
                         await Product.findOneAndUpdate({ code }, productData, { upsert: true, new: true, runValidators: true });
                         logs.push({ rowNumber: i + 2, status: 'success', data: productData });
                         successCount++;
