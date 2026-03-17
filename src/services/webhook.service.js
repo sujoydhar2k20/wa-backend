@@ -296,27 +296,47 @@ async function handleStatusUpdate(statusObj) {
 
         logger.info(`Received status update for Meta ID: ${messageId} -> ${status}`);
 
-        const message = await Message.findOneAndUpdate(
-            { messageId },
-            {
-                $set: {
-                    status: status,
-                    statusTimestamp: timestamp
-                }
-            },
-            { new: true }
-        );
+        // Retry up to 3 times with a 500 ms delay to handle the race where WhatsApp
+        // delivers a status webhook before our own DB write for the outbound message
+        // has completed (common for 'sent' status on fast networks).
+        let message = null;
+        const MAX_RETRIES = 3;
+        const RETRY_DELAY_MS = 500;
+
+        for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+            message = await Message.findOneAndUpdate(
+                { messageId },
+                {
+                    $set: {
+                        status: status,
+                        statusTimestamp: timestamp
+                    }
+                },
+                { new: true }
+            );
+
+            if (message) break;
+
+            if (attempt < MAX_RETRIES) {
+                logger.warn(`Status update: message not found for Meta ID ${messageId} (attempt ${attempt}/${MAX_RETRIES}), retrying in ${RETRY_DELAY_MS}ms...`);
+                await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS));
+            }
+        }
 
         if (message) {
             logger.info(`Successfully updated message ${message._id} to ${status}`);
             // Emit socket event for frontend to update checkmarks
-            const io = getIO();
-            io.emit('message:status', {
-                chatId: message.chatId,
-                messageId: message._id, // Mongo ID used by frontend
-                waMessageId: messageId, // Meta ID
-                status: status
-            });
+            try {
+                const io = getIO();
+                io.emit('message:status', {
+                    chatId: message.chatId.toString(),
+                    messageId: message._id.toString(), // Mongo ID used by frontend
+                    waMessageId: messageId,             // Meta ID
+                    status: status
+                });
+            } catch (emitError) {
+                logger.warn('Socket emit failed for message status:', emitError.message);
+            }
         } else {
             const { BroadcastMessage, Broadcast, BroadcastListMember } = require('../models');
             const broadcastMessage = await BroadcastMessage.findOneAndUpdate(
@@ -372,7 +392,7 @@ async function handleStatusUpdate(statusObj) {
                     logger.warn('Socket emit failed for broadcast message status:', emitError.message);
                 }
             } else {
-                logger.warn(`No message found in DB for Meta ID: ${messageId}`);
+                logger.warn(`No message found in DB for Meta ID: ${messageId} after ${MAX_RETRIES} attempts`);
             }
         }
     } catch (e) {
