@@ -73,6 +73,13 @@ async function processWebhook(entry) {
 }
 
 async function handleMessage(waba, phoneNumberId, msg, contacts) {
+    // Deduplication: skip if this Meta message ID was already processed
+    const existingMsg = await Message.findOne({ messageId: msg.id });
+    if (existingMsg) {
+        logger.warn(`Duplicate webhook ignored for messageId: ${msg.id}`);
+        return;
+    }
+
     const waId = msg.from; // Sender's phone number
     const contactData = contacts.find(c => c.wa_id === waId);
     const profileName = contactData?.profile?.name || waId;
