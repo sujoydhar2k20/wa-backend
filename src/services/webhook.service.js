@@ -462,19 +462,19 @@ async function handleProductCodeReply(waba, phoneNumberId, chat, message, text) 
         // Use stored price if rate lookup fails
     }
 
-    const CATEGORY_ICON = { gold: '🥇', silver: '🥈', diamond: '💎' };
-    const icon = CATEGORY_ICON[product.category] || '📦';
+    const CATEGORY_HEADER = {
+        gold:    '🏅 Gold Product Details',
+        silver:  '🥈 Silver Product Details',
+        diamond: '💎 Diamond Product Details',
+    };
 
     const lines = [
-        `🔍 *Product Found*`,
+        CATEGORY_HEADER[product.category] || `📦 Product Details`,
+        `📋 Code: ${product.code}`,
+        product.weight != null ? `⚖️ Weight: ${product.weight}g` : null,
+        displayPrice != null ? `💵 Approx: ₹${displayPrice.toLocaleString()}` : null,
         ``,
-        `${icon} *Code:* ${product.code}${product.sku ? `  |  *SKU:* ${product.sku}` : ''}`,
-        `🏷️ *Category:* ${product.category.charAt(0).toUpperCase() + product.category.slice(1)}${product.carat ? ` (${product.carat}K)` : ''}`,
-        product.weight != null ? `⚖️ *Weight:* ${product.weight}g` : null,
-        product.makingCharge != null ? `🔨 *Making Charge:* ${product.makingCharge}%` : null,
-        product.extraCharge != null ? `➕ *Extra Charge:* ₨${product.extraCharge}` : null,
-        displayPrice != null ? `💰 *Price:* ₨${displayPrice.toLocaleString()}` : null,
-        `📊 *Stock:* ${product.isInStock ? 'In Stock ✅' : 'Out of Stock ❌'}`,
+        `🛒 Buy Now: https://biswakarmagold.com/products?search=${encodeURIComponent(product.code)}`,
     ].filter(l => l !== null).join('\n');
 
     let replyStatus = 'success';
