@@ -229,7 +229,27 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
     }
     // Add other types as needed
 
-    const message = await Message.create(messageData);
+    // Idempotent insert: check by WhatsApp message ID before creating.
+    // WhatsApp retries webhook delivery when the server responds slowly,
+    // which would otherwise create duplicate messages in the DB.
+    const existingMessage = await Message.findOne({ messageId: msg.id });
+    if (existingMessage) {
+        logger.warn(`Duplicate inbound webhook for messageId ${msg.id}, skipping.`);
+        return;
+    }
+
+    let message;
+    try {
+        message = await Message.create(messageData);
+    } catch (createErr) {
+        // E11000 = duplicate key error: two simultaneous webhook retries raced past
+        // the findOne check above. The first insert won — just bail out silently.
+        if (createErr.code === 11000) {
+            logger.warn(`Concurrent duplicate inbound webhook for messageId ${msg.id}, skipping.`);
+            return;
+        }
+        throw createErr;
+    }
 
     // Send push notification
     try {

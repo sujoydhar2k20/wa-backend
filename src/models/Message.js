@@ -17,7 +17,7 @@ const messageSchema = new mongoose.Schema(
     chatId: { type: mongoose.Schema.Types.ObjectId, ref: 'Chat', required: true, index: true },
     wabaId: { type: mongoose.Schema.Types.ObjectId, ref: 'Waba', index: true },
     phoneNumberId: { type: String },
-    messageId: { type: String, index: true },
+    messageId: { type: String, index: true, unique: true, sparse: true },
     waId: { type: String },
     direction: { type: String, enum: ['inbound', 'outbound', 'internal'], required: true },
     type: { type: String, enum: ['text', 'image', 'video', 'audio', 'document', 'location', 'sticker', 'reaction', 'note', 'system', 'template'], default: 'text' },
