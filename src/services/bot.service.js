@@ -169,22 +169,22 @@ async function executeFlow(flow, context) {
             return;
         }
 
-        // Start from the trigger, then follow edges
-        let currentNodeId = triggerNode.id;
+        // Recursive node walker that handles multiple branches
         const visited = new Set();
-        let maxSteps = 50; // Safety limit
+        let totalSteps = 0;
+        const maxSteps = 50;
 
-        while (currentNodeId && maxSteps > 0) {
-            maxSteps--;
-
-            if (visited.has(currentNodeId)) {
-                logger.warn(`Bot flow "${flow.name}": cycle detected at node ${currentNodeId}`);
-                break;
+        async function walkNode(nodeId) {
+            if (!nodeId || totalSteps >= maxSteps) return;
+            if (visited.has(nodeId)) {
+                logger.warn(`Bot flow "${flow.name}": cycle detected at node ${nodeId}`);
+                return;
             }
-            visited.add(currentNodeId);
+            visited.add(nodeId);
+            totalSteps++;
 
-            const node = nodeMap[currentNodeId];
-            if (!node) break;
+            const node = nodeMap[nodeId];
+            if (!node) return;
 
             // Execute node action (skip trigger node itself)
             if (node.type !== 'trigger') {
@@ -197,21 +197,26 @@ async function executeFlow(flow, context) {
                 });
                 execution.currentNodeId = node.id;
 
-                // If condition node, choose branch based on result
+                // If condition node, choose only the matching branch
                 if (node.type === 'condition' || node.type === 'working_hours_condition') {
-                    const edges = edgeMap[currentNodeId] || [];
+                    const edges = edgeMap[nodeId] || [];
                     const branch = result?.branch || 'yes';
                     const matchedEdge = edges.find(e => e.sourceHandle === branch) || edges[0];
-                    currentNodeId = matchedEdge?.target || null;
-                    continue;
+                    if (matchedEdge) {
+                        await walkNode(matchedEdge.target);
+                    }
+                    return;
                 }
             }
 
-            // Follow the edge to the next node
-            const edges = edgeMap[currentNodeId] || [];
-            if (edges.length === 0) break;
-            currentNodeId = edges[0].target;
+            // Follow ALL edges from this node (supports branching)
+            const edges = edgeMap[nodeId] || [];
+            for (const edge of edges) {
+                await walkNode(edge.target);
+            }
         }
+
+        await walkNode(triggerNode.id);
 
         await finishExecution(execution, 'completed');
         logger.info(`Bot flow "${flow.name}" completed for chat ${chat._id}`);
