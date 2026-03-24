@@ -466,6 +466,7 @@ async function saveOutboundMessage(chat, waba, phoneNumberId, msgId, type, text)
             type: type === 'template' ? 'template' : type === 'interactive' ? 'interactive' : 'text',
             text: text,
             status: 'sent',
+            sentByBot: true,
         });
 
         // Update chat
