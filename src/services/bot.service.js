@@ -188,24 +188,35 @@ async function executeFlow(flow, context) {
 
             // Execute node action (skip trigger node itself)
             if (node.type !== 'trigger') {
-                const result = await executeNode(node, { waba, phoneNumberId, chat, message, text, flow });
-                execution.executionLog.push({
-                    nodeId: node.id,
-                    action: node.type,
-                    result: result,
-                    timestamp: new Date(),
-                });
-                execution.currentNodeId = node.id;
+                try {
+                    const result = await executeNode(node, { waba, phoneNumberId, chat, message, text, flow });
+                    execution.executionLog.push({
+                        nodeId: node.id,
+                        action: node.type,
+                        result: result,
+                        timestamp: new Date(),
+                    });
+                    execution.currentNodeId = node.id;
 
-                // If condition node, choose only the matching branch
-                if (node.type === 'condition' || node.type === 'working_hours_condition') {
-                    const edges = edgeMap[nodeId] || [];
-                    const branch = result?.branch || 'yes';
-                    const matchedEdge = edges.find(e => e.sourceHandle === branch) || edges[0];
-                    if (matchedEdge) {
-                        await walkNode(matchedEdge.target);
+                    // If condition node, choose only the matching branch
+                    if (node.type === 'condition' || node.type === 'working_hours_condition') {
+                        const edges = edgeMap[nodeId] || [];
+                        const branch = result?.branch || 'yes';
+                        const matchedEdge = edges.find(e => e.sourceHandle === branch) || edges[0];
+                        if (matchedEdge) {
+                            await walkNode(matchedEdge.target);
+                        }
+                        return;
                     }
-                    return;
+                } catch (nodeErr) {
+                    logger.error(`Bot flow "${flow.name}" node "${node.type}" (${node.id}) error: ${nodeErr.message}`);
+                    execution.executionLog.push({
+                        nodeId: node.id,
+                        action: node.type,
+                        result: { error: nodeErr.message },
+                        timestamp: new Date(),
+                    });
+                    // Continue to next branches even if this node fails
                 }
             }
 
