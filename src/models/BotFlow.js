@@ -1,21 +1,59 @@
 const mongoose = require('mongoose');
 
 const triggerSchema = new mongoose.Schema({
-  type: { type: String, enum: ['on_message', 'on_agent_connected', 'on_close', 'on_open'], default: 'on_message' },
+  type: {
+    type: String,
+    enum: [
+      'on_message',
+      'on_agent_assign',
+      'on_close_conversation',
+      'on_first_daily_message',
+      'on_new_lead',
+      'on_open_conversation',
+    ],
+    default: 'on_message',
+  },
   keywords: [String],
   matchType: { type: String, enum: ['exact', 'partial', 'regex'], default: 'partial' },
-  partiallyMatch: { type: Boolean, default: true },
+}, { _id: false });
+
+const positionSchema = new mongoose.Schema({
+  x: { type: Number, default: 0 },
+  y: { type: Number, default: 0 },
 }, { _id: false });
 
 const nodeSchema = new mongoose.Schema({
   id: { type: String, required: true },
-  type: { type: String, enum: ['send_message', 'send_template', 'send_interactive', 'time_delay', 'condition', 'opt_out', 'set_attribute'], required: true },
+  type: {
+    type: String,
+    enum: [
+      'trigger',
+      'send_message',
+      'send_template',
+      'send_interactive',
+      'send_interactive_list',
+      'time_delay',
+      'condition',
+      'assign_agent',
+      'close_conversation',
+      'opt_out',
+      'wait_till',
+      'working_hours_condition',
+      'set_attribute',
+    ],
+    required: true,
+  },
+  label: { type: String, default: '' },
   config: mongoose.Schema.Types.Mixed,
+  position: { type: positionSchema, default: () => ({ x: 0, y: 0 }) },
 }, { _id: false });
 
 const edgeSchema = new mongoose.Schema({
-  from: String,
-  to: String,
+  id: String,
+  source: String,
+  target: String,
+  sourceHandle: String,
+  targetHandle: String,
   condition: String,
 }, { _id: false });
 
