@@ -2,6 +2,7 @@ const { Waba, Chat, Message, User, Contact, Product, ProductReplyLog, Rate } = r
 const { getIO } = require('../websocket/socket.server');
 const { logger } = require('../utils/logger');
 const whatsappService = require('./whatsapp.service');
+const botService = require('./bot.service');
 const mediaService = require('./media.service');
 const cloudinary = require('../config/cloudinary');
 const streamifier = require('streamifier');
@@ -290,6 +291,19 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
     if (msg.type === 'text' && msg.text?.body) {
         handleProductCodeReply(waba, phoneNumberId, chat, message, msg.text.body)
             .catch(e => logger.error('Product code auto-reply error:', e.message));
+    }
+
+    // Bot flow execution (fire-and-forget)
+    const msgText = msg.type === 'text' ? msg.text?.body : '';
+    botService.processIncomingMessage({
+        waba, phoneNumberId, chat, message, text: msgText || '',
+    }).catch(e => logger.error('Bot execution error:', e.message));
+
+    // Trigger on_new_lead for brand new chats
+    if (isNewChat) {
+        botService.processOpenConversation({
+            waba, phoneNumberId, chat, message, text: msgText || '',
+        }).catch(e => logger.error('Bot on_new_lead error:', e.message));
     }
 
     // Emit socket event
