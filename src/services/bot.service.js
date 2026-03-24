@@ -276,7 +276,12 @@ async function executeNode(node, context) {
                 waba._id, phoneNumberId, chat.waId, payload
             );
             const msgId = waResult?.messages?.[0]?.id;
-            await saveOutboundMessage(chat, waba, phoneNumberId, msgId, 'interactive', config.bodyText || 'Interactive message');
+            await saveOutboundMessage(chat, waba, phoneNumberId, msgId, 'interactive', config.bodyText || 'Interactive message', {
+                interactiveType: 'button',
+                headerText: config.headerText || '',
+                bodyText: config.bodyText || '',
+                buttons: config.buttons || [],
+            });
             return { sent: true, messageId: msgId };
         }
 
@@ -301,7 +306,13 @@ async function executeNode(node, context) {
                 waba._id, phoneNumberId, chat.waId, payload
             );
             const msgId = waResult?.messages?.[0]?.id;
-            await saveOutboundMessage(chat, waba, phoneNumberId, msgId, 'interactive', config.bodyText || 'List message');
+            await saveOutboundMessage(chat, waba, phoneNumberId, msgId, 'interactive', config.bodyText || 'List message', {
+                interactiveType: 'list',
+                headerText: config.headerText || '',
+                bodyText: config.bodyText || '',
+                buttonText: config.buttonText || 'View Options',
+                listItems: config.listItems || [],
+            });
             return { sent: true, messageId: msgId };
         }
 
@@ -454,7 +465,7 @@ function evaluateCondition(fieldValue, operator, value) {
 /**
  * Save an outbound message to the DB and emit socket event.
  */
-async function saveOutboundMessage(chat, waba, phoneNumberId, msgId, type, text) {
+async function saveOutboundMessage(chat, waba, phoneNumberId, msgId, type, text, metadata = null) {
     try {
         const outboundMsg = await Message.create({
             chatId: chat._id,
@@ -467,6 +478,7 @@ async function saveOutboundMessage(chat, waba, phoneNumberId, msgId, type, text)
             text: text,
             status: 'sent',
             sentByBot: true,
+            ...(metadata && { metadata }),
         });
 
         // Update chat

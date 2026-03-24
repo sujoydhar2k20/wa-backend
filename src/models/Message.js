@@ -39,6 +39,7 @@ const messageSchema = new mongoose.Schema(
     errorMessage: { type: String },
     sentBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     sentByBot: { type: Boolean, default: false },
+    metadata: { type: mongoose.Schema.Types.Mixed },
     replyToMessageId: { type: mongoose.Schema.Types.ObjectId, ref: 'Message' },
   },
   { timestamps: true }
