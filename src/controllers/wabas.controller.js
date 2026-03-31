@@ -235,8 +235,9 @@ async function embeddedSignup(req, res, next) {
             );
 
             // 5. Register Phone Numbers
-            // For v21+: Indian (+91) numbers need setStorageConfiguration FIRST (while unregistered),
-            // then register WITHOUT data_localization_region (deprecated in register body)
+            // NOTE: With Embedded Signup v3+, Meta may auto-register the phone number.
+            // We still attempt registration to handle edge cases, but gracefully skip
+            // if the number is already registered (error 133004 or #100).
             for (const pn of phoneNumbers) {
                 try {
                     const dummyPin = Math.floor(100000 + Math.random() * 900000).toString();
@@ -247,7 +248,9 @@ async function embeddedSignup(req, res, next) {
                             await whatsappService.setStorageConfiguration(pn.phoneNumberId, 'IN', accessToken);
                             console.log(`[EmbeddedSignup] Set storage configuration to IN for ${pn.phoneNumber}`);
                         } catch (settingsErr) {
-                            console.error(`[EmbeddedSignup] Failed to set storage config for ${pn.phoneNumber}:`, settingsErr.response?.data || settingsErr.message);
+                            const settingsError = settingsErr.response?.data?.error || {};
+                            // If storage config fails because number is already registered, that's OK
+                            console.warn(`[EmbeddedSignup] Storage config for ${pn.phoneNumber}:`, settingsError.message || settingsErr.message);
                         }
                     }
 
@@ -262,8 +265,9 @@ async function embeddedSignup(req, res, next) {
                         console.error(`[EmbeddedSignup] Registration failed due to RATE LIMIT for ${pn.phoneNumber}. Stopping further attempts.`);
                         // Stop the loop for this WABA's phone numbers
                         break; 
-                    } else if (errorCode === 133004) {
-                        console.log(`[EmbeddedSignup] Phone ${pn.phoneNumber} is already registered. Treating as success.`);
+                    } else if (errorCode === 133004 || errorCode === 100) {
+                        // 133004 = already registered, 100 = invalid parameter (often means already registered via Embedded Signup v3+)
+                        console.log(`[EmbeddedSignup] Phone ${pn.phoneNumber} is already registered (code: ${errorCode}). Treating as success.`);
                     } else {
                         console.error(`[EmbeddedSignup] Failed to register phone ${pn.phoneNumber}:`, errorData.message || registerErr.message);
                     }
