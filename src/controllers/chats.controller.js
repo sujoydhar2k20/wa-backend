@@ -35,6 +35,7 @@ async function list(req, res, next) {
                 .limit(parseInt(limit, 10))
                 .populate('contactId', 'name nickname profilePicture isOptedOut isBlocked')
                 .populate('assignedTo', 'name phone')
+                .populate('wabaId', 'businessName phoneNumbers')
                 .populate('tags', 'name color'),
             Chat.countDocuments(filter),
         ]);
@@ -79,6 +80,7 @@ async function search(req, res, next) {
                 .limit(parseInt(limit, 10))
                 .populate('contactId', 'name nickname profilePicture')
                 .populate('assignedTo', 'name phone')
+                .populate('wabaId', 'businessName phoneNumbers')
                 .populate('tags', 'name color'),
             Chat.countDocuments(baseFilter),
         ]);
@@ -93,6 +95,7 @@ async function get(req, res, next) {
         const chat = await Chat.findById(req.params.id)
             .populate('contactId', 'name nickname profilePicture isOptedOut isBlocked customFields')
             .populate('assignedTo', 'name phone')
+            .populate('wabaId', 'businessName phoneNumbers')
             .populate('collaborators', 'name phone')
             .populate('tags', 'name color');
         if (!chat) return res.status(404).json({ success: false, message: 'Chat not found' });
@@ -123,6 +126,7 @@ async function assign(req, res, next) {
         const populated = await Chat.findById(chat._id)
             .populate('contactId', 'name nickname profilePicture isOptedOut isBlocked customFields')
             .populate('assignedTo', 'name phone')
+            .populate('wabaId', 'businessName phoneNumbers')
             .populate('collaborators', 'name phone')
             .populate('tags', 'name color');
 
@@ -218,6 +222,7 @@ async function close(req, res, next) {
         const populated = await Chat.findById(chat._id)
             .populate('contactId', 'name nickname profilePicture isOptedOut isBlocked customFields')
             .populate('assignedTo', 'name phone')
+            .populate('wabaId', 'businessName phoneNumbers')
             .populate('collaborators', 'name phone')
             .populate('tags', 'name color');
 
@@ -275,6 +280,7 @@ async function reopen(req, res, next) {
         const populated = await Chat.findById(chat._id)
             .populate('contactId', 'name nickname profilePicture isOptedOut isBlocked customFields')
             .populate('assignedTo', 'name phone')
+            .populate('wabaId', 'businessName phoneNumbers')
             .populate('collaborators', 'name phone')
             .populate('tags', 'name color');
 
