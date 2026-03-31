@@ -235,25 +235,17 @@ async function embeddedSignup(req, res, next) {
             );
 
             // 5. Register Phone Numbers
-            // For Indian (+91) numbers: call settings endpoint FIRST to set storage_configuration,
-            // then register WITHOUT data_localization_region (deprecated in register body for v21+)
+            // Per Meta v25.0 docs: data_localization_region goes directly in the /register body
             for (const pn of phoneNumbers) {
                 try {
                     const dummyPin = Math.floor(100000 + Math.random() * 900000).toString();
 
-                    // Step A: Set storage configuration for Indian numbers
-                    if (pn.phoneNumber && pn.phoneNumber.replace(/\s/g, '').startsWith('+91')) {
-                        try {
-                            await whatsappService.setStorageConfiguration(pn.phoneNumberId, 'in', accessToken);
-                            console.log(`[EmbeddedSignup] Set storage configuration to IN for ${pn.phoneNumber}`);
-                        } catch (settingsErr) {
-                            console.error(`[EmbeddedSignup] Failed to set storage config for ${pn.phoneNumber}:`, settingsErr.response?.data || settingsErr.message);
-                        }
-                    }
+                    // Detect Indian numbers and pass data_localization_region = "IN"
+                    const isIndian = pn.phoneNumber && pn.phoneNumber.replace(/\s/g, '').startsWith('+91');
+                    const region = isIndian ? 'IN' : null;
 
-                    // Step B: Register the phone number
-                    await whatsappService.registerPhoneNumber(pn.phoneNumberId, dummyPin, accessToken);
-                    console.log(`[EmbeddedSignup] Registered phone ${pn.phoneNumber}`);
+                    await whatsappService.registerPhoneNumber(pn.phoneNumberId, dummyPin, accessToken, region);
+                    console.log(`[EmbeddedSignup] Registered phone ${pn.phoneNumber}${region ? ` with data_localization_region: ${region}` : ''}`);
                 } catch (registerErr) {
                     const errorData = registerErr.response?.data?.error || {};
                     const errorCode = errorData.code;
