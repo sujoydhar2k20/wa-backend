@@ -235,17 +235,25 @@ async function embeddedSignup(req, res, next) {
             );
 
             // 5. Register Phone Numbers
-            // Per Meta v25.0 docs: data_localization_region goes directly in the /register body
+            // For v21+: Indian (+91) numbers need setStorageConfiguration FIRST (while unregistered),
+            // then register WITHOUT data_localization_region (deprecated in register body)
             for (const pn of phoneNumbers) {
                 try {
                     const dummyPin = Math.floor(100000 + Math.random() * 900000).toString();
 
-                    // Detect Indian numbers and pass data_localization_region = "IN"
-                    const isIndian = pn.phoneNumber && pn.phoneNumber.replace(/\s/g, '').startsWith('+91');
-                    const region = isIndian ? 'IN' : null;
+                    // Step A: Set storage configuration for Indian numbers (must be done while unregistered)
+                    if (pn.phoneNumber && pn.phoneNumber.replace(/\s/g, '').startsWith('+91')) {
+                        try {
+                            await whatsappService.setStorageConfiguration(pn.phoneNumberId, 'IN', accessToken);
+                            console.log(`[EmbeddedSignup] Set storage configuration to IN for ${pn.phoneNumber}`);
+                        } catch (settingsErr) {
+                            console.error(`[EmbeddedSignup] Failed to set storage config for ${pn.phoneNumber}:`, settingsErr.response?.data || settingsErr.message);
+                        }
+                    }
 
-                    await whatsappService.registerPhoneNumber(pn.phoneNumberId, dummyPin, accessToken, region);
-                    console.log(`[EmbeddedSignup] Registered phone ${pn.phoneNumber}${region ? ` with data_localization_region: ${region}` : ''}`);
+                    // Step B: Register the phone number (without data_localization_region for v21+)
+                    await whatsappService.registerPhoneNumber(pn.phoneNumberId, dummyPin, accessToken);
+                    console.log(`[EmbeddedSignup] Registered phone ${pn.phoneNumber}`);
                 } catch (registerErr) {
                     const errorData = registerErr.response?.data?.error || {};
                     const errorCode = errorData.code;

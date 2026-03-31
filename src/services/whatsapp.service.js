@@ -244,28 +244,22 @@ async function getWabaDetails(wabaId, accessToken) {
 }
 
 /**
- * Register a phone number with WhatsApp Cloud API.
- * Per official Meta docs (v25.0), the POST /{PHONE_NUMBER_ID}/register endpoint accepts:
- *   - messaging_product (required): "whatsapp"
- *   - pin (required): 6-digit two-step verification PIN
- *   - data_localization_region (optional): 2-letter ISO 3166 country code (e.g. "IN" for India)
+ * Set data localization (storage configuration) for a phone number.
+ * Must be called BEFORE registerPhoneNumber() while the number is UNREGISTERED.
+ * Required for Indian numbers and other regions requiring local storage.
  *
- * For Indian numbers (+91), pass dataLocalizationRegion = "IN" to enable local storage.
+ * Per Meta docs (v21+), the POST /{PHONE_NUMBER_ID}/settings endpoint expects:
+ * { "storage_configuration": { "status": "IN_COUNTRY_STORAGE_ENABLED", "data_localization_region": "IN" } }
  */
-async function registerPhoneNumber(phoneNumberId, pin, accessToken, dataLocalizationRegion = null) {
-  const url = `${BASE_URL}/${phoneNumberId}/register`;
-  const body = {
-    messaging_product: 'whatsapp',
-    pin: pin
-  };
-
-  // Add data localization region if specified (e.g. "IN" for India)
-  if (dataLocalizationRegion) {
-    body.data_localization_region = dataLocalizationRegion.toUpperCase();
-    console.log(`[EmbeddedSignup] Registering phone ${phoneNumberId} with data_localization_region: ${body.data_localization_region}`);
-  }
-
-  const res = await axios.post(url, body, {
+async function setStorageConfiguration(phoneNumberId, region, accessToken) {
+  const url = `${BASE_URL}/${phoneNumberId}/settings`;
+  console.log(`[EmbeddedSignup] Setting storage config for phone ${phoneNumberId}, region: ${region.toUpperCase()}`);
+  const res = await axios.post(url, {
+    storage_configuration: {
+      status: 'IN_COUNTRY_STORAGE_ENABLED',
+      data_localization_region: region.toUpperCase()
+    }
+  }, {
     headers: {
       Authorization: `Bearer ${accessToken}`,
       'Content-Type': 'application/json'
@@ -273,6 +267,26 @@ async function registerPhoneNumber(phoneNumberId, pin, accessToken, dataLocaliza
   });
   return res.data;
 }
+
+/**
+ * Register a phone number with WhatsApp Cloud API.
+ * For v21+: data_localization_region is DEPRECATED in the register body.
+ * Use setStorageConfiguration() FIRST for regions like India.
+ */
+async function registerPhoneNumber(phoneNumberId, pin, accessToken) {
+  const url = `${BASE_URL}/${phoneNumberId}/register`;
+  const res = await axios.post(url, {
+    messaging_product: 'whatsapp',
+    pin: pin
+  }, {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json'
+    }
+  });
+  return res.data;
+}
+
 
 
 async function subscribeAppToWaba(wabaId, accessToken) {
@@ -321,6 +335,7 @@ module.exports = {
   getLongLivedToken,
   getWabasFromToken,
   getWabaDetails,
+  setStorageConfiguration,
   registerPhoneNumber,
   subscribeAppToWaba,
   createTemplate,
