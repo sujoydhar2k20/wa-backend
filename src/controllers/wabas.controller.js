@@ -239,6 +239,7 @@ async function embeddedSignup(req, res, next) {
             // NOTE: With Embedded Signup v3+, Meta may auto-register the phone number.
             // We still attempt registration to handle edge cases, but gracefully skip
             // if the number is already registered (error 133004 or #100).
+            let hasCriticalError = false;
             for (const pn of phoneNumbers) {
                 try {
                     const dummyPin = Math.floor(100000 + Math.random() * 900000).toString();
@@ -266,6 +267,7 @@ async function embeddedSignup(req, res, next) {
                     if (errorCode === 133016) {
                         console.error(`[EmbeddedSignup] Registration failed due to RATE LIMIT for ${pn.phoneNumber}. Stopping further attempts.`);
                         registrationWarnings.push(`Phone ${pn.phoneNumber}: Rate limited. Please wait 72 hours before trying again.`);
+                        hasCriticalError = true;
                         break; 
                     } else if (errorCode === 133004) {
                         // Already registered on Cloud API — this is fine
@@ -277,6 +279,7 @@ async function embeddedSignup(req, res, next) {
                             registrationWarnings.push(
                                 `Phone ${pn.phoneNumber}: ${errorDetails}. Please add a payment method in Meta Business Manager → WhatsApp Accounts → Payment Settings, then reconnect.`
                             );
+                            hasCriticalError = true;
                         } else {
                             // Generic code 100 — likely already registered via Embedded Signup v3+
                             console.log(`[EmbeddedSignup] Phone ${pn.phoneNumber} is already registered (code: ${errorCode}). Treating as success.`);
@@ -286,6 +289,13 @@ async function embeddedSignup(req, res, next) {
                         registrationWarnings.push(`Phone ${pn.phoneNumber}: ${errorData.message || registerErr.message}`);
                     }
                 }
+            }
+
+            // If a critical error occurred (e.g. missing payment method), remove the saved WABA from DB
+            if (hasCriticalError) {
+                console.error(`[EmbeddedSignup] Critical error for WABA ${wabaData.wabaId}. Removing from DB.`);
+                await Waba.deleteOne({ wabaId: wabaDetails.id });
+                continue;
             }
 
             // 6. Subscribe App to WABA webhooks
