@@ -238,6 +238,7 @@ async function embeddedSignup(req, res, next) {
             // NOTE: With Embedded Signup v3+, Meta may auto-register the phone number.
             // We still attempt registration to handle edge cases, but gracefully skip
             // if the number is already registered (error 133004 or #100).
+            const registrationWarnings = [];
             for (const pn of phoneNumbers) {
                 try {
                     const dummyPin = Math.floor(100000 + Math.random() * 900000).toString();
@@ -260,16 +261,29 @@ async function embeddedSignup(req, res, next) {
                 } catch (registerErr) {
                     const errorData = registerErr.response?.data?.error || {};
                     const errorCode = errorData.code;
+                    const errorDetails = errorData.error_data?.details || '';
 
                     if (errorCode === 133016) {
                         console.error(`[EmbeddedSignup] Registration failed due to RATE LIMIT for ${pn.phoneNumber}. Stopping further attempts.`);
-                        // Stop the loop for this WABA's phone numbers
+                        registrationWarnings.push(`Phone ${pn.phoneNumber}: Rate limited. Please wait 72 hours before trying again.`);
                         break; 
-                    } else if (errorCode === 133004 || errorCode === 100) {
-                        // 133004 = already registered, 100 = invalid parameter (often means already registered via Embedded Signup v3+)
-                        console.log(`[EmbeddedSignup] Phone ${pn.phoneNumber} is already registered (code: ${errorCode}). Treating as success.`);
+                    } else if (errorCode === 133004) {
+                        // Already registered on Cloud API — this is fine
+                        console.log(`[EmbeddedSignup] Phone ${pn.phoneNumber} is already registered. Treating as success.`);
+                    } else if (errorCode === 100) {
+                        // Check if it's a payment method issue or just "already registered via ES v3"
+                        if (errorDetails.toLowerCase().includes('payment')) {
+                            console.error(`[EmbeddedSignup] Phone ${pn.phoneNumber}: Payment method required. Details: ${errorDetails}`);
+                            registrationWarnings.push(
+                                `Phone ${pn.phoneNumber}: ${errorDetails}. Please add a payment method in Meta Business Manager → WhatsApp Accounts → Payment Settings, then reconnect.`
+                            );
+                        } else {
+                            // Generic code 100 — likely already registered via Embedded Signup v3+
+                            console.log(`[EmbeddedSignup] Phone ${pn.phoneNumber} is already registered (code: ${errorCode}). Treating as success.`);
+                        }
                     } else {
                         console.error(`[EmbeddedSignup] Failed to register phone ${pn.phoneNumber}:`, errorData.message || registerErr.message);
+                        registrationWarnings.push(`Phone ${pn.phoneNumber}: ${errorData.message || registerErr.message}`);
                     }
                 }
             }
@@ -285,7 +299,11 @@ async function embeddedSignup(req, res, next) {
             savedWabas.push(waba);
         }
 
-        res.json({ success: true, wabas: savedWabas });
+        const response = { success: true, wabas: savedWabas };
+        if (registrationWarnings.length > 0) {
+            response.warnings = registrationWarnings;
+        }
+        res.json(response);
     } catch (e) {
         console.error('Embedded Signup Error:', e.response?.data || e.message);
         next(e);
