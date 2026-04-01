@@ -195,6 +195,7 @@ async function embeddedSignup(req, res, next) {
         }
 
         const savedWabas = [];
+        const registrationWarnings = [];
 
         // 3. Process each WABA
         for (const wabaId of wabaIds) {
@@ -238,7 +239,6 @@ async function embeddedSignup(req, res, next) {
             // NOTE: With Embedded Signup v3+, Meta may auto-register the phone number.
             // We still attempt registration to handle edge cases, but gracefully skip
             // if the number is already registered (error 133004 or #100).
-            const registrationWarnings = [];
             for (const pn of phoneNumbers) {
                 try {
                     const dummyPin = Math.floor(100000 + Math.random() * 900000).toString();
