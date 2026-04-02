@@ -4,13 +4,14 @@ const { getIO } = require('../websocket/socket.server');
 async function list(req, res, next) {
     try {
         const {
-            page = 1, limit = 20, wabaId, status, assignedTo, tag, isUnread, isWaiting
+            page = 1, limit = 20, wabaId, status, assignedTo, tag, tags, tagId, isUnread, isWaiting
         } = req.query;
         const skip = (parseInt(page, 10) - 1) * parseInt(limit, 10);
         const filter = {};
         if (wabaId) filter.wabaId = wabaId;
         if (status) filter.status = status;
-        if (tag) filter.tags = tag;
+        const filterTag = tag || tags || tagId;
+        if (filterTag) filter.tags = filterTag;
         if (isUnread !== undefined) filter.isUnread = isUnread === 'true';
         if (isWaiting === 'true') {
             filter.$or = [
@@ -438,9 +439,11 @@ async function getActivities(req, res, next) {
 
 async function stats(req, res, next) {
     try {
-        const { wabaId, assignedTo } = req.query;
+        const { wabaId, assignedTo, tag, tags, tagId } = req.query;
         const filter = {};
         if (wabaId) filter.wabaId = wabaId;
+        const filterTag = tag || tags || tagId;
+        if (filterTag) filter.tags = filterTag;
 
         // Apply staff restriction or explicit filter
         if (req.user.role === 'staff') {
