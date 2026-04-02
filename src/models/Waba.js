@@ -7,6 +7,8 @@ const phoneNumberSchema = new mongoose.Schema({
   verifiedName: { type: String },
   qualityRating: { type: String },
   isDefault: { type: Boolean, default: false },
+  messagingLimitTier: { type: String, enum: ['TIER_1K', 'TIER_10K', 'TIER_100K', 'UNLIMITED', null], default: null },
+  messagingLimit: { type: Number, default: 1000 }, // Resolved numeric limit from tier
 }, { _id: false });
 
 const wabaSchema = new mongoose.Schema(

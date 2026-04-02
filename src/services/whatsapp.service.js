@@ -317,6 +317,33 @@ async function getLongLivedToken(shortLivedToken) {
   return res.data.access_token;
 }
 
+/**
+ * Resolve a messaging limit tier string to its numeric daily limit.
+ */
+function resolveMessagingLimit(tier) {
+  switch (tier) {
+    case 'TIER_1K': return 1000;
+    case 'TIER_10K': return 10000;
+    case 'TIER_100K': return 100000;
+    case 'UNLIMITED': return Infinity;
+    default: return 1000; // Conservative default
+  }
+}
+
+/**
+ * Fetch the messaging limit tier for a phone number from Meta Cloud API.
+ * GET /{phone-number-id}?fields=messaging_limit_tier
+ * Returns { messagingLimitTier: 'TIER_1K', messagingLimit: 1000 }
+ */
+async function getPhoneNumberMessagingLimit(wabaId, phoneNumberId) {
+  const data = await request(wabaId, 'GET', `/${phoneNumberId}?fields=messaging_limit_tier`);
+  const tier = data.messaging_limit_tier || null;
+  return {
+    messagingLimitTier: tier,
+    messagingLimit: resolveMessagingLimit(tier),
+  };
+}
+
 module.exports = {
   getWaba,
   getAccessToken,
@@ -339,4 +366,6 @@ module.exports = {
   registerPhoneNumber,
   subscribeAppToWaba,
   createTemplate,
+  getPhoneNumberMessagingLimit,
+  resolveMessagingLimit,
 };

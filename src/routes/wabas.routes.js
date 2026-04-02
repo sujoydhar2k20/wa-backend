@@ -14,6 +14,7 @@ router.delete('/:id', requireAdmin, wabasController.remove);
 router.post('/:id/sync-templates', requireAdmin, wabasController.syncTemplates);
 router.post('/:id/templates', requireAdmin, wabasController.createTemplate);
 router.get('/:id/templates', wabasController.getTemplates);
+router.get('/:id/quota', wabasController.getQuota);
 router.get('/:id/webhook', webhookController.verify);
 router.post('/:id/webhook', webhookController.handle);
 router.post('/embedded-signup/register', requireAdmin, wabasController.embeddedSignup);

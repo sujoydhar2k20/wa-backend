@@ -1,5 +1,6 @@
-const { Broadcast, BroadcastList, BroadcastListMember, BroadcastMessage, Template } = require('../models');
+const { Broadcast, BroadcastList, BroadcastListMember, BroadcastMessage, BroadcastBatch, Template } = require('../models');
 const whatsappService = require('../services/whatsapp.service');
+const broadcastService = require('../services/broadcast.service');
 const { getIO } = require('../websocket/socket.server');
 
 async function list(req, res, next) {
@@ -49,9 +50,12 @@ async function get(req, res, next) {
 
 async function getStats(req, res, next) {
     try {
-        const broadcast = await Broadcast.findById(req.params.id).select('statistics status startedAt completedAt');
+        const broadcast = await Broadcast.findById(req.params.id).select('statistics status startedAt completedAt totalBatches currentBatch nextBatchAt dailyLimit');
         if (!broadcast) return res.status(404).json({ success: false, message: 'Broadcast not found' });
-        res.json(broadcast);
+
+        // Also fetch batch details
+        const batches = await BroadcastBatch.find({ broadcastId: req.params.id }).sort({ batchNumber: 1 });
+        res.json({ ...broadcast.toObject(), batches });
     } catch (e) {
         next(e);
     }
@@ -65,85 +69,108 @@ async function send(req, res, next) {
             return res.status(400).json({ success: false, message: 'Broadcast cannot be sent in its current status' });
         }
 
-        const filter = {
+        // 1. Fetch the messaging limit for this phone number
+        const { messagingLimit, messagingLimitTier } = await broadcastService.getMessagingLimit(
+            broadcast.wabaId,
+            broadcast.phoneNumberId
+        );
+
+        // 2. Count messages already sent today for this WABA
+        const sentToday = await broadcastService.getSentTodayCount(broadcast.wabaId);
+
+        // 3. Get members to send to
+        const memberFilter = {
             broadcastListId: broadcast.broadcastListId,
-            status: { $ne: 'opted_out' } // Send to everyone except those who opted out
+            status: { $ne: 'opted_out' },
         };
 
         if (req.body.targetPhoneNumbers && Array.isArray(req.body.targetPhoneNumbers) && req.body.targetPhoneNumbers.length > 0) {
-            filter.phoneNumber = { $in: req.body.targetPhoneNumbers };
+            memberFilter.phoneNumber = { $in: req.body.targetPhoneNumbers };
         }
 
-        const members = await BroadcastListMember.find(filter);
+        const members = await BroadcastListMember.find(memberFilter);
+        const phoneNumbers = members.map(m => m.phoneNumber);
 
-        // Mark as sending first
+        // 4. Calculate batches
+        const { batches, totalBatches } = broadcastService.calculateBatches(phoneNumbers.length, messagingLimit, sentToday);
+
+        // 5. Save broadcast metadata
         await Broadcast.findByIdAndUpdate(broadcast._id, {
             status: 'sending',
             startedAt: new Date(),
-            'statistics.total': members.length,
+            totalBatches,
+            currentBatch: 1,
+            dailyLimit: messagingLimit === Infinity ? null : messagingLimit,
+            'statistics.total': phoneNumbers.length,
+            components: req.body.components || [],
+            nextBatchAt: totalBatches > 1 ? batches[1]?.scheduledAt : null,
         });
 
-        // Dispatch asynchronously – fire and forget, don't block the response
-        setImmediate(async () => {
-            let sentCount = 0;
-            let failedCount = 0;
-            for (const member of members) {
+        // 6. Create BroadcastBatch documents and schedule jobs
+        const batchDocs = [];
+        for (let i = 0; i < batches.length; i++) {
+            const b = batches[i];
+            const batchPhones = phoneNumbers.slice(b.start, b.end);
+            const batchDoc = await BroadcastBatch.create({
+                broadcastId: broadcast._id,
+                batchNumber: i + 1,
+                scheduledAt: b.scheduledAt,
+                status: i === 0 ? 'pending' : 'pending',
+                memberPhones: batchPhones,
+                memberCount: batchPhones.length,
+            });
+            batchDocs.push(batchDoc);
+        }
+
+        // 7. Process today's batch immediately (batch 0)
+        if (batchDocs.length > 0) {
+            setImmediate(async () => {
                 try {
-                    const template = broadcast.templateId;
-                    const result = await whatsappService.sendTemplateMessage(
-                        broadcast.wabaId,
-                        broadcast.phoneNumberId,
-                        member.phoneNumber,
-                        template.name,
-                        template.language,
-                        req.body.components || []
-                    );
-
-                    let messageId = null;
-                    if (result && result.messages && result.messages.length > 0) {
-                        messageId = result.messages[0].id;
-                    }
-
-                    await BroadcastMessage.create({
-                        broadcastId: broadcast._id,
-                        contactId: member.contactId,
-                        phoneNumber: member.phoneNumber,
-                        messageId: messageId,
-                        status: 'sent',
-                    });
-
-                    await BroadcastListMember.findByIdAndUpdate(member._id, { status: 'sent' });
-                    sentCount++;
+                    await broadcastService.processBroadcastBatch(batchDocs[0]._id);
                 } catch (err) {
-                    await BroadcastMessage.create({
-                        broadcastId: broadcast._id,
-                        contactId: member.contactId,
-                        phoneNumber: member.phoneNumber,
-                        status: 'failed',
-                        errorCode: err.response?.data?.error?.code || 500,
-                        errorMessage: err.response?.data?.error?.message || err.message,
-                    });
-
-                    await BroadcastListMember.findByIdAndUpdate(member._id, { status: 'failed' });
-                    failedCount++;
+                    console.error('Failed to process first batch:', err.message);
                 }
-            }
-            const updatedBroadcast = await Broadcast.findByIdAndUpdate(broadcast._id, {
-                status: 'completed',
-                completedAt: new Date(),
-                'statistics.sent': sentCount,
-                'statistics.failed': failedCount,
-            }, { new: true });
+            });
+        }
 
+        // 8. Schedule future batches via Agenda
+        if (batchDocs.length > 1) {
             try {
-                const io = getIO();
-                io.emit('broadcast:update', updatedBroadcast);
-            } catch (e) {
-                console.warn('Socket emit failed for broadcast completion:', e.message);
+                const { getAgenda } = require('../jobs/agenda');
+                const agenda = getAgenda();
+                if (agenda) {
+                    for (let i = 1; i < batchDocs.length; i++) {
+                        await agenda.schedule(
+                            batchDocs[i].scheduledAt,
+                            'process-broadcast-batch',
+                            { batchId: batchDocs[i]._id.toString() }
+                        );
+                    }
+                }
+            } catch (agendaErr) {
+                console.error('Failed to schedule future batches via Agenda:', agendaErr.message);
             }
-        });
+        }
 
-        res.json({ success: true, message: 'Broadcast sending initiated', total: members.length });
+        // 9. Respond with batching info
+        const batchInfo = batches.map((b, i) => ({
+            batchNumber: i + 1,
+            memberCount: b.end - b.start,
+            scheduledAt: b.scheduledAt,
+        }));
+
+        res.json({
+            success: true,
+            message: totalBatches > 1
+                ? `Broadcast will be sent in ${totalBatches} batches over ${totalBatches} days (daily limit: ${messagingLimit === Infinity ? 'Unlimited' : messagingLimit.toLocaleString()})`
+                : 'Broadcast sending initiated',
+            total: phoneNumbers.length,
+            dailyLimit: messagingLimit === Infinity ? 'Unlimited' : messagingLimit,
+            messagingLimitTier,
+            sentToday,
+            totalBatches,
+            batches: batchInfo,
+        });
     } catch (e) {
         next(e);
     }
@@ -194,4 +221,13 @@ async function getMessages(req, res, next) {
     }
 }
 
-module.exports = { list, create, get, getStats, send, test, getMessages };
+async function getBatches(req, res, next) {
+    try {
+        const batches = await BroadcastBatch.find({ broadcastId: req.params.id }).sort({ batchNumber: 1 });
+        res.json(batches);
+    } catch (e) {
+        next(e);
+    }
+}
+
+module.exports = { list, create, get, getStats, send, test, getMessages, getBatches };

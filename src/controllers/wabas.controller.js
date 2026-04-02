@@ -1,5 +1,6 @@
 const { Waba, Template } = require('../models');
 const whatsappService = require('../services/whatsapp.service');
+const broadcastService = require('../services/broadcast.service');
 
 async function list(req, res, next) {
     try {
@@ -320,6 +321,41 @@ async function embeddedSignup(req, res, next) {
     }
 }
 
+/**
+ * Get the messaging quota for a WABA phone number.
+ * Returns daily limit (from WhatsApp tier), sent today count, and remaining.
+ */
+async function getQuota(req, res, next) {
+    try {
+        const wabaId = req.params.id;
+        const { phoneNumberId } = req.query;
+
+        if (!phoneNumberId) {
+            // If no specific phone number, get the first one
+            const waba = await Waba.findById(wabaId);
+            if (!waba) return res.status(404).json({ success: false, message: 'WABA not found' });
+            const firstPhone = waba.phoneNumbers?.[0];
+            if (!firstPhone) return res.status(400).json({ success: false, message: 'No phone numbers found' });
+            req.query.phoneNumberId = firstPhone.phoneNumberId;
+        }
+
+        const { messagingLimit, messagingLimitTier } = await broadcastService.getMessagingLimit(wabaId, req.query.phoneNumberId);
+        const sentToday = await broadcastService.getSentTodayCount(wabaId);
+        const remaining = messagingLimit === Infinity ? 'Unlimited' : Math.max(0, messagingLimit - sentToday);
+
+        res.json({
+            success: true,
+            dailyLimit: messagingLimit === Infinity ? 'Unlimited' : messagingLimit,
+            messagingLimitTier: messagingLimitTier || 'TIER_1K',
+            sentToday,
+            remaining,
+            phoneNumberId: req.query.phoneNumberId,
+        });
+    } catch (e) {
+        next(e);
+    }
+}
+
 module.exports = {
     list,
     create,
@@ -331,4 +367,5 @@ module.exports = {
     getAllTemplates,
     embeddedSignup,
     createTemplate,
+    getQuota,
 };

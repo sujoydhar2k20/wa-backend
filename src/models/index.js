@@ -13,6 +13,7 @@ module.exports = {
   BroadcastListMember: require('./BroadcastListMember'),
   Broadcast: require('./Broadcast'),
   BroadcastMessage: require('./BroadcastMessage'),
+  BroadcastBatch: require('./BroadcastBatch'),
   BotFlow: require('./BotFlow'),
   BotExecution: require('./BotExecution'),
   Product: require('./Product'),

@@ -11,5 +11,6 @@ router.get('/:id/stats', broadcastsController.getStats);
 router.post('/:id/send', requireAdmin, broadcastsController.send);
 router.post('/:id/test', requireAdmin, broadcastsController.test);
 router.get('/:id/messages', broadcastsController.getMessages);
+router.get('/:id/batches', broadcastsController.getBatches);
 
 module.exports = router;
