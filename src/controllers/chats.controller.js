@@ -51,40 +51,113 @@ async function search(req, res, next) {
         if (!q) return res.status(400).json({ success: false, message: 'Query param q is required' });
 
         const { Contact } = require('../models');
-        const skip = (parseInt(page, 10) - 1) * parseInt(limit, 10);
+        const parsedLimit = parseInt(limit, 10);
+        const skip = (parseInt(page, 10) - 1) * parsedLimit;
 
-        // First find contacts whose name matches the query
+        // Build access filter for staff restriction & wabaId
+        const accessFilter = {};
+        if (wabaId) accessFilter.wabaId = wabaId;
+        if (req.user.role === 'staff') {
+            accessFilter.assignedTo = req.user._id;
+        }
+
+        // 1. Find contacts matching by name or nickname
         const matchingContacts = await Contact.find(
-            { name: { $regex: q, $options: 'i' } },
-            { _id: 1 }
+            { $or: [
+                { name: { $regex: q, $options: 'i' } },
+                { nickname: { $regex: q, $options: 'i' } }
+            ]},
+            { _id: 1, name: 1, nickname: 1 }
         );
+        const contactMap = {};
+        matchingContacts.forEach(c => { contactMap[c._id.toString()] = c; });
         const contactIds = matchingContacts.map(c => c._id);
 
-        // Build a filter: match by phone number OR by linked contact name
-        const baseFilter = {
+        // 2. Find chats matching by phone number or contact name/nickname
+        const namePhoneFilter = {
+            ...accessFilter,
             $or: [
                 { phoneNumber: { $regex: q, $options: 'i' } },
                 ...(contactIds.length > 0 ? [{ contactId: { $in: contactIds } }] : [])
             ]
         };
-        if (wabaId) baseFilter.wabaId = wabaId;
-        // Staff can only see their assigned chats
-        if (req.user.role === 'staff') {
-            baseFilter.assignedTo = req.user._id;
+
+        const namePhoneChats = await Chat.find(namePhoneFilter)
+            .sort({ lastMessageAt: -1 })
+            .limit(parsedLimit)
+            .populate('contactId', 'name nickname profilePicture')
+            .populate('assignedTo', 'name phone')
+            .populate('wabaId', 'businessName phoneNumbers')
+            .populate('tags', 'name color')
+            .lean();
+
+        // Tag each result with what matched
+        const seenChatIds = new Set();
+        const results = [];
+        for (const chat of namePhoneChats) {
+            const cid = chat._id.toString();
+            seenChatIds.add(cid);
+            let matchSource = 'phone';
+            if (chat.contactId) {
+                const n = chat.contactId.nickname || '';
+                const nm = chat.contactId.name || '';
+                if (n && n.match(new RegExp(q, 'i'))) matchSource = 'nickname';
+                else if (nm && nm.match(new RegExp(q, 'i'))) matchSource = 'name';
+            }
+            results.push({ ...chat, matchSource });
         }
 
-        const [chats, total] = await Promise.all([
-            Chat.find(baseFilter)
-                .sort({ lastMessageAt: -1 })
-                .skip(skip)
-                .limit(parseInt(limit, 10))
-                .populate('contactId', 'name nickname profilePicture')
-                .populate('assignedTo', 'name phone')
-                .populate('wabaId', 'businessName phoneNumbers')
-                .populate('tags', 'name color'),
-            Chat.countDocuments(baseFilter),
-        ]);
-        res.json({ data: chats, total, page: parseInt(page, 10), limit: parseInt(limit, 10) });
+        // 3. Search messages for text content matches
+        const remaining = parsedLimit - results.length;
+        if (remaining > 0) {
+            // Find messages whose text matches the query
+            const msgFilter = { text: { $regex: q, $options: 'i' }, type: { $ne: 'system' } };
+            const matchingMessages = await Message.aggregate([
+                { $match: msgFilter },
+                { $sort: { createdAt: -1 } },
+                { $group: {
+                    _id: '$chatId',
+                    matchedText: { $first: '$text' },
+                    matchedAt: { $first: '$createdAt' }
+                }},
+                { $limit: remaining + seenChatIds.size } // fetch extra to account for duplicates
+            ]);
+
+            // Filter out chats already found by name/phone
+            const msgChatIds = matchingMessages
+                .filter(m => !seenChatIds.has(m._id.toString()))
+                .slice(0, remaining);
+
+            if (msgChatIds.length > 0) {
+                const msgChatFilter = {
+                    ...accessFilter,
+                    _id: { $in: msgChatIds.map(m => m._id) }
+                };
+                const msgChats = await Chat.find(msgChatFilter)
+                    .populate('contactId', 'name nickname profilePicture')
+                    .populate('assignedTo', 'name phone')
+                    .populate('wabaId', 'businessName phoneNumbers')
+                    .populate('tags', 'name color')
+                    .lean();
+
+                // Build a lookup for matched messages
+                const msgLookup = {};
+                msgChatIds.forEach(m => { msgLookup[m._id.toString()] = m.matchedText; });
+
+                for (const chat of msgChats) {
+                    results.push({
+                        ...chat,
+                        matchSource: 'message',
+                        matchedMessage: msgLookup[chat._id.toString()] || ''
+                    });
+                }
+            }
+        }
+
+        // Sort combined results by lastMessageAt descending
+        results.sort((a, b) => new Date(b.lastMessageAt || 0) - new Date(a.lastMessageAt || 0));
+
+        res.json({ data: results, total: results.length, page: parseInt(page, 10), limit: parsedLimit });
     } catch (e) {
         next(e);
     }
