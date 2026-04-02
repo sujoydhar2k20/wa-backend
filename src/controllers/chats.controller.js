@@ -374,7 +374,7 @@ async function markRead(req, res, next) {
     try {
         const chat = await Chat.findByIdAndUpdate(
             req.params.id,
-            { isUnread: false },
+            { isUnread: false, isManuallyUnread: false },
             { new: true }
         );
         if (!chat) return res.status(404).json({ success: false, message: 'Chat not found' });
@@ -388,7 +388,7 @@ async function markUnread(req, res, next) {
     try {
         const chat = await Chat.findByIdAndUpdate(
             req.params.id,
-            { isUnread: true },
+            { isUnread: true, isManuallyUnread: true },
             { new: true }
         );
         if (!chat) return res.status(404).json({ success: false, message: 'Chat not found' });

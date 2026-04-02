@@ -9,6 +9,7 @@ const chatSchema = new mongoose.Schema(
     waId: { type: String, required: true, index: true },
     status: { type: String, enum: ['open', 'closed', 'awaiting_reply'], default: 'open', index: true },
     isUnread: { type: Boolean, default: true },
+    isManuallyUnread: { type: Boolean, default: false },
     assignedTo: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
     collaborators: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
     tags: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Tag' }],
