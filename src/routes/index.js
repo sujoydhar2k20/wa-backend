@@ -18,5 +18,6 @@ router.use('/upload', require('./upload.routes'));
 router.use('/webhooks/whatsapp', require('./webhook.routes'));
 router.use('/push', require('./push.routes'));
 router.use('/proxy', require('./proxy.routes'));
+router.use('/external', require('./external.routes'));
 
 module.exports = router;

@@ -21,4 +21,5 @@ module.exports = {
   Rate: require('./Rate'),
   ProductReplyLog: require('./ProductReplyLog'),
   Media: require('./Media'),
+  ApiKey: require('./ApiKey'),
 };
