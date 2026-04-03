@@ -147,7 +147,7 @@ async function getAllTemplates(req, res, next) {
 
 async function embeddedSignup(req, res, next) {
     try {
-        const { accessToken: rawToken, code, wabaId: sessionWabaId, phoneNumberId: sessionPhoneNumberId } = req.body;
+        const { accessToken: rawToken, code, wabaId: sessionWabaId, phoneNumberId: sessionPhoneNumberId, tokenMode } = req.body;
         if (!rawToken && !code) {
             return res.status(400).json({ success: false, message: 'Access token or code is required' });
         }
@@ -155,22 +155,29 @@ async function embeddedSignup(req, res, next) {
         let accessToken;
         if (code) {
             try {
+                // If tokenMode is 'short', we might still want to exchange for the initial token, 
+                // but Meta Embedded Signup code exchange usually returns the best possible token for the config.
                 const tokenResponse = await whatsappService.exchangeEmbeddedSignupCode(code);
                 accessToken = tokenResponse.access_token;
-                console.log('[EmbeddedSignup] Successfully exchanged code for long-lived token.');
+                console.log('[EmbeddedSignup] Successfully exchanged code for token.');
             } catch (exchangeErr) {
                 console.error('[EmbeddedSignup] Code exchange failed:', exchangeErr.response?.data || exchangeErr.message);
                 return res.status(400).json({ success: false, message: 'Failed to exchange code for access token' });
             }
         } else {
             // Exchange the short-lived FB JS SDK token (~1-2 hours) for a long-lived token (~60 days)
-            try {
-                accessToken = await whatsappService.getLongLivedToken(rawToken);
-                console.log('[EmbeddedSignup] Successfully exchanged short-lived token for long-lived token.');
-            } catch (exchangeErr) {
-                console.warn('[EmbeddedSignup] Token exchange failed, using raw token:', exchangeErr.response?.data || exchangeErr.message);
-                // Fall back to raw token if exchange fails (e.g. already a long-lived token)
+            // Skip this exchange if the user explicitly requested 'short-lived' tokens
+            if (tokenMode === 'short') {
                 accessToken = rawToken;
+                console.log('[EmbeddedSignup] Using short-lived token as requested.');
+            } else {
+                try {
+                    accessToken = await whatsappService.getLongLivedToken(rawToken);
+                    console.log(`[EmbeddedSignup] Successfully exchanged short-lived token for ${tokenMode === 'permanent' ? 'permanent-style' : 'long-lived'} token.`);
+                } catch (exchangeErr) {
+                    console.warn('[EmbeddedSignup] Token exchange failed, using raw token:', exchangeErr.response?.data || exchangeErr.message);
+                    accessToken = rawToken;
+                }
             }
         }
 

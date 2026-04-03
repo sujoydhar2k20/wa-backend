@@ -6,7 +6,7 @@ module.exports = {
   sendOtp: process.env.SEND_OTP !== 'false',
   jwt: {
     secret: process.env.JWT_SECRET || 'jwt-secret',
-    expiry: process.env.JWT_EXPIRY || '1h',
+    expiry: process.env.JWT_EXPIRY || '365d',
     refreshExpiry: process.env.JWT_REFRESH_EXPIRY || '365d',
   },
   upload: {
