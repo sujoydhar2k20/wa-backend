@@ -1,4 +1,4 @@
-const { Broadcast, BroadcastBatch, BroadcastMessage, BroadcastListMember, Waba } = require('../models');
+const { Broadcast, BroadcastBatch, BroadcastMessage, BroadcastListMember, Waba, Contact } = require('../models');
 const whatsappService = require('./whatsapp.service');
 const { getIO } = require('../websocket/socket.server');
 const { logger } = require('../utils/logger');
@@ -171,6 +171,40 @@ async function processBroadcastBatch(batchId) {
 
   for (const phoneNumber of phonesToSend) {
     try {
+      // Find the member or contact
+      let contactId = null;
+      let isBlocked = false;
+      let isOptedOut = false;
+
+      if (broadcast.broadcastListId) {
+        const member = await BroadcastListMember.findOne({
+          broadcastListId: broadcast.broadcastListId,
+          phoneNumber,
+        }).populate('contactId', 'isBlocked isOptedOut');
+
+        if (member) {
+          contactId = member.contactId?._id;
+          isBlocked = member.contactId?.isBlocked;
+          isOptedOut = member.contactId?.isOptedOut;
+        }
+      }
+
+      // If no member found or no list used, check Contact model directly
+      if (!contactId) {
+        const contact = await Contact.findOne({ phoneNumber });
+        if (contact) {
+          contactId = contact._id;
+          isBlocked = contact.isBlocked;
+          isOptedOut = contact.isOptedOut;
+        }
+      }
+
+      if (isBlocked || isOptedOut) {
+        const skipErr = new Error('Contact is blocked or opted-out');
+        skipErr.name = 'SkipContactError';
+        throw skipErr;
+      }
+
       const result = await whatsappService.sendTemplateMessage(
         broadcast.wabaId,
         broadcast.phoneNumberId,
@@ -185,41 +219,38 @@ async function processBroadcastBatch(batchId) {
         messageId = result.messages[0].id;
       }
 
-      // Find the member to get contactId
-      const member = await BroadcastListMember.findOne({
-        broadcastListId: broadcast.broadcastListId,
-        phoneNumber,
-      });
-
       await BroadcastMessage.create({
         broadcastId: broadcast._id,
-        contactId: member?.contactId,
+        contactId,
         phoneNumber,
         messageId,
         status: 'sent',
       });
 
-      if (member) {
-        await BroadcastListMember.findByIdAndUpdate(member._id, { status: 'sent' });
+      if (broadcast.broadcastListId) {
+        await BroadcastListMember.updateOne(
+          { broadcastListId: broadcast.broadcastListId, phoneNumber },
+          { status: 'sent' }
+        );
       }
       sentCount++;
     } catch (err) {
-      const member = await BroadcastListMember.findOne({
-        broadcastListId: broadcast.broadcastListId,
-        phoneNumber,
-      });
-
+      const isSkipped = err.name === 'SkipContactError';
+      
       await BroadcastMessage.create({
         broadcastId: broadcast._id,
-        contactId: member?.contactId,
+        contactId,
         phoneNumber,
         status: 'failed',
-        errorCode: err.response?.data?.error?.code || 500,
+        errorCode: err.response?.data?.error?.code || (isSkipped ? 403 : 500),
         errorMessage: err.response?.data?.error?.message || err.message,
       });
 
-      if (member) {
-        await BroadcastListMember.findByIdAndUpdate(member._id, { status: 'failed' });
+      if (broadcast.broadcastListId) {
+        await BroadcastListMember.updateOne(
+          { broadcastListId: broadcast.broadcastListId, phoneNumber },
+          { status: isSkipped ? 'opted_out' : 'failed' }
+        );
       }
       failedCount++;
     }

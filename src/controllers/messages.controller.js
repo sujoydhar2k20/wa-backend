@@ -6,7 +6,7 @@ async function send(req, res, next) {
         const { chatId, type = 'text', text, mediaUrl, caption, templateName, language, components, replyToMessageId } = req.body;
         if (!chatId) return res.status(400).json({ success: false, message: 'chatId is required' });
 
-        const chat = await Chat.findById(chatId);
+        const chat = await Chat.findById(chatId).populate('contactId');
         if (!chat) return res.status(404).json({ success: false, message: 'Chat not found' });
 
         // Enforce 24-hour customer service window rule for non-template messages
@@ -35,6 +35,14 @@ async function send(req, res, next) {
             waResult = await whatsappService.sendTextMessage(chat.wabaId, chat.phoneNumberId, chat.waId, text, metaMessageIdToReply);
         } else if (type === 'template') {
             if (!templateName) return res.status(400).json({ success: false, message: 'templateName is required for template messages' });
+            
+            if (chat.contactId && (chat.contactId.isBlocked || chat.contactId.isOptedOut)) {
+                return res.status(403).json({
+                    success: false,
+                    message: 'Cannot send template messages to blocked or opted-out contacts.',
+                });
+            }
+
             waResult = await whatsappService.sendTemplateMessage(chat.wabaId, chat.phoneNumberId, chat.waId, templateName, language || 'en', components || []);
         } else if (['image', 'video', 'audio', 'document'].includes(type)) {
             if (!mediaUrl) return res.status(400).json({ success: false, message: 'mediaUrl is required for media messages' });

@@ -1,4 +1,4 @@
-const { Broadcast, BroadcastList, BroadcastListMember, BroadcastMessage, BroadcastBatch, Template } = require('../models');
+const { Broadcast, BroadcastList, BroadcastListMember, BroadcastMessage, BroadcastBatch, Template, Contact } = require('../models');
 const whatsappService = require('../services/whatsapp.service');
 const broadcastService = require('../services/broadcast.service');
 const { getIO } = require('../websocket/socket.server');
@@ -79,17 +79,50 @@ async function send(req, res, next) {
         const sentToday = await broadcastService.getSentTodayCount(broadcast.wabaId);
 
         // 3. Get members to send to
-        const memberFilter = {
-            broadcastListId: broadcast.broadcastListId,
-            status: { $ne: 'opted_out' },
-        };
+        let phoneNumbers = [];
+        const contactMap = new Map(); // Untuk menyimpan mapping phone -> contactId
 
-        if (req.body.targetPhoneNumbers && Array.isArray(req.body.targetPhoneNumbers) && req.body.targetPhoneNumbers.length > 0) {
-            memberFilter.phoneNumber = { $in: req.body.targetPhoneNumbers };
+        // A. From Broadcast List
+        if (broadcast.broadcastListId) {
+            const listMembers = await BroadcastListMember.find({
+                broadcastListId: broadcast.broadcastListId,
+                status: { $ne: 'opted_out' },
+            }).populate('contactId', 'isBlocked isOptedOut');
+
+            listMembers.forEach(m => {
+                if (m.contactId && (m.contactId.isBlocked || m.contactId.isOptedOut)) return;
+                phoneNumbers.push(m.phoneNumber);
+                if (m.contactId) contactMap.set(m.phoneNumber, m.contactId._id);
+            });
         }
 
-        const members = await BroadcastListMember.find(memberFilter);
-        const phoneNumbers = members.map(m => m.phoneNumber);
+        // B. From Tags
+        if (broadcast.tagIds && broadcast.tagIds.length > 0) {
+            const taggedContacts = await Contact.find({
+                tags: { $in: broadcast.tagIds },
+                isBlocked: { $ne: true },
+                isOptedOut: { $ne: true }
+            });
+
+            taggedContacts.forEach(c => {
+                phoneNumbers.push(c.phoneNumber);
+                contactMap.set(c.phoneNumber, c._id);
+            });
+        }
+
+        // C. Target Specific Phone Numbers (if provided in request body)
+        if (req.body.targetPhoneNumbers && Array.isArray(req.body.targetPhoneNumbers) && req.body.targetPhoneNumbers.length > 0) {
+            const bodyPhones = req.body.targetPhoneNumbers;
+            // Only keep these if we're filtering
+            phoneNumbers = phoneNumbers.filter(p => bodyPhones.includes(p));
+        }
+
+        // Deduplicate
+        phoneNumbers = [...new Set(phoneNumbers)];
+
+        if (phoneNumbers.length === 0) {
+            return res.status(400).json({ success: false, message: 'No valid contacts to send to. All selected contacts might be opted-out or blocked.' });
+        }
 
         // 4. Calculate batches
         const { batches, totalBatches } = broadcastService.calculateBatches(phoneNumbers.length, messagingLimit, sentToday);

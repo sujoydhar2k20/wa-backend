@@ -37,20 +37,34 @@ async function update(id, data, currentUser) {
   const user = await User.findById(id);
   if (!user) throw Object.assign(new Error('User not found'), { statusCode: 404 });
   if (!['admin', 'superadmin'].includes(currentUser.role) && currentUser._id.toString() !== id) throw Object.assign(new Error('Forbidden'), { statusCode: 403 });
+  
   const allowed = ['name', 'email'];
   if (['admin', 'superadmin'].includes(currentUser.role)) allowed.push('role', 'isActive', 'assignedWabaId');
+  
+  const wasActive = user.isActive;
   allowed.forEach((k) => { if (data[k] !== undefined) user[k] = data[k] === '' ? null : data[k]; });
+  
   await user.save();
+  
+  // If the user was deactivated, revoke all their sessions
+  if (['admin', 'superadmin'].includes(currentUser.role) && wasActive && !user.isActive) {
+    await Session.deleteMany({ userId: id });
+  }
+  
   return user.toObject();
 }
 
 async function remove(id) {
   const user = await User.findById(id);
   if (!user) throw Object.assign(new Error('User not found'), { statusCode: 404 });
-  user.isActive = false;
-  await user.save();
+  
+  // Delete all sessions for this user
   await Session.deleteMany({ userId: id });
-  return user.toObject();
+  
+  // Delete the user from the database
+  await User.findByIdAndDelete(id);
+  
+  return { _id: id, deleted: true };
 }
 
 async function getSessions(userId) {
