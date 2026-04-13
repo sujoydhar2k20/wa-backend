@@ -22,4 +22,5 @@ module.exports = {
   ProductReplyLog: require('./ProductReplyLog'),
   Media: require('./Media'),
   ApiKey: require('./ApiKey'),
+  QuickReply: require('./QuickReply'),
 };

@@ -19,5 +19,6 @@ router.use('/webhooks/whatsapp', require('./webhook.routes'));
 router.use('/push', require('./push.routes'));
 router.use('/proxy', require('./proxy.routes'));
 router.use('/external', require('./external.routes'));
+router.use('/quick-replies', require('./quickReplies.routes'));
 
 module.exports = router;
