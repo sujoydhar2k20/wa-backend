@@ -16,5 +16,6 @@ router.post('/:id/read', chatsController.markRead);
 router.post('/:id/unread', chatsController.markUnread);
 router.get('/:id/messages', chatsController.getMessages);
 router.get('/:id/activities', chatsController.getActivities);
+router.patch('/:id/dnd', chatsController.toggleDnd);
 
 module.exports = router;

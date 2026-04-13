@@ -17,6 +17,8 @@ const chatSchema = new mongoose.Schema(
     lastMessageAt: { type: Date },
     lastCustomerMessageAt: { type: Date },
     lastStaffMessageAt: { type: Date },
+    isDnd: { type: Boolean, default: false },
+    lastNotificationAt: { type: Date },
     closedAt: { type: Date },
   },
   { timestamps: true }

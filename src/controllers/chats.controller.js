@@ -479,6 +479,21 @@ async function stats(req, res, next) {
     }
 }
 
+async function toggleDnd(req, res, next) {
+    try {
+        const { isDnd } = req.body;
+        const chat = await Chat.findByIdAndUpdate(
+            req.params.id,
+            { isDnd: !!isDnd },
+            { new: true }
+        );
+        if (!chat) return res.status(404).json({ success: false, message: 'Chat not found' });
+        res.json(chat);
+    } catch (e) {
+        next(e);
+    }
+}
+
 module.exports = {
     list,
     search,
@@ -492,4 +507,5 @@ module.exports = {
     getMessages,
     getActivities,
     stats,
+    toggleDnd,
 };

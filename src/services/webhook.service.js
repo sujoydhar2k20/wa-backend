@@ -109,6 +109,12 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
         }
     }
 
+    // Block logic: discard messages if contact is blocked
+    if (contact.isBlocked) {
+        logger.info(`Message from blocked contact ${waId} ignored.`);
+        return;
+    }
+
     // Find or create chat
     let chat = await Chat.findOne({ wabaId: waba._id, waId });
     const isNewChat = !chat;
@@ -261,27 +267,36 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
 
     // Send push notification
     try {
-        const pushService = require('./push.service');
-        let userIdsToNotify = [];
-
-        if (chat.assignedTo) {
-            // Notify the assigned staff
-            userIdsToNotify.push(chat.assignedTo.toString());
+        // Skip if DND is enabled
+        if (chat.isDnd) {
+            logger.info(`Push notification skipped for DND chat ${chat._id}`);
         } else {
-            // Notify superadmins/admins who can see unassigned chats
-            const admins = await User.find({
-                isActive: true,
-                role: { $in: ['admin', 'superadmin'] }
-            }).select('_id').lean();
-            userIdsToNotify = admins.map(u => u._id.toString());
-        }
+            const pushService = require('./push.service');
+            let userIdsToNotify = [];
 
-        if (userIdsToNotify.length > 0) {
-            await pushService.sendPushNotificationToUsers(userIdsToNotify, {
-                title: profileName ? `New message from ${profileName}` : `New message from ${waId}`,
-                body: messageData.text || (messageData.mediaId ? `Received a ${msg.type}` : 'Received a new message'),
-                url: `/chats/${chat._id}`
-            });
+            if (chat.assignedTo) {
+                // Notify the assigned staff
+                userIdsToNotify.push(chat.assignedTo.toString());
+            } else {
+                // Notify superadmins/admins who can see unassigned chats
+                const admins = await User.find({
+                    isActive: true,
+                    role: { $in: ['admin', 'superadmin'] }
+                }).select('_id').lean();
+                userIdsToNotify = admins.map(u => u._id.toString());
+            }
+
+            if (userIdsToNotify.length > 0) {
+                await pushService.sendPushNotificationToUsers(userIdsToNotify, {
+                    title: profileName ? `New message from ${profileName}` : `New message from ${waId}`,
+                    body: messageData.text || (messageData.mediaId ? `Received a ${msg.type}` : 'Received a new message'),
+                    url: `/chats/${chat._id}`
+                });
+                
+                // Update lastNotificationAt to track repeat intervals
+                chat.lastNotificationAt = new Date();
+                await chat.save();
+            }
         }
     } catch (pushErr) {
         logger.error(`Error triggering push notification: ${pushErr.message}`);
