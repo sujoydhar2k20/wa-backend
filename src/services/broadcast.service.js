@@ -241,7 +241,7 @@ async function processBroadcastBatch(batchId) {
         broadcastId: broadcast._id,
         contactId,
         phoneNumber,
-        status: 'failed',
+        status: isSkipped ? 'skipped' : 'failed',
         errorCode: err.response?.data?.error?.code || (isSkipped ? 403 : 500),
         errorMessage: err.response?.data?.error?.message || err.message,
       });
@@ -252,7 +252,12 @@ async function processBroadcastBatch(batchId) {
           { status: isSkipped ? 'opted_out' : 'failed' }
         );
       }
-      failedCount++;
+      
+      if (isSkipped) {
+        sentCount++; // We count skipped as "processed" in the batch loop but handle stat specifically below
+      } else {
+        failedCount++;
+      }
     }
   }
 
@@ -280,16 +285,23 @@ async function processBroadcastBatch(batchId) {
   }
 
   // Update batch stats
+  const batchSkippedCount = await BroadcastMessage.countDocuments({ 
+    broadcastId: broadcast._id, 
+    status: 'skipped',
+    createdAt: { $gte: batch.startedAt || new Date() } // Rough filter for current batch
+  });
+
   await BroadcastBatch.findByIdAndUpdate(batchId, {
     status: 'completed',
     completedAt: new Date(),
-    sentCount,
+    sentCount: sentCount - batchSkippedCount, // Actual sent are successful ones
     failedCount,
   });
 
   // Update broadcast statistics
   const allBatchMessages = await BroadcastMessage.countDocuments({ broadcastId: broadcast._id, status: 'sent' });
   const allBatchFailed = await BroadcastMessage.countDocuments({ broadcastId: broadcast._id, status: 'failed' });
+  const allBatchSkipped = await BroadcastMessage.countDocuments({ broadcastId: broadcast._id, status: 'skipped' });
   const totalRecipients = await BroadcastMessage.countDocuments({ broadcastId: broadcast._id });
 
   // Check if there are more pending batches
@@ -306,6 +318,7 @@ async function processBroadcastBatch(batchId) {
   const broadcastUpdate = {
     'statistics.sent': allBatchMessages,
     'statistics.failed': allBatchFailed,
+    'statistics.optedOut': allBatchSkipped,
     'statistics.total': totalRecipients + (pendingBatches > 0 ?
       (await BroadcastBatch.aggregate([
         { $match: { broadcastId: broadcast._id, status: 'pending' } },

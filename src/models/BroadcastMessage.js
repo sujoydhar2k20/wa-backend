@@ -6,7 +6,7 @@ const broadcastMessageSchema = new mongoose.Schema(
     contactId: { type: mongoose.Schema.Types.ObjectId, ref: 'Contact' },
     phoneNumber: { type: String, required: true },
     messageId: { type: String },
-    status: { type: String, enum: ['sent', 'delivered', 'read', 'failed'], default: 'sent' },
+    status: { type: String, enum: ['sent', 'delivered', 'read', 'failed', 'skipped'], default: 'sent' },
     reactions: [{ emoji: String, count: { type: Number, default: 1 } }],
     repliedAt: { type: Date },
     errorCode: { type: Number },
