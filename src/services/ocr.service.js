@@ -20,13 +20,30 @@ async function preprocessImageForOcr(buffer) {
 async function extractTextFromImageBuffer(buffer) {
     try {
         const preprocessed = await preprocessImageForOcr(buffer);
-        const result = await Tesseract.recognize(preprocessed, 'eng', {
-            tessedit_pageseg_mode: Tesseract.PSM.AUTO,
-        });
 
-        const text = (result?.data?.text || '').trim();
-        const confidence = Number(result?.data?.confidence || 0);
-        return { text, confidence };
+        const attempts = [
+            { tessedit_pageseg_mode: Tesseract.PSM.AUTO },
+            { tessedit_pageseg_mode: Tesseract.PSM.SINGLE_BLOCK },
+            {
+                tessedit_pageseg_mode: Tesseract.PSM.SINGLE_LINE,
+                tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789/-_ ',
+            },
+        ];
+
+        let bestText = '';
+        let bestConfidence = 0;
+
+        for (const params of attempts) {
+            const result = await Tesseract.recognize(preprocessed, 'eng', params);
+            const text = (result?.data?.text || '').trim();
+            const confidence = Number(result?.data?.confidence || 0);
+            if (text && confidence >= bestConfidence) {
+                bestText = text;
+                bestConfidence = confidence;
+            }
+        }
+
+        return { text: bestText, confidence: bestConfidence };
     } catch (error) {
         logger.error(`OCR extraction failed: ${error.message}`);
         return { text: '', confidence: 0 };

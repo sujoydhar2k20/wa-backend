@@ -495,24 +495,100 @@ function extractProductCodeCandidates(text) {
     const direct = detectProductCode(normalized);
     if (direct) candidates.add(direct);
 
-    // Keep slash/dash/underscore formats: 21/401, ABC-22, SKU_101
-    const matches = normalized.match(/[A-Za-z0-9]+(?:[\/_-][A-Za-z0-9]+)+|[A-Za-z]{2,}\d+|\d+[\/]\d+/g) || [];
+    // Keep slash/dash/underscore/space formats: 21/401, BJS 20/112, ABC-22, SKU_101
+    const matches = normalized.match(/[A-Za-z0-9]+(?:[\s\/_-][A-Za-z0-9]+)+|[A-Za-z]{2,}\d+|\d+[\/]\d+/g) || [];
     for (const raw of matches) {
-        const cleaned = raw.replace(/^[^A-Za-z0-9]+|[^A-Za-z0-9]+$/g, '');
+        const cleaned = raw.replace(/^[^A-Za-z0-9]+|[^A-Za-z0-9]+$/g, '').replace(/\s+/g, ' ');
         const code = detectProductCode(cleaned);
         if (code) candidates.add(code);
+
+        // Also add compact variant (handles OCR that inserts spaces: "BJS 20/112")
+        const compact = cleaned.replace(/\s+/g, '');
+        const compactCode = detectProductCode(compact);
+        if (compactCode) candidates.add(compactCode);
     }
 
     return Array.from(candidates);
 }
 
+function normalizeNumericLikeToken(token) {
+    const map = {
+        o: '0', O: '0',
+        i: '1', I: '1', l: '1', L: '1', '|': '1',
+        s: '5', S: '5',
+        z: '2', Z: '2',
+        b: '8', B: '8',
+        g: '6', G: '6',
+        q: '9', Q: '9',
+    };
+
+    let out = '';
+    for (const ch of token) {
+        if (/\d/.test(ch)) out += ch;
+        else if (ch === 'm' || ch === 'M') out += '11'; // common OCR confusion for "11"
+        else if (map[ch]) out += map[ch];
+    }
+    return out;
+}
+
+function buildFlexibleCodeRegex(code) {
+    const cleaned = String(code || '').trim();
+    const chunks = cleaned.split(/[^A-Za-z0-9]+/).filter(Boolean);
+    if (!chunks.length) return null;
+    const escapedChunks = chunks.map(c => c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+    return new RegExp(`^${escapedChunks.join('[\\s/_-]*')}$`, 'i');
+}
+
+function expandCodeVariants(candidate) {
+    const variants = new Set();
+    if (!candidate) return [];
+
+    variants.add(candidate);
+
+    const compact = candidate.replace(/\s+/g, '');
+    variants.add(compact);
+
+    // Prefix OCR fixes (Bus -> BJS)
+    variants.add(compact.replace(/^bus/i, 'bjs'));
+    variants.add(compact.replace(/^bis/i, 'bjs'));
+
+    const parts = compact.split(/[\/_-]+/).filter(Boolean);
+    if (parts.length >= 2) {
+        const normalizedParts = parts.map((p, idx) => {
+            if (/^\d+$/.test(p)) return p;
+            const numericLike = normalizeNumericLikeToken(p);
+            // Prefer numeric correction for right side token (e.g. "m2" -> "112")
+            if (idx > 0 && numericLike) return numericLike;
+            return p;
+        });
+        variants.add(normalizedParts.join('/'));
+
+        // If first part is prefix+digits (e.g. BJS20), also try split-prefix form: "BJS 20/112"
+        const prefixDigitMatch = normalizedParts[0].match(/^([A-Za-z]+)(\d+)$/);
+        if (prefixDigitMatch) {
+            variants.add(`${prefixDigitMatch[1]} ${prefixDigitMatch[2]}/${normalizedParts.slice(1).join('/')}`);
+        }
+
+        // If first part has prefix+digits like "BJS20", also try only digits: "20/112"
+        const firstDigits = (normalizedParts[0].match(/\d+/g) || []).join('');
+        if (firstDigits && normalizedParts.length > 1) {
+            variants.add([firstDigits, ...normalizedParts.slice(1)].join('/'));
+        }
+    }
+
+    return Array.from(variants).filter(v => detectProductCode(v));
+}
+
 async function findProductByCandidates(candidates) {
     for (const candidate of candidates) {
-        const escapedCode = candidate.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        const codeRegex = new RegExp(`^${escapedCode}$`, 'i');
-        const product = await Product.findOne({ $or: [{ code: codeRegex }, { sku: codeRegex }] }).lean();
-        if (product) {
-            return { product, matchedCode: candidate };
+        const expandedVariants = expandCodeVariants(candidate);
+        for (const variant of expandedVariants) {
+            const codeRegex = buildFlexibleCodeRegex(variant);
+            if (!codeRegex) continue;
+            const product = await Product.findOne({ $or: [{ code: codeRegex }, { sku: codeRegex }] }).lean();
+            if (product) {
+                return { product, matchedCode: variant };
+            }
         }
     }
     return { product: null, matchedCode: null };
@@ -550,7 +626,7 @@ async function handleProductCodeReply(waba, phoneNumberId, chat, message, text, 
         diamond: '💎 Diamond Product Details',
     };
 
-    const searchCode = String(product.code || '').replace(/\//g, '-');
+    const searchCode = String(product.code || '').replace(/\//g, '/');
 
     const lines = [
         CATEGORY_HEADER[product.category] || `📦 Product Details`,
