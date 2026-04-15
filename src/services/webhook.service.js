@@ -626,7 +626,8 @@ async function handleProductCodeReply(waba, phoneNumberId, chat, message, text, 
         diamond: '💎 Diamond Product Details',
     };
 
-    const searchCode = String(product.code || '').replace(/\//g, '/');
+    const searchCode = String(product.code || '');
+    const searchParam = encodeURIComponent(searchCode).replace(/%2F/g, '/');
 
     const lines = [
         CATEGORY_HEADER[product.category] || `📦 Product Details`,
@@ -634,7 +635,7 @@ async function handleProductCodeReply(waba, phoneNumberId, chat, message, text, 
         product.weight != null ? `⚖️ Weight: ${product.weight}g` : null,
         displayPrice != null ? `💵 Approx: ₹${displayPrice.toLocaleString()}` : null,
         ``,
-        `🛒 Buy Now: https://biswakarmagold.com/products?search=${encodeURIComponent(searchCode)}`,
+        `🛒 Buy Now: https://biswakarmagold.com/products?search=${searchParam}`,
     ].filter(l => l !== null).join('\n');
 
     let replyStatus = 'success';
