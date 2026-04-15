@@ -6,6 +6,7 @@ const productReplyLogSchema = new mongoose.Schema(
     messageId: { type: mongoose.Schema.Types.ObjectId, ref: 'Message' },
     productCode: { type: String, required: true },
     productId: { type: mongoose.Schema.Types.ObjectId, ref: 'Product' },
+    source: { type: String, enum: ['text', 'image_ocr'], default: 'text' },
     status: { type: String, enum: ['success', 'error'], required: true },
     errorMessage: { type: String },
     repliedAt: { type: Date, default: Date.now },

@@ -4,6 +4,7 @@ const { logger } = require('../utils/logger');
 const whatsappService = require('./whatsapp.service');
 const botService = require('./bot.service');
 const mediaService = require('./media.service');
+const ocrService = require('./ocr.service');
 const cloudinary = require('../config/cloudinary');
 const streamifier = require('streamifier');
 
@@ -233,9 +234,15 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
 
         // Process media download/upload synchronously before saving the message
         try {
-            const finalUrl = await processMediaAsync(chat, messageData, msg.type);
-            if (finalUrl) {
-                messageData.mediaUrl = finalUrl;
+            const mediaResult = await processMediaAsync(chat, messageData, msg.type);
+            if (mediaResult?.mediaUrl) {
+                messageData.mediaUrl = mediaResult.mediaUrl;
+            }
+            if (mediaResult?.metadata) {
+                messageData.metadata = {
+                    ...(messageData.metadata || {}),
+                    ...mediaResult.metadata,
+                };
             }
         } catch (err) {
             logger.error(`Failed to process media ${msg.type} for message ${msg.id}:`, err);
@@ -304,8 +311,14 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
 
     // Product code auto-reply (fire-and-forget)
     if (msg.type === 'text' && msg.text?.body) {
-        handleProductCodeReply(waba, phoneNumberId, chat, message, msg.text.body)
+        handleProductCodeReply(waba, phoneNumberId, chat, message, msg.text.body, 'text')
             .catch(e => logger.error('Product code auto-reply error:', e.message));
+    } else if (msg.type === 'image') {
+        const ocrText = message?.metadata?.ocr?.text || '';
+        if (ocrText) {
+            handleProductCodeReply(waba, phoneNumberId, chat, message, ocrText, 'image_ocr')
+            .catch(e => logger.error('Product code auto-reply error:', e.message));
+        }
     }
 
     // Bot flow execution (fire-and-forget)
@@ -469,17 +482,50 @@ function detectProductCode(text) {
     return trimmed;
 }
 
+function extractProductCodeCandidates(text) {
+    if (!text || typeof text !== 'string') return [];
+
+    const normalized = text
+        .replace(/[|]/g, '/')
+        .replace(/[\r\n\t]+/g, ' ');
+
+    const candidates = new Set();
+
+    // Full text token if user sends only one short code
+    const direct = detectProductCode(normalized);
+    if (direct) candidates.add(direct);
+
+    // Keep slash/dash/underscore formats: 21/401, ABC-22, SKU_101
+    const matches = normalized.match(/[A-Za-z0-9]+(?:[\/_-][A-Za-z0-9]+)+|[A-Za-z]{2,}\d+|\d+[\/]\d+/g) || [];
+    for (const raw of matches) {
+        const cleaned = raw.replace(/^[^A-Za-z0-9]+|[^A-Za-z0-9]+$/g, '');
+        const code = detectProductCode(cleaned);
+        if (code) candidates.add(code);
+    }
+
+    return Array.from(candidates);
+}
+
+async function findProductByCandidates(candidates) {
+    for (const candidate of candidates) {
+        const escapedCode = candidate.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const codeRegex = new RegExp(`^${escapedCode}$`, 'i');
+        const product = await Product.findOne({ $or: [{ code: codeRegex }, { sku: codeRegex }] }).lean();
+        if (product) {
+            return { product, matchedCode: candidate };
+        }
+    }
+    return { product: null, matchedCode: null };
+}
+
 /**
  * Look up a product by code or SKU and auto-reply with its details.
  */
-async function handleProductCodeReply(waba, phoneNumberId, chat, message, text) {
-    const code = detectProductCode(text);
-    if (!code) return;
+async function handleProductCodeReply(waba, phoneNumberId, chat, message, text, source = 'text') {
+    const candidates = extractProductCodeCandidates(text);
+    if (!candidates.length) return;
 
-    // Case-insensitive search on code or SKU
-    const escapedCode = code.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const codeRegex = new RegExp(`^${escapedCode}$`, 'i');
-    const product = await Product.findOne({ $or: [{ code: codeRegex }, { sku: codeRegex }] }).lean();
+    const { product, matchedCode: code } = await findProductByCandidates(candidates);
 
     if (!product) {
         // No match → silent, no reply
@@ -504,13 +550,15 @@ async function handleProductCodeReply(waba, phoneNumberId, chat, message, text) 
         diamond: '💎 Diamond Product Details',
     };
 
+    const searchCode = String(product.code || '').replace(/\//g, '-');
+
     const lines = [
         CATEGORY_HEADER[product.category] || `📦 Product Details`,
         `📋 Code: ${product.code}`,
         product.weight != null ? `⚖️ Weight: ${product.weight}g` : null,
         displayPrice != null ? `💵 Approx: ₹${displayPrice.toLocaleString()}` : null,
         ``,
-        `🛒 Buy Now: https://biswakarmagold.com/products?search=${encodeURIComponent(product.code)}`,
+        `🛒 Buy Now: https://biswakarmagold.com/products?search=${encodeURIComponent(searchCode)}`,
     ].filter(l => l !== null).join('\n');
 
     let replyStatus = 'success';
@@ -537,6 +585,12 @@ async function handleProductCodeReply(waba, phoneNumberId, chat, message, text) 
             type: 'text',
             text: lines,
             status: 'sent',
+            sentByBot: true,
+            metadata: {
+                autoReplyType: 'product_lookup',
+                matchedCode: code,
+                source,
+            },
             replyToMessageId: message._id,
         });
 
@@ -551,7 +605,7 @@ async function handleProductCodeReply(waba, phoneNumberId, chat, message, text) 
             logger.warn('Socket emit failed for product auto-reply:', e.message);
         }
 
-        logger.info(`Product code auto-reply sent for code "${code}" to ${chat.waId}`);
+        logger.info(`Product code auto-reply sent for code "${code}" (${source}) to ${chat.waId}`);
     } catch (err) {
         replyStatus = 'error';
         replyError = err.message;
@@ -566,6 +620,7 @@ async function handleProductCodeReply(waba, phoneNumberId, chat, message, text) 
         productId: product._id,
         status: replyStatus,
         errorMessage: replyError,
+        source,
     }).catch(e => logger.error('Failed to save ProductReplyLog:', e.message));
 }
 
@@ -579,6 +634,7 @@ async function processMediaAsync(chat, messageData, type) {
         const buffer = await whatsappService.downloadMedia(waba._id, mediaId);
 
         let uploadedUrl = null;
+        let metadata = {};
 
         // Save to Cloudinary
         const resourceType = ['video', 'audio'].includes(type) ? 'video' : 'auto';
@@ -635,10 +691,27 @@ async function processMediaAsync(chat, messageData, type) {
             expiresAt: expiresAt
         });
 
+        if (type === 'image') {
+            const ocrResult = await ocrService.extractTextFromImageBuffer(buffer);
+            if (ocrResult.text) {
+                metadata = {
+                    ...metadata,
+                    ocr: {
+                        text: ocrResult.text,
+                        confidence: ocrResult.confidence,
+                    },
+                };
+                logger.info(`OCR extracted ${ocrResult.text.length} chars for inbound media ${mediaId}`);
+            }
+        }
+
         const finalUrl = uploadedUrl;
         logger.info(`Successfully processed and uploaded inbound media ${type} for message ${messageData.messageId}`);
 
-        return finalUrl;
+        return {
+            mediaUrl: finalUrl,
+            metadata,
+        };
 
     } catch (error) {
         logger.error('Error in processMediaAsync:', error);
