@@ -496,7 +496,8 @@ function extractProductCodeCandidates(text) {
     if (direct) candidates.add(direct);
 
     // Keep slash/dash/underscore/space formats: 21/401, BJS 20/112, ABC-22, SKU_101
-    const matches = normalized.match(/[A-Za-z0-9]+(?:[\s\/_-][A-Za-z0-9]+)+|[A-Za-z]{2,}\d+|\d+[\/]\d+/g) || [];
+    // Also capture compact OCR forms like "Bis20m2" (no separators).
+    const matches = normalized.match(/[A-Za-z0-9]+(?:[\s\/_-][A-Za-z0-9]+)+|[A-Za-z]{2,}\d+[A-Za-z0-9]*|[A-Za-z]{2,}\d+|\d+[\/]\d+/g) || [];
     for (const raw of matches) {
         const cleaned = raw.replace(/^[^A-Za-z0-9]+|[^A-Za-z0-9]+$/g, '').replace(/\s+/g, ' ');
         const code = detectProductCode(cleaned);
@@ -573,6 +574,22 @@ function expandCodeVariants(candidate) {
         const firstDigits = (normalizedParts[0].match(/\d+/g) || []).join('');
         if (firstDigits && normalizedParts.length > 1) {
             variants.add([firstDigits, ...normalizedParts.slice(1)].join('/'));
+        }
+    }
+
+    // Compact OCR form with no separators, e.g. "Bis20m2" -> "BJS 20/112", "20/112"
+    const compactMixed = compact.match(/^([A-Za-z]{2,})(\d+)([A-Za-z0-9]{1,6})$/);
+    if (compactMixed) {
+        const prefixRaw = compactMixed[1];
+        const leftNum = compactMixed[2];
+        const rightRaw = compactMixed[3];
+
+        const prefix = prefixRaw.replace(/^bis/i, 'bjs').replace(/^bus/i, 'bjs');
+        const rightNum = normalizeNumericLikeToken(rightRaw);
+        if (rightNum) {
+            variants.add(`${prefix} ${leftNum}/${rightNum}`);
+            variants.add(`${prefix}${leftNum}/${rightNum}`);
+            variants.add(`${leftNum}/${rightNum}`);
         }
     }
 
