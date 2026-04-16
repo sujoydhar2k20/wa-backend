@@ -154,9 +154,9 @@ async function extractTextFromImageBuffer(buffer) {
             }
         }
 
-        // If Tesseract got good results, return them.
-        // We lowered confidence to 20 because often Tesseract gets the code right but is unconfident.
-        if (bestText && bestConfidence >= 20) {
+        // If Tesseract got good results, return them
+        // Reverting confidence to 40 so we fall back to the newly fixed OpenAI when Tesseract struggles
+        if (bestText && bestConfidence >= 40) {
             logger.info(`Tesseract OCR succeeded (confidence: ${bestConfidence}): "${bestText.substring(0, 100)}"`);
             return { text: bestText, confidence: bestConfidence, source: 'tesseract' };
         }
