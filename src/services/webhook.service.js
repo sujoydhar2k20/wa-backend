@@ -776,9 +776,10 @@ async function processMediaAsync(chat, messageData, type) {
                     ocr: {
                         text: ocrResult.text,
                         confidence: ocrResult.confidence,
+                        source: ocrResult.source || 'tesseract',
                     },
                 };
-                logger.info(`OCR extracted ${ocrResult.text.length} chars for inbound media ${mediaId}`);
+                logger.info(`OCR (${ocrResult.source || 'tesseract'}) extracted ${ocrResult.text.length} chars for inbound media ${mediaId}`);
             }
         }
 
