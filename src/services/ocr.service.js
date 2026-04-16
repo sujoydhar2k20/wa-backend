@@ -102,7 +102,7 @@ async function extractTextWithOpenAI(imageUrl) {
                     },
                 ],
                 max_completion_tokens: 300,
-                temperature: 0,
+                temperature: 1,
             },
             {
                 headers: {
