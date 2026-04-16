@@ -96,7 +96,7 @@ async function extractTextWithOpenAI(imageUrl) {
                             },
                             {
                                 type: 'image_url',
-                                image_url: { url: imageUrl, detail: 'low' },
+                                image_url: { url: imageUrl },
                             },
                         ],
                     },
