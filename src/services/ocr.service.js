@@ -82,17 +82,16 @@ async function extractTextWithOpenAI(imageUrl) {
                     {
                         role: 'system',
                         content:
-                            'You are an OCR assistant. Extract ALL visible text from the image. ' +
-                            'Focus especially on product codes, SKU numbers, model numbers, and any alphanumeric codes ' +
-                            '(e.g. "BJS 20/112", "GOLD-001", "21/401"). ' +
-                            'Return ONLY the extracted text, nothing else. No explanations.',
+                            'You are an OCR assistant. Please extract all the text you can see in this image. ' +
+                            'Pay special attention to product codes, SKU numbers, or model numbers (e.g., "BJS 20/112", "138/3"). ' +
+                            'Just output the text.',
                     },
                     {
                         role: 'user',
                         content: [
                             {
                                 type: 'text',
-                                text: 'Extract all text and product codes visible in this image.',
+                                text: 'What text is visible in this image?',
                             },
                             {
                                 type: 'image_url',
@@ -155,8 +154,9 @@ async function extractTextFromImageBuffer(buffer) {
             }
         }
 
-        // If Tesseract got good results, return them
-        if (bestText && bestConfidence >= 40) {
+        // If Tesseract got good results, return them.
+        // We lowered confidence to 20 because often Tesseract gets the code right but is unconfident.
+        if (bestText && bestConfidence >= 20) {
             logger.info(`Tesseract OCR succeeded (confidence: ${bestConfidence}): "${bestText.substring(0, 100)}"`);
             return { text: bestText, confidence: bestConfidence, source: 'tesseract' };
         }
