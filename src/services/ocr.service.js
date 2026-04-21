@@ -84,7 +84,7 @@ async function extractTextWithOpenAI(imageUrl) {
                         content:
                             'You are an OCR assistant. Please extract all the text you can see in this image. ' +
                             'Pay special attention to product codes, SKU numbers, or model numbers (e.g., "BJS 20/112", "138/3"). ' +
-                            'Just output the text.',
+                            'Just output the text. If you cannot find any text, please output: [NO TEXT VISIBLE].',
                     },
                     {
                         role: 'user',
@@ -95,13 +95,13 @@ async function extractTextWithOpenAI(imageUrl) {
                             },
                             {
                                 type: 'image_url',
-                                image_url: { url: imageUrl },
+                                image_url: { url: imageUrl, detail: 'high' },
                             },
                         ],
                     },
                 ],
-                max_completion_tokens: 300,
-                temperature: 1,
+                max_tokens: 300,
+                temperature: 0.2,
             },
             {
                 headers: {
@@ -112,8 +112,14 @@ async function extractTextWithOpenAI(imageUrl) {
             }
         );
 
+        logger.info(`OpenAI Full Choice: ${JSON.stringify(response.data?.choices?.[0])}`);
         const extractedText = response.data?.choices?.[0]?.message?.content?.trim() || '';
         logger.info(`OpenAI OCR extracted: "${extractedText}"`);
+        
+        if (extractedText === '[NO TEXT VISIBLE]') {
+             return { text: '', confidence: 0 };
+        }
+        
         return { text: extractedText, confidence: 85, source: 'openai' };
     } catch (error) {
         logger.error(`OpenAI OCR failed: ${error.response?.data?.error?.message || error.message}`);
