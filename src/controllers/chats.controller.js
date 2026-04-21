@@ -588,6 +588,110 @@ async function getAutoMessages(req, res, next) {
 
         res.json({ data: enriched, total, page: parseInt(page, 10), limit: parseInt(limit, 10) });
     } catch (e) {
+    }
+}
+
+async function getAllAutoMessages(req, res, next) {
+    try {
+        const { page = 1, limit = 50 } = req.query;
+        const skip = (parseInt(page, 10) - 1) * parseInt(limit, 10);
+
+        // 1. Fetch all bot-sent messages system-wide
+        const [autoMessages, total] = await Promise.all([
+            Message.find({ sentByBot: true })
+                .sort({ createdAt: -1 })
+                .skip(skip)
+                .limit(parseInt(limit, 10))
+                .populate({
+                    path: 'chatId',
+                    select: 'phoneNumber',
+                    populate: {
+                       path: 'contactId',
+                       select: 'name phone'
+                    }
+                })
+                .lean(),
+            Message.countDocuments({ sentByBot: true }),
+        ]);
+
+        // 2. Fetch all related ProductReplyLogs to enrich product code replies
+        const chatIds = [...new Set(autoMessages.map(m => m.chatId?._id?.toString()).filter(Boolean))];
+        const productLogs = await ProductReplyLog.find({ chatId: { $in: chatIds } })
+            .populate('productId', 'code name category weight')
+            .lean();
+
+        // Build lookup: messageId (ObjectId) -> productLog
+        const productLogByMsgId = {};
+        for (const log of productLogs) {
+            if (log.messageId) {
+                productLogByMsgId[log.messageId.toString()] = log;
+            }
+        }
+
+        // 3. Fetch BotExecution logs for these chats
+        const botExecutions = await BotExecution.find({ chatId: { $in: chatIds } })
+            .populate('flowId', 'name')
+            .sort({ startedAt: -1 })
+            .lean();
+
+        // 4. Enrich each auto message with source context
+        const enriched = autoMessages.map(msg => {
+            const result = {
+                _id: msg._id,
+                messageId: msg.messageId,
+                chat: msg.chatId, // Includes populated chat data (contact, phone)
+                type: msg.type,
+                text: msg.text,
+                mediaUrl: msg.mediaUrl,
+                caption: msg.caption,
+                status: msg.status,
+                createdAt: msg.createdAt,
+                direction: msg.direction,
+                metadata: msg.metadata,
+                source: 'bot',
+                sourceLabel: 'Bot Flow',
+                sourceIcon: 'bot',
+                productCode: null,
+                productInfo: null,
+                flowName: null,
+            };
+
+            if (msg.metadata?.autoReplyType === 'product_lookup') {
+                const source = msg.metadata?.source;
+                if (source === 'image_ocr') {
+                    result.source = 'image_ocr';
+                    result.sourceLabel = 'Image Code Detection';
+                    result.sourceIcon = 'image';
+                } else {
+                    result.source = 'text_code';
+                    result.sourceLabel = 'Chat Code Detection';
+                    result.sourceIcon = 'text';
+                }
+                result.productCode = msg.metadata?.matchedCode || null;
+
+                const pLog = productLogByMsgId[msg.replyToMessageId?.toString()];
+                if (pLog?.productId) {
+                    result.productInfo = pLog.productId;
+                }
+            } else {
+                const msgTime = new Date(msg.createdAt).getTime();
+                const chatIdStr = msg.chatId?._id?.toString();
+                const matchingExec = botExecutions.find(exec => {
+                    if (exec.chatId?.toString() !== chatIdStr) return false;
+                    const startTime = new Date(exec.startedAt).getTime();
+                    const endTime = exec.completedAt ? new Date(exec.completedAt).getTime() : startTime + 60000;
+                    return msgTime >= startTime && msgTime <= endTime + 5000;
+                });
+                if (matchingExec?.flowId) {
+                    result.flowName = matchingExec.flowId.name || 'Unknown Flow';
+                }
+            }
+
+            return result;
+        });
+
+        res.json({ data: enriched, total, page: parseInt(page, 10), limit: parseInt(limit, 10) });
+    } catch (e) {
         next(e);
     }
 }
@@ -605,6 +709,7 @@ module.exports = {
     getMessages,
     getActivities,
     getAutoMessages,
+    getAllAutoMessages,
     stats,
     toggleDnd,
 };
