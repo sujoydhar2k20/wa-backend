@@ -1,4 +1,4 @@
-const { Chat, Message, ChatActivity } = require('../models');
+const { Chat, Message, ChatActivity, ProductReplyLog, BotExecution, BotFlow } = require('../models');
 const { getIO } = require('../websocket/socket.server');
 
 async function list(req, res, next) {
@@ -494,6 +494,104 @@ async function toggleDnd(req, res, next) {
     }
 }
 
+async function getAutoMessages(req, res, next) {
+    try {
+        const chatId = req.params.id;
+        const { page = 1, limit = 50 } = req.query;
+        const skip = (parseInt(page, 10) - 1) * parseInt(limit, 10);
+
+        // 1. Fetch all bot-sent messages for this chat
+        const [autoMessages, total] = await Promise.all([
+            Message.find({ chatId, sentByBot: true })
+                .sort({ createdAt: -1 })
+                .skip(skip)
+                .limit(parseInt(limit, 10))
+                .lean(),
+            Message.countDocuments({ chatId, sentByBot: true }),
+        ]);
+
+        // 2. Fetch ProductReplyLogs for this chat to enrich product code replies
+        const productLogs = await ProductReplyLog.find({ chatId })
+            .populate('productId', 'code name category weight')
+            .lean();
+
+        // Build lookup: messageId (ObjectId) -> productLog
+        const productLogByMsgId = {};
+        for (const log of productLogs) {
+            if (log.messageId) {
+                productLogByMsgId[log.messageId.toString()] = log;
+            }
+        }
+
+        // 3. Fetch BotExecution logs for this chat to identify which flow triggered which message
+        const botExecutions = await BotExecution.find({ chatId })
+            .populate('flowId', 'name')
+            .sort({ startedAt: -1 })
+            .lean();
+
+        // 4. Enrich each auto message with source context
+        const enriched = autoMessages.map(msg => {
+            const result = {
+                _id: msg._id,
+                messageId: msg.messageId,
+                type: msg.type,
+                text: msg.text,
+                mediaUrl: msg.mediaUrl,
+                caption: msg.caption,
+                status: msg.status,
+                createdAt: msg.createdAt,
+                direction: msg.direction,
+                metadata: msg.metadata,
+                // Determine source/medium
+                source: 'bot',
+                sourceLabel: 'Bot Flow',
+                sourceIcon: 'bot',
+                productCode: null,
+                productInfo: null,
+                flowName: null,
+            };
+
+            // Check if this is a product code auto-reply
+            if (msg.metadata?.autoReplyType === 'product_lookup') {
+                const source = msg.metadata?.source;
+                if (source === 'image_ocr') {
+                    result.source = 'image_ocr';
+                    result.sourceLabel = 'Image Code Detection';
+                    result.sourceIcon = 'image';
+                } else {
+                    result.source = 'text_code';
+                    result.sourceLabel = 'Chat Code Detection';
+                    result.sourceIcon = 'text';
+                }
+                result.productCode = msg.metadata?.matchedCode || null;
+
+                // Enrich with product log data
+                const pLog = productLogByMsgId[msg.replyToMessageId?.toString()];
+                if (pLog?.productId) {
+                    result.productInfo = pLog.productId;
+                }
+            } else {
+                // This is a bot flow message - find which flow triggered it
+                const msgTime = new Date(msg.createdAt).getTime();
+                const matchingExec = botExecutions.find(exec => {
+                    const startTime = new Date(exec.startedAt).getTime();
+                    const endTime = exec.completedAt ? new Date(exec.completedAt).getTime() : startTime + 60000;
+                    return msgTime >= startTime && msgTime <= endTime + 5000;
+                });
+                if (matchingExec?.flowId) {
+                    result.flowName = matchingExec.flowId.name || 'Unknown Flow';
+                }
+            }
+
+            return result;
+        });
+
+        res.json({ data: enriched, total, page: parseInt(page, 10), limit: parseInt(limit, 10) });
+    } catch (e) {
+        next(e);
+    }
+}
+
 module.exports = {
     list,
     search,
@@ -506,6 +604,7 @@ module.exports = {
     markUnread,
     getMessages,
     getActivities,
+    getAutoMessages,
     stats,
     toggleDnd,
 };
