@@ -134,13 +134,17 @@ async function extractTextWithOpenAI(imageUrl) {
  */
 async function extractTextFromImageBuffer(buffer) {
     try {
-        // Upload the uncompressed image buffer directly to Cloudinary
-        const imageUrl = await uploadCompressedToCloudinary(buffer);
-        logger.info(`Uncompressed image uploaded to Cloudinary: ${imageUrl}`);
+        // Compress the image to save upload time and AI credits
+        const compressedBuffer = await compressImageForAI(buffer);
+        logger.info(`Image compressed for AI: ${buffer.length} → ${compressedBuffer.length} bytes (${Math.round((compressedBuffer.length / buffer.length) * 100)}%)`);
+
+        // Upload the compressed image buffer to Cloudinary
+        const imageUrl = await uploadCompressedToCloudinary(compressedBuffer);
+        logger.info(`Compressed image uploaded to Cloudinary: ${imageUrl}`);
         
         logger.info('Sending image URL directly to OpenAI...');
         
-        // Send directly to OpenAI without Tesseract or compression
+        // Send directly to OpenAI without Tesseract
         const aiResult = await extractTextWithOpenAI(imageUrl);
         return aiResult;
     } catch (error) {
