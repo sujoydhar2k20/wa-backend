@@ -128,77 +128,18 @@ async function extractTextWithOpenAI(imageUrl) {
  *    - Compress image → upload to Cloudinary → send URL to OpenAI
  */
 async function extractTextFromImageBuffer(buffer) {
-    let fallbackText = '';
-    let fallbackConfidence = 0;
-
-    // ── Step 1: Try Tesseract first ──
     try {
-        const preprocessed = await preprocessImageForOcr(buffer);
-
-        const attempts = [
-            { tessedit_pageseg_mode: Tesseract.PSM.AUTO },
-            { tessedit_pageseg_mode: Tesseract.PSM.SINGLE_BLOCK },
-            {
-                tessedit_pageseg_mode: Tesseract.PSM.SINGLE_LINE,
-                tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789/-_ ',
-            },
-        ];
-
-        let bestText = '';
-        let bestConfidence = 0;
-
-        for (const params of attempts) {
-            const result = await Tesseract.recognize(preprocessed, 'eng', params);
-            const text = (result?.data?.text || '').trim();
-            const confidence = Number(result?.data?.confidence || 0);
-            if (text && confidence >= bestConfidence) {
-                bestText = text;
-                bestConfidence = confidence;
-            }
-        }
-
-        fallbackText = bestText;
-        fallbackConfidence = bestConfidence;
-
-        // If Tesseract got good results, return them
-        if (bestText && bestConfidence >= 40) {
-            logger.info(`Tesseract OCR succeeded (confidence: ${bestConfidence}): "${bestText.substring(0, 100)}"`);
-            return { text: bestText, confidence: bestConfidence, source: 'tesseract' };
-        }
-
-        logger.info(`Tesseract OCR weak/empty (confidence: ${bestConfidence}), falling back to OpenAI...`);
-    } catch (error) {
-        logger.error(`Tesseract OCR failed: ${error.message}, falling back to OpenAI...`);
-    }
-
-    // ── Step 2: Fall back to OpenAI GPT-5 Nano ──
-    try {
-        // Compress the image to save OpenAI credits
-        const compressedBuffer = await compressImageForAI(buffer);
-        logger.info(`Image compressed for AI: ${buffer.length} → ${compressedBuffer.length} bytes (${Math.round((compressedBuffer.length / buffer.length) * 100)}%)`);
-
-        // Upload compressed image to Cloudinary
-        const imageUrl = await uploadCompressedToCloudinary(compressedBuffer);
-        logger.info(`Compressed image uploaded to Cloudinary: ${imageUrl}`);
-
-        // Send to OpenAI for text extraction
+        // Upload the uncompressed image buffer directly to Cloudinary
+        const imageUrl = await uploadCompressedToCloudinary(buffer);
+        logger.info(`Uncompressed image uploaded to Cloudinary: ${imageUrl}`);
+        
+        logger.info('Sending image URL directly to OpenAI...');
+        
+        // Send directly to OpenAI without Tesseract or compression
         const aiResult = await extractTextWithOpenAI(imageUrl);
-        if (aiResult?.text) {
-            return aiResult;
-        }
-
-        if (fallbackText) {
-            logger.info(`OpenAI OCR returned empty text, using Tesseract fallback (confidence: ${fallbackConfidence})`);
-            return { text: fallbackText, confidence: fallbackConfidence, source: 'tesseract-fallback' };
-        }
-
         return aiResult;
     } catch (error) {
-        logger.error(`OpenAI OCR fallback failed: ${error.message}`);
-        if (fallbackText) {
-            logger.info(`OpenAI OCR failed, using Tesseract fallback (confidence: ${fallbackConfidence})`);
-            return { text: fallbackText, confidence: fallbackConfidence, source: 'tesseract-fallback' };
-        }
+        logger.error(`Direct OpenAI OCR failed: ${error.message}`);
         return { text: '', confidence: 0 };
     }
 }
