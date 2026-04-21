@@ -20,5 +20,6 @@ router.use('/push', require('./push.routes'));
 router.use('/proxy', require('./proxy.routes'));
 router.use('/external', require('./external.routes'));
 router.use('/quick-replies', require('./quickReplies.routes'));
+router.use('/settings', require('./settings.routes'));
 
 module.exports = router;

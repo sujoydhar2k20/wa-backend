@@ -23,4 +23,5 @@ module.exports = {
   Media: require('./Media'),
   ApiKey: require('./ApiKey'),
   QuickReply: require('./QuickReply'),
+  AiSetting: require('./AiSetting'),
 };
