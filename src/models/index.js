@@ -24,4 +24,5 @@ module.exports = {
   ApiKey: require('./ApiKey'),
   QuickReply: require('./QuickReply'),
   AiSetting: require('./AiSetting'),
+  AiCategory: require('./AiCategory'),
 };
