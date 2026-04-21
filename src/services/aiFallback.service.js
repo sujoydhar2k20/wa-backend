@@ -122,15 +122,21 @@ function buildCategoryLinks(aiResponse, categories) {
     }
 
     for (const item of items) {
-        const mainCatName = item.mainCategory || item.category || item.main_category || '';
-        const subCatName = item.subCategory || item.subcategory || item.sub_category || '';
+        // Normalize keys: OpenAI may return "Main Category", "mainCategory", "main_category", etc.
+        const normalized = {};
+        for (const [key, value] of Object.entries(item)) {
+            normalized[key.toLowerCase().replace(/[\s_-]+/g, '')] = value;
+        }
+
+        const mainCatName = normalized.maincategory || normalized.category || '';
+        const subCatName = normalized.subcategory || '';
         const filters = {};
 
-        // Extract filters
-        if (item.purity != null && item.purity !== '') filters.purity = item.purity;
-        if (item.size != null && item.size !== '') filters.size = item.size;
-        if (item.priceMax != null && item.priceMax !== '') filters.priceMax = item.priceMax;
-        if (item.weightMax != null && item.weightMax !== '') filters.weightMax = item.weightMax;
+        // Extract filters (also from normalized keys)
+        if (normalized.purity != null && normalized.purity !== '' && normalized.purity !== null) filters.purity = normalized.purity;
+        if (normalized.size != null && normalized.size !== '' && normalized.size !== null) filters.size = normalized.size;
+        if (normalized.pricemax != null && normalized.pricemax !== '' && normalized.pricemax !== null) filters.priceMax = normalized.pricemax;
+        if (normalized.weightmax != null && normalized.weightmax !== '' && normalized.weightmax !== null) filters.weightMax = normalized.weightmax;
 
         // Find matching category
         const matchedCat = categories.find(c =>
