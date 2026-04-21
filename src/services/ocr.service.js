@@ -50,7 +50,11 @@ async function uploadCompressedToCloudinary(compressedBuffer) {
             {
                 folder: 'whatsapp-bot/ocr-temp',
                 resource_type: 'image',
-                format: 'jpg',
+                // Tell Cloudinary to compress and resize the image for us
+                transformation: [
+                    { width: 800, crop: 'limit' },
+                    { quality: 'auto', fetch_format: 'jpg' }
+                ],
                 // Auto-delete after 1 hour to save storage
                 invalidate: true,
             },
@@ -134,13 +138,9 @@ async function extractTextWithOpenAI(imageUrl) {
  */
 async function extractTextFromImageBuffer(buffer) {
     try {
-        // Compress the image to save upload time and AI credits
-        const compressedBuffer = await compressImageForAI(buffer);
-        logger.info(`Image compressed for AI: ${buffer.length} → ${compressedBuffer.length} bytes (${Math.round((compressedBuffer.length / buffer.length) * 100)}%)`);
-
-        // Upload the compressed image buffer to Cloudinary
-        const imageUrl = await uploadCompressedToCloudinary(compressedBuffer);
-        logger.info(`Compressed image uploaded to Cloudinary: ${imageUrl}`);
+        // Pass the raw image buffer to Cloudinary, which will handle the compression via upload parameters
+        const imageUrl = await uploadCompressedToCloudinary(buffer);
+        logger.info(`Cloudinary-compressed image uploaded: ${imageUrl}`);
         
         logger.info('Sending image URL directly to OpenAI...');
         
