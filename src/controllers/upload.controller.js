@@ -1,10 +1,7 @@
 const axios = require('axios');
 const mediaService = require('../services/media.service');
 const { logger } = require('../utils/logger');
-const cloudinary = require('../config/cloudinary');
-const streamifier = require('streamifier');
-
-// Will configure cloudinary when uploading using process.env
+const { uploadToVPS } = require('../utils/vpsUpload');
 
 async function uploadFile(req, res, next) {
   try {
@@ -17,30 +14,11 @@ async function uploadFile(req, res, next) {
     const mimeType = req.file.mimetype;
     const originalName = req.file.originalname;
 
-    const resourceType = ['video', 'audio'].includes(fileType) ? 'video' : 'auto';
-    const uploadOptions = { folder: 'whatsapp-bot', resource_type: resourceType };
-
-    // Force conversion to mp4 for audio/video to ensure WhatsApp compatibility
-    if (fileType === 'audio' || fileType === 'video') {
-      uploadOptions.format = 'mp4';
-    }
-
-    // Explicitly configure just in case it was lost
-    cloudinary.config({
-      cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-      api_key: process.env.CLOUDINARY_API_KEY,
-      api_secret: process.env.CLOUDINARY_API_SECRET
-    });
-
-    const uploadedUrl = await new Promise((resolve, reject) => {
-      const uploadStream = cloudinary.uploader.upload_stream(
-        uploadOptions,
-        (error, result) => {
-          if (error) return reject(new Error(error.message));
-          resolve(result.secure_url);
-        }
-      );
-      streamifier.createReadStream(buffer).pipe(uploadStream);
+    // Upload to VPS instead of Cloudinary
+    const uploadedUrl = await uploadToVPS(buffer, {
+      folder: 'uploads',
+      fileName: originalName,
+      mimeType: mimeType,
     });
 
     // Save media metadata to database

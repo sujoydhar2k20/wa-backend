@@ -1,8 +1,7 @@
 const Tesseract = require('tesseract.js');
 const sharp = require('sharp');
 const axios = require('axios');
-const cloudinary = require('../config/cloudinary');
-const streamifier = require('streamifier');
+const { uploadToVPS } = require('../utils/vpsUpload');
 const { logger } = require('../utils/logger');
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
@@ -35,41 +34,19 @@ async function compressImageForAI(buffer) {
 }
 
 /**
- * Upload a compressed image buffer to Cloudinary temporarily.
- * Returns the secure URL.
+ * Upload a compressed image buffer to the VPS temporarily.
+ * Returns the public URL.
  */
-async function uploadCompressedToCloudinary(compressedBuffer) {
-    cloudinary.config({
-        cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-        api_key: process.env.CLOUDINARY_API_KEY,
-        api_secret: process.env.CLOUDINARY_API_SECRET,
-    });
-
-    return new Promise((resolve, reject) => {
-        const uploadStream = cloudinary.uploader.upload_stream(
-            {
-                folder: 'whatsapp-bot/ocr-temp',
-                resource_type: 'image',
-                // Tell Cloudinary to compress and resize the image for us
-                transformation: [
-                    { width: 800, crop: 'limit' },
-                    { quality: 'auto', fetch_format: 'jpg' }
-                ],
-                // Auto-delete after 1 hour to save storage
-                invalidate: true,
-            },
-            (error, result) => {
-                if (error) return reject(new Error(error.message));
-                resolve(result.secure_url);
-            }
-        );
-        streamifier.createReadStream(compressedBuffer).pipe(uploadStream);
+async function uploadCompressedToVPS(compressedBuffer) {
+    return uploadToVPS(compressedBuffer, {
+        folder: 'ocr-temp',
+        mimeType: 'image/jpeg',
     });
 }
 
 /**
  * Use OpenAI GPT-5 Nano (vision) to extract text/product codes from an image.
- * Sends the Cloudinary URL so the AI fetches a compressed image = fewer tokens.
+ * Sends the VPS URL so the AI fetches a compressed image = fewer tokens.
  */
 async function extractTextWithOpenAI(imageUrl) {
     if (!OPENAI_API_KEY) {
@@ -134,13 +111,13 @@ async function extractTextWithOpenAI(imageUrl) {
  * Main OCR function:
  * 1. Try Tesseract (fast, free, local)
  * 2. If Tesseract fails (no text or low confidence), fall back to OpenAI GPT-5 Nano
- *    - Compress image → upload to Cloudinary → send URL to OpenAI
+ *    - Compress image → upload to VPS → send URL to OpenAI
  */
 async function extractTextFromImageBuffer(buffer) {
     try {
-        // Pass the raw image buffer to Cloudinary, which will handle the compression via upload parameters
-        const imageUrl = await uploadCompressedToCloudinary(buffer);
-        logger.info(`Cloudinary-compressed image uploaded: ${imageUrl}`);
+        // Pass the raw image buffer to VPS for OCR processing
+        const imageUrl = await uploadCompressedToVPS(buffer);
+        logger.info(`VPS-uploaded image for OCR: ${imageUrl}`);
         
         logger.info('Sending image URL directly to OpenAI...');
         

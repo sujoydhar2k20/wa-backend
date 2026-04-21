@@ -5,8 +5,7 @@ const whatsappService = require('./whatsapp.service');
 const botService = require('./bot.service');
 const mediaService = require('./media.service');
 const ocrService = require('./ocr.service');
-const cloudinary = require('../config/cloudinary');
-const streamifier = require('streamifier');
+const { uploadToVPS } = require('../utils/vpsUpload');
 
 const GST = 0.03;
 
@@ -730,42 +729,20 @@ async function processMediaAsync(chat, messageData, type) {
         let uploadedUrl = null;
         let metadata = {};
 
-        // Save to Cloudinary
-        const resourceType = ['video', 'audio'].includes(type) ? 'video' : 'auto';
-        const uploadOptions = {
-            folder: 'whatsapp-bot/inbound',
-            resource_type: resourceType,
-            public_id: mediaId
-        };
-
-        // Force mp4 for audio compatibility
-        if (type === 'audio') {
-            uploadOptions.format = 'mp4';
-        }
-
-        cloudinary.config({
-            cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-            api_key: process.env.CLOUDINARY_API_KEY,
-            api_secret: process.env.CLOUDINARY_API_SECRET
-        });
-
+        // Upload to VPS
         try {
-            uploadedUrl = await new Promise((resolve, reject) => {
-                const uploadStream = cloudinary.uploader.upload_stream(
-                    uploadOptions,
-                    (error, result) => {
-                        if (error) return reject(new Error(error.message));
-                        resolve(result.secure_url);
-                    }
-                );
-                streamifier.createReadStream(buffer).pipe(uploadStream);
+            uploadedUrl = await uploadToVPS(buffer, {
+                folder: 'inbound',
+                publicId: mediaId,
+                mimeType: mimeType,
+                fileName: messageData.fileName,
             });
         } catch (uploadError) {
-            logger.error(`Cloudinary upload failed for ${mediaId}`, uploadError);
+            logger.error(`VPS upload failed for ${mediaId}`, uploadError);
         }
 
         if (!uploadedUrl) {
-            logger.error(`Failed to get Cloudinary URL for media ${mediaId}, dropping media`);
+            logger.error(`Failed to upload media ${mediaId} to VPS, dropping media`);
             return null;
         }
 
@@ -774,7 +751,7 @@ async function processMediaAsync(chat, messageData, type) {
 
         const mediaType = ['image', 'video', 'audio'].includes(type) ? type : 'document';
 
-        // Save media metadata using the Cloudinary URL
+        // Save media metadata using the VPS URL
         const mediaDoc = await mediaService.saveMediaMetadata({
             mediaId: mediaId,
             url: uploadedUrl,
@@ -800,11 +777,10 @@ async function processMediaAsync(chat, messageData, type) {
             }
         }
 
-        const finalUrl = uploadedUrl;
         logger.info(`Successfully processed and uploaded inbound media ${type} for message ${messageData.messageId}`);
 
         return {
-            mediaUrl: finalUrl,
+            mediaUrl: uploadedUrl,
             metadata,
         };
 
