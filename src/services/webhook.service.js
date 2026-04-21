@@ -6,6 +6,7 @@ const botService = require('./bot.service');
 const mediaService = require('./media.service');
 const ocrService = require('./ocr.service');
 const { uploadToVPS } = require('../utils/vpsUpload');
+const aiFallbackService = require('./aiFallback.service');
 
 const GST = 0.03;
 
@@ -308,10 +309,30 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
         logger.error(`Error triggering push notification: ${pushErr.message}`);
     }
 
-    // Product code auto-reply (fire-and-forget)
+    // Product code auto-reply + AI fallback
     if (msg.type === 'text' && msg.text?.body) {
-        handleProductCodeReply(waba, phoneNumberId, chat, message, msg.text.body, 'text')
-            .catch(e => logger.error('Product code auto-reply error:', e.message));
+        const textBody = msg.text.body;
+        const codeCandidates = extractProductCodeCandidates(textBody);
+        const directCode = detectProductCode(textBody);
+
+        if (directCode || codeCandidates.length > 0) {
+            // Looks like a product code → try product lookup
+            handleProductCodeReply(waba, phoneNumberId, chat, message, textBody, 'text')
+                .then(async () => {
+                    // After product code attempt, if no product was found and it's a sentence,
+                    // try AI fallback
+                    const { product } = await findProductByCandidates(codeCandidates);
+                    if (!product && textBody.includes(' ')) {
+                        aiFallbackService.handleAiFallback(waba, phoneNumberId, chat, message, textBody, whatsappService)
+                            .catch(e => logger.error('AI Fallback error:', e.message));
+                    }
+                })
+                .catch(e => logger.error('Product code auto-reply error:', e.message));
+        } else {
+            // Not a product code → try AI fallback directly
+            aiFallbackService.handleAiFallback(waba, phoneNumberId, chat, message, textBody, whatsappService)
+                .catch(e => logger.error('AI Fallback error:', e.message));
+        }
     } else if (msg.type === 'image') {
         const ocrText = message?.metadata?.ocr?.text || '';
         if (ocrText) {
