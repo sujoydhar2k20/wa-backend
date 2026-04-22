@@ -96,6 +96,23 @@ async function send(req, res, next) {
                     let mimeType = response.headers['content-type'] || 'image/jpeg';
                     mimeType = mimeType.split(';')[0].trim();
 
+                    // Detect ACTUAL format from file magic bytes — CDN content-type headers
+                    // are often wrong (e.g. WebP served as image/jpeg with .jpg extension).
+                    if (type === 'image') {
+                        const isWebP = buffer.length > 12
+                            && buffer.slice(0, 4).toString('ascii') === 'RIFF'
+                            && buffer.slice(8, 12).toString('ascii') === 'WEBP';
+                        const isJpeg = buffer.length > 2 && buffer[0] === 0xFF && buffer[1] === 0xD8;
+                        const isPng = buffer.length > 4 && buffer[0] === 0x89
+                            && buffer.slice(1, 4).toString('ascii') === 'PNG';
+
+                        if (isWebP) mimeType = 'image/webp';
+                        else if (isJpeg) mimeType = 'image/jpeg';
+                        else if (isPng) mimeType = 'image/png';
+
+                        logger.info(`Image format detection: header=${response.headers['content-type']}, actual=${mimeType}, url=${mediaUrl.substring(0, 80)}`);
+                    }
+
                     // WhatsApp explicitly requires 'audio/mp4' for voice notes
                     if (type === 'audio' && mimeType === 'video/mp4') {
                         mimeType = 'audio/mp4';
@@ -107,6 +124,7 @@ async function send(req, res, next) {
                         const sharp = require('sharp');
                         buffer = await sharp(buffer).jpeg({ quality: 90 }).toBuffer();
                         mimeType = 'image/jpeg';
+                        logger.info(`Converted image to JPEG (${buffer.length} bytes)`);
                     }
 
                     // Retry upload to Meta with exponential backoff (handles 429 rate limits)
