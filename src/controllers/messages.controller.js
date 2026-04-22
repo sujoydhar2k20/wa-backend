@@ -294,4 +294,92 @@ async function deleteMsg(req, res, next) {
     }
 }
 
-module.exports = { send, search, react, markRead, addNote, deleteMsg };
+/**
+ * Retry a failed message: re-sends via WhatsApp and updates the EXISTING
+ * message document instead of creating a new one. No duplicates.
+ */
+async function retry(req, res, next) {
+    try {
+        const message = await Message.findById(req.params.id).populate('chatId');
+        if (!message) return res.status(404).json({ success: false, message: 'Message not found' });
+
+        const chat = await Chat.findById(message.chatId).populate('contactId');
+        if (!chat) return res.status(404).json({ success: false, message: 'Chat not found' });
+
+        const type = message.type;
+        const mediaUrl = message.mediaUrl;
+        const text = message.text;
+        const caption = message.caption;
+
+        let waResult;
+        if (type === 'text') {
+            waResult = await whatsappService.sendTextMessage(chat.wabaId, chat.phoneNumberId, chat.waId, text);
+        } else if (['image', 'video', 'audio', 'document'].includes(type)) {
+            let mediaIdToSend = mediaUrl;
+
+            if (mediaUrl && mediaUrl.startsWith('http')) {
+                try {
+                    const axios = require('axios');
+                    const response = await axios.get(mediaUrl, {
+                        responseType: 'arraybuffer',
+                        timeout: 30000,
+                        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; WhatsApp-Bot/1.0)' }
+                    });
+                    let buffer = Buffer.from(response.data, 'binary');
+                    let mimeType = response.headers['content-type'] || 'image/jpeg';
+                    mimeType = mimeType.split(';')[0].trim();
+
+                    if (type === 'audio' && mimeType === 'video/mp4') {
+                        mimeType = 'audio/mp4';
+                    }
+
+                    // Always convert images to JPEG for WhatsApp compatibility
+                    if (type === 'image') {
+                        const sharp = require('sharp');
+                        buffer = await sharp(buffer).jpeg({ quality: 90 }).toBuffer();
+                        mimeType = 'image/jpeg';
+                    }
+
+                    mediaIdToSend = await retryWithBackoff(
+                        () => whatsappService.uploadMedia(chat.wabaId, chat.phoneNumberId, buffer, mimeType)
+                    );
+                } catch (err) {
+                    logger.error(`Retry: Error processing/uploading media: ${err.message}`);
+                    return res.status(500).json({ success: false, message: `Failed to upload media: ${err.message}` });
+                }
+            }
+
+            waResult = await retryWithBackoff(
+                () => whatsappService.sendMediaMessage(chat.wabaId, chat.phoneNumberId, chat.waId, type, mediaIdToSend, caption || '')
+            );
+        } else {
+            return res.status(400).json({ success: false, message: `Cannot retry message type: ${type}` });
+        }
+
+        // Update the EXISTING message (no duplicate created)
+        const newMsgId = waResult?.messages?.[0]?.id;
+        message.messageId = newMsgId;
+        message.status = 'sent';
+        message.errorCode = undefined;
+        message.errorMessage = undefined;
+        await message.save();
+
+        await message.populate('sentBy', 'name phone');
+
+        // Emit status update (NOT message:new) so frontend updates in-place
+        const { getIO } = require('../websocket/socket.server');
+        getIO().emit('message:status', {
+            chatId: chat._id.toString(),
+            messageId: message._id.toString(),
+            waMessageId: newMsgId,
+            status: 'sent'
+        });
+
+        res.json(message);
+    } catch (e) {
+        logger.error(`Retry failed: ${e.message}`);
+        next(e);
+    }
+}
+
+module.exports = { send, search, react, markRead, addNote, deleteMsg, retry };
