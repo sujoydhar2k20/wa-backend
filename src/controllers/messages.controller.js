@@ -1,5 +1,35 @@
 const { Message, Chat } = require('../models');
 const whatsappService = require('../services/whatsapp.service');
+const { logger } = require('../utils/logger');
+
+/**
+ * Retry a function with exponential backoff.
+ * Handles transient Meta API errors (429 rate limits, 500 server errors, network timeouts).
+ * @param {Function} fn - async function to retry
+ * @param {number} maxRetries - maximum number of retry attempts (default 3)
+ * @param {number} baseDelayMs - base delay in ms (default 1500, doubles each retry)
+ * @returns {Promise<any>} - result of the function
+ */
+async function retryWithBackoff(fn, maxRetries = 3, baseDelayMs = 1500) {
+    let lastError;
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+            return await fn();
+        } catch (err) {
+            lastError = err;
+            const status = err.response?.status;
+            // Only retry on rate limits (429), server errors (5xx), or network/timeout errors
+            const isRetryable = status === 429 || (status >= 500 && status < 600) || !status;
+            if (!isRetryable || attempt === maxRetries) {
+                throw err;
+            }
+            const delay = baseDelayMs * Math.pow(2, attempt - 1);
+            logger.warn(`Meta API call failed (attempt ${attempt}/${maxRetries}, status: ${status || 'network error'}), retrying in ${delay}ms...`);
+            await new Promise(resolve => setTimeout(resolve, delay));
+        }
+    }
+    throw lastError;
+}
 
 async function send(req, res, next) {
     try {
@@ -79,9 +109,11 @@ async function send(req, res, next) {
                         mimeType = 'image/jpeg';
                     }
 
-                    mediaIdToSend = await whatsappService.uploadMedia(chat.wabaId, chat.phoneNumberId, buffer, mimeType);
+                    // Retry upload to Meta with exponential backoff (handles 429 rate limits)
+                    mediaIdToSend = await retryWithBackoff(
+                        () => whatsappService.uploadMedia(chat.wabaId, chat.phoneNumberId, buffer, mimeType)
+                    );
                 } catch (err) {
-                    const { logger } = require('../utils/logger');
                     logger.error(`Error processing/uploading media to Meta: ${err.message}`);
                     return res.status(500).json({
                         success: false,
@@ -90,8 +122,10 @@ async function send(req, res, next) {
                 }
             }
 
-
-            waResult = await whatsappService.sendMediaMessage(chat.wabaId, chat.phoneNumberId, chat.waId, type, mediaIdToSend, caption || '', metaMessageIdToReply);
+            // Retry send with exponential backoff (handles 429 rate limits when sending multiple images)
+            waResult = await retryWithBackoff(
+                () => whatsappService.sendMediaMessage(chat.wabaId, chat.phoneNumberId, chat.waId, type, mediaIdToSend, caption || '', metaMessageIdToReply)
+            );
         } else {
             return res.status(400).json({ success: false, message: `Unsupported message type: ${type}` });
         }
