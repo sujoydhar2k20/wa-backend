@@ -385,6 +385,19 @@ async function handleStatusUpdate(statusObj) {
 
         logger.info(`Received status update for Meta ID: ${messageId} -> ${status}`);
 
+        // Extract error details when Meta reports failure
+        let errorCode = null;
+        let errorMessage = null;
+        if (status === 'failed' && statusObj.errors && statusObj.errors.length > 0) {
+            const metaError = statusObj.errors[0];
+            errorCode = metaError.code;
+            errorMessage = metaError.title || metaError.message || 'Unknown error';
+            if (metaError.error_data?.details) {
+                errorMessage += ` - ${metaError.error_data.details}`;
+            }
+            logger.error(`Meta delivery failure for ${messageId}: code=${errorCode}, message=${errorMessage}`, statusObj.errors);
+        }
+
         // Retry up to 3 times with a 500 ms delay to handle the race where WhatsApp
         // delivers a status webhook before our own DB write for the outbound message
         // has completed (common for 'sent' status on fast networks).
@@ -392,15 +405,21 @@ async function handleStatusUpdate(statusObj) {
         const MAX_RETRIES = 3;
         const RETRY_DELAY_MS = 500;
 
+        // Build update payload
+        const updatePayload = {
+            status: status,
+            statusTimestamp: timestamp,
+        };
+        // Only overwrite error fields when status is 'failed'
+        if (status === 'failed') {
+            updatePayload.errorCode = errorCode;
+            updatePayload.errorMessage = errorMessage;
+        }
+
         for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
             message = await Message.findOneAndUpdate(
                 { messageId },
-                {
-                    $set: {
-                        status: status,
-                        statusTimestamp: timestamp
-                    }
-                },
+                { $set: updatePayload },
                 { new: true }
             );
 
@@ -421,7 +440,8 @@ async function handleStatusUpdate(statusObj) {
                     chatId: message.chatId.toString(),
                     messageId: message._id.toString(), // Mongo ID used by frontend
                     waMessageId: messageId,             // Meta ID
-                    status: status
+                    status: status,
+                    ...(status === 'failed' && { errorCode, errorMessage }),
                 });
             } catch (emitError) {
                 logger.warn('Socket emit failed for message status:', emitError.message);
