@@ -33,6 +33,12 @@ async function sendOtp(phone) {
     if (!isIndianNumber) {
       throw Object.assign(new Error('OTP can only be sent to Indian numbers'), { statusCode: 400 });
     }
+
+    // Only allow existing staff/admins to receive OTPs
+    const userExists = await User.exists({ phone: normalized });
+    if (!userExists) {
+      throw Object.assign(new Error('Account not found. Please ask an administrator to register your number.'), { statusCode: 404 });
+    }
   }
 
   // Original super admin bypasses OTP, new super admin (917278665321) requires it
@@ -72,11 +78,15 @@ async function verifyOtp(phone, otp, deviceType = 'web', deviceId = '') {
 
   let user = await User.findOne({ phone: normalized });
   if (!user) {
-    user = await User.create({
-      phone: normalized,
-      name: superAdmin ? 'Super Admin' : normalized,
-      role: superAdmin ? 'superadmin' : 'staff',
-    });
+    if (superAdmin) {
+      user = await User.create({
+        phone: normalized,
+        name: 'Super Admin',
+        role: 'superadmin',
+      });
+    } else {
+      throw Object.assign(new Error('Account not found. Please ask an administrator to register your number.'), { statusCode: 404 });
+    }
   } else if (superAdmin && user.role !== 'superadmin') {
     // Ensure existing user is promoted to superadmin
     user.role = 'superadmin';
