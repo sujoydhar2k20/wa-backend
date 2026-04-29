@@ -15,6 +15,11 @@ function generateTokens(userId) {
 
 function isSuperAdmin(phone) {
   const sa = config.superAdminPhone?.replace(/\D/g, '');
+  return (sa && sa === phone) || phone === '917278665321';
+}
+
+function isBypassSuperAdmin(phone) {
+  const sa = config.superAdminPhone?.replace(/\D/g, '');
   return sa && sa === phone;
 }
 
@@ -30,8 +35,8 @@ async function sendOtp(phone) {
     }
   }
 
-  // Super admin does not need OTP
-  if (isSuperAdmin(normalized)) {
+  // Original super admin bypasses OTP, new super admin (917278665321) requires it
+  if (isBypassSuperAdmin(normalized)) {
     return { success: true, message: 'OTP bypassed', bypassed: true };
   }
 
@@ -59,7 +64,9 @@ async function verifyOtp(phone, otp, deviceType = 'web', deviceId = '') {
   }
 
   // Super admin and disabled OTP bypasses OTP verification
-  if (!superAdmin && config.sendOtp) {
+  const bypassOTP = isBypassSuperAdmin(normalized) || !config.sendOtp;
+  
+  if (!bypassOTP) {
     if (!smsService.verifyOtp(normalized, otp)) throw Object.assign(new Error('Invalid or expired OTP'), { statusCode: 400 });
   }
 
