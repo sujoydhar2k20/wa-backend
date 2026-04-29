@@ -89,6 +89,7 @@ async function callOpenAI(systemPrompt, userMessage) {
         );
 
         const text = response.data?.choices?.[0]?.message?.content?.trim();
+        const usage = response.data?.usage;
         logger.info(`AI Fallback: OpenAI raw response: ${text}`);
 
         if (!text) return null;
@@ -97,7 +98,7 @@ async function callOpenAI(systemPrompt, userMessage) {
         const cleaned = text.replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim();
 
         const parsed = JSON.parse(cleaned);
-        return parsed;
+        return { parsed, usage };
     } catch (error) {
         logger.error(`AI Fallback: OpenAI call failed: ${error.response?.data?.error?.message || error.message}`);
         return null;
@@ -226,6 +227,7 @@ function buildReplyMessage(links, aiResponse, language) {
  * Called from webhook.service.js when a text message doesn't match a product code.
  */
 async function handleAiFallback(waba, phoneNumberId, chat, message, text, whatsappService) {
+    const { Message, Chat } = require('../models');
     try {
         // 1. Load AI Settings
         const settings = await AiSetting.findOne().lean();
@@ -242,36 +244,85 @@ async function handleAiFallback(waba, phoneNumberId, chat, message, text, whatsa
             }
         }
 
-        // 3. Allowlist / Blocklist filter
+        // 3. Pre-filter (Length)
+        if (text.length < 3) {
+             logger.info(`AI Fallback: Message too short (${text.length} chars), skipping.`);
+             await Message.create({
+                 chatId: chat._id,
+                 wabaId: waba._id,
+                 direction: 'internal',
+                 type: 'system',
+                 text: `AI Skipped: Message too short`,
+                 sentByBot: true,
+                 metadata: {
+                     aiSkipped: true,
+                     aiSkipReason: 'Pre-filtered: Too short (1-2 characters)',
+                     originalText: text
+                 }
+             });
+             return false;
+        }
+
+        // 4. Allowlist / Blocklist filter
         if (!passesFilters(text, settings.allowlist, settings.blocklist)) {
+            await Message.create({
+                chatId: chat._id,
+                wabaId: waba._id,
+                direction: 'internal',
+                type: 'system',
+                text: `AI Skipped: Filtered by keywords`,
+                sentByBot: true,
+                metadata: {
+                    aiSkipped: true,
+                    aiSkipReason: 'Pre-filtered: Keyword restriction',
+                    originalText: text
+                }
+            });
             return false;
         }
 
-        // 4. Load categories
+        // 5. Load categories
         const categories = await AiCategory.find().lean();
         if (!categories.length) {
             logger.warn('AI Fallback: No categories configured, skipping.');
             return false;
         }
 
-        // 5. Build prompt and call OpenAI
+        // 6. Build prompt and call OpenAI
         const systemPrompt = buildSystemPrompt(settings.systemPrompt, categories);
-        const aiResponse = await callOpenAI(systemPrompt, text);
+        const openaiResult = await callOpenAI(systemPrompt, text);
 
-        if (!aiResponse) {
+        if (!openaiResult || !openaiResult.parsed) {
             logger.warn('AI Fallback: No valid response from OpenAI');
             return false;
         }
 
-        // 6. Match to category links
+        const { parsed: aiResponse, usage } = openaiResult;
+
+        // 7. Match to category links
         const links = buildCategoryLinks(aiResponse, categories);
 
         if (!links.length) {
             logger.info('AI Fallback: No category match found in AI response');
+            // Log as success call but no match
+            await Message.create({
+                chatId: chat._id,
+                wabaId: waba._id,
+                direction: 'internal',
+                type: 'system',
+                text: `AI: No product category match`,
+                sentByBot: true,
+                metadata: {
+                    aiSkipped: true,
+                    aiSkipReason: 'No Product Match',
+                    usage,
+                    aiResponse
+                }
+            });
             return false;
         }
 
-        // 7. Build and send reply
+        // 8. Build and send reply
         const replyText = buildReplyMessage(links, aiResponse);
         
         logger.info(`AI Fallback: Sending reply with ${links.length} link(s) to ${chat.waId}`);
@@ -284,8 +335,7 @@ async function handleAiFallback(waba, phoneNumberId, chat, message, text, whatsa
             message.messageId // reply to the original message
         );
 
-        // 8. Save outbound message to DB
-        const { Message, Chat } = require('../models');
+        // 9. Save outbound message to DB
         const msgId = waResult?.messages?.[0]?.id;
         const outboundMsg = await Message.create({
             chatId: chat._id,
@@ -303,6 +353,7 @@ async function handleAiFallback(waba, phoneNumberId, chat, message, text, whatsa
                 aiResponse,
                 matchedLinks: links,
                 source: 'ai_fallback',
+                usage,
             },
             replyToMessageId: message._id,
         });
