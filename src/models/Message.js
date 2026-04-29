@@ -33,7 +33,7 @@ const messageSchema = new mongoose.Schema(
       emoji: String,
       by: String // waId or Staff ID representing who reacted
     }],
-    status: { type: String, enum: ['sent', 'delivered', 'read', 'failed'] },
+    status: { type: String, enum: ['queued', 'sent', 'delivered', 'read', 'failed'] },
     statusTimestamp: { type: Date },
     errorCode: { type: Number },
     errorMessage: { type: String },

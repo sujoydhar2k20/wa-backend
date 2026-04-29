@@ -15,6 +15,7 @@ async function initAgenda() {
   require('./chat.jobs')(agenda);
   require('./product.jobs')(agenda);
   require('./template.jobs')(agenda);
+  require('./bulkSend.jobs')(agenda);
   return agenda;
 }
 

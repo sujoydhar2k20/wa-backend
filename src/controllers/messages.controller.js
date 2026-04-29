@@ -382,4 +382,77 @@ async function retry(req, res, next) {
     }
 }
 
-module.exports = { send, search, react, markRead, addNote, deleteMsg, retry };
+/**
+ * Bulk-send multiple media messages (primarily product images).
+ * Creates all Message documents instantly and returns them to the frontend,
+ * then schedules a background job to process the actual WhatsApp API sends
+ * sequentially with rate-limit-safe delays.
+ */
+async function sendBulk(req, res, next) {
+    try {
+        const { chatId, items } = req.body;
+        // items: Array of { type, mediaUrl, caption }
+        if (!chatId) return res.status(400).json({ success: false, message: 'chatId is required' });
+        if (!Array.isArray(items) || items.length === 0) {
+            return res.status(400).json({ success: false, message: 'items array is required and must not be empty' });
+        }
+        if (items.length > 30) {
+            return res.status(400).json({ success: false, message: 'Maximum 30 items per bulk send' });
+        }
+
+        const chat = await Chat.findById(chatId).populate('contactId');
+        if (!chat) return res.status(404).json({ success: false, message: 'Chat not found' });
+
+        // Enforce 24-hour session window
+        const now = new Date();
+        if (chat.sessionExpiresAt && chat.sessionExpiresAt < now) {
+            return res.status(403).json({
+                success: false,
+                message: 'WhatsApp 24-hour session window has expired. You must use a Template Message.',
+            });
+        }
+
+        // Create all message documents instantly with status 'queued'
+        const messages = [];
+        for (const item of items) {
+            const msg = await Message.create({
+                chatId,
+                wabaId: chat.wabaId,
+                phoneNumberId: chat.phoneNumberId,
+                waId: chat.waId,
+                direction: 'outbound',
+                type: item.type || 'image',
+                mediaUrl: item.mediaUrl,
+                caption: item.caption || undefined,
+                status: 'queued',
+                sentBy: req.user._id,
+            });
+            await msg.populate('sentBy', 'name phone');
+            messages.push(msg);
+        }
+
+        // Update chat last message timestamp
+        await Chat.findByIdAndUpdate(chatId, { lastMessageAt: new Date(), lastStaffMessageAt: new Date() });
+
+        // Emit all messages via socket so ALL connected clients see them instantly
+        const { getIO } = require('../websocket/socket.server');
+        for (const msg of messages) {
+            getIO().emit('message:new', { chatId: chat._id, message: msg });
+        }
+
+        // Schedule background job to process the actual WhatsApp sends
+        const { getAgenda } = require('../jobs/agenda');
+        const agenda = getAgenda();
+        await agenda.now('send-bulk-messages', {
+            chatId: chatId.toString(),
+            messageIds: messages.map(m => m._id.toString()),
+        });
+
+        // Return all messages immediately — frontend shows them as "queued/sending"
+        res.status(201).json({ success: true, messages });
+    } catch (e) {
+        next(e);
+    }
+}
+
+module.exports = { send, sendBulk, search, react, markRead, addNote, deleteMsg, retry };

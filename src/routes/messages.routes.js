@@ -5,6 +5,7 @@ const { authenticate } = require('../middleware/auth.middleware');
 
 router.use(authenticate);
 router.post('/send', messagesController.send);
+router.post('/send-bulk', messagesController.sendBulk);
 router.get('/search', messagesController.search);
 router.post('/:id/react', messagesController.react);
 router.post('/:id/read', messagesController.markRead);
