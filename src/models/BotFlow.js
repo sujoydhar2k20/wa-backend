@@ -80,6 +80,7 @@ const botFlowSchema = new mongoose.Schema(
     nodes: [nodeSchema],
     edges: [edgeSchema],
     workingHours: { type: workingHoursSchema, default: () => ({}) },
+    cooldownMinutes: { type: Number, default: 0 }, // 0 = no cooldown
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   },
   { timestamps: true }

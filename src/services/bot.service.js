@@ -22,6 +22,21 @@ async function processIncomingMessage({ waba, phoneNumberId, chat, message, text
         for (const flow of flows) {
             const matched = evaluateTrigger(flow.trigger, { chat, message, text });
             if (matched) {
+                // Cooldown check: skip if this flow ran for this chat within the cooldown window
+                if (flow.cooldownMinutes && flow.cooldownMinutes > 0) {
+                    const cooldownSince = new Date(Date.now() - flow.cooldownMinutes * 60 * 1000);
+                    const recentExecution = await BotExecution.findOne({
+                        flowId: flow._id,
+                        chatId: chat._id,
+                        status: { $in: ['completed', 'running'] },
+                        startedAt: { $gte: cooldownSince },
+                    }).lean();
+                    if (recentExecution) {
+                        logger.info(`Bot flow "${flow.name}" skipped for chat ${chat._id} — cooldown active (${flow.cooldownMinutes}min)`);
+                        continue; // Try next flow instead of breaking
+                    }
+                }
+
                 logger.info(`Bot flow "${flow.name}" (${flow._id}) triggered for chat ${chat._id}`);
                 // Execute flow asynchronously (fire-and-forget, but log errors)
                 executeFlow(flow, { waba, phoneNumberId, chat, message, text })
@@ -253,11 +268,24 @@ async function executeNode(node, context) {
 
     switch (node.type) {
         case 'send_message': {
-            if (!config.text) return { skipped: true, reason: 'No message text configured' };
+            if (!config.text && !config.imageUrl) return { skipped: true, reason: 'No message text or image configured' };
+
+            // If an image URL is provided, send as media message
+            if (config.imageUrl) {
+                const waResult = await whatsappService.sendMediaMessage(
+                    waba._id, phoneNumberId, chat.waId, 'image', config.imageUrl, config.text || ''
+                );
+                const msgId = waResult?.messages?.[0]?.id;
+                await saveOutboundMessage(chat, waba, phoneNumberId, msgId, 'image', config.text || '', {
+                    mediaUrl: config.imageUrl,
+                });
+                return { sent: true, messageId: msgId, type: 'image' };
+            }
+
+            // Plain text message
             const waResult = await whatsappService.sendTextMessage(
                 waba._id, phoneNumberId, chat.waId, config.text
             );
-            // Save as outbound message
             const msgId = waResult?.messages?.[0]?.id;
             await saveOutboundMessage(chat, waba, phoneNumberId, msgId, 'text', config.text);
             return { sent: true, messageId: msgId };
@@ -483,6 +511,7 @@ function evaluateCondition(fieldValue, operator, value) {
  */
 async function saveOutboundMessage(chat, waba, phoneNumberId, msgId, type, text, metadata = null) {
     try {
+        const resolvedType = type === 'template' ? 'template' : type === 'interactive' ? 'interactive' : type === 'image' ? 'image' : 'text';
         const outboundMsg = await Message.create({
             chatId: chat._id,
             wabaId: waba._id,
@@ -490,8 +519,10 @@ async function saveOutboundMessage(chat, waba, phoneNumberId, msgId, type, text,
             messageId: msgId,
             waId: chat.waId,
             direction: 'outbound',
-            type: type === 'template' ? 'template' : type === 'interactive' ? 'interactive' : 'text',
-            text: text,
+            type: resolvedType,
+            text: resolvedType === 'image' ? undefined : text,
+            caption: resolvedType === 'image' ? text : undefined,
+            mediaUrl: metadata?.mediaUrl || undefined,
             status: 'sent',
             sentByBot: true,
             ...(metadata && { metadata }),
