@@ -137,4 +137,27 @@ async function importContacts(req, res, next) {
     }
 }
 
-module.exports = { list, get, update, optOut, optIn, block, import: importContacts };
+async function remove(req, res, next) {
+    try {
+        const contact = await Contact.findByIdAndDelete(req.params.id);
+        if (!contact) return res.status(404).json({ success: false, message: 'Contact not found' });
+        res.json({ success: true });
+    } catch (e) {
+        next(e);
+    }
+}
+
+async function bulkDelete(req, res, next) {
+    try {
+        const { ids } = req.body;
+        if (!Array.isArray(ids) || ids.length === 0) {
+            return res.status(400).json({ success: false, message: 'Invalid or empty IDs list' });
+        }
+        await Contact.deleteMany({ _id: { $in: ids } });
+        res.json({ success: true });
+    } catch (e) {
+        next(e);
+    }
+}
+
+module.exports = { list, get, update, optOut, optIn, block, import: importContacts, remove, bulkDelete };
