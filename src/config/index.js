@@ -10,7 +10,7 @@ module.exports = {
     refreshExpiry: process.env.JWT_REFRESH_EXPIRY || '365d',
   },
   upload: {
-    maxFileSize: parseInt(process.env.MAX_FILE_SIZE, 10) || 10485760,
+    maxFileSize: parseInt(process.env.MAX_FILE_SIZE, 10) || 52428800, // Default 50MB
     dir: process.env.UPLOAD_DIR || './uploads',
   },
   meta: {

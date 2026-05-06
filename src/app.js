@@ -16,8 +16,8 @@ app.use(helmet());
 app.use(cors({ origin: process.env.CORS_ORIGIN || '*', credentials: true }));
 // Serve uploaded media from VPS
 app.use('/uploads', express.static(path.join(process.cwd(), config.upload.dir || 'uploads')));
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
