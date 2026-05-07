@@ -24,23 +24,23 @@ async function processIncomingMessage({ waba, phoneNumberId, chat, message, text
             if (triggerResult.matched) {
                 const matchedKeyword = triggerResult.matchedKeyword || '';
 
-                // Cooldown check: skip if this flow ran for this chat (and keyword) within the cooldown window
-                if (flow.cooldownMinutes && flow.cooldownMinutes > 0) {
-                    const cooldownSince = new Date(Date.now() - flow.cooldownMinutes * 60 * 1000);
-                    const cooldownQuery = {
+                // Cooldown check: skip if this flow ran for this chat within the cooldown window
+                // For keyword-based triggers (on_message with keywords), we default to 1440 minutes (24 hours) if not specified.
+                const isKeywordTrigger = flow.trigger?.type === 'on_message' && flow.trigger?.keywords?.length > 0;
+                const cooldownMinutes = (flow.cooldownMinutes && flow.cooldownMinutes > 0) ? flow.cooldownMinutes : (isKeywordTrigger ? 1440 : 0);
+                
+                if (cooldownMinutes > 0) {
+                    const cooldownSince = new Date(Date.now() - cooldownMinutes * 60 * 1000);
+                    
+                    const recentExecution = await BotExecution.findOne({
                         flowId: flow._id,
                         chatId: chat._id,
                         status: { $in: ['completed', 'running'] },
                         startedAt: { $gte: cooldownSince },
-                    };
-                    // If a specific keyword was matched, check cooldown per-keyword.
-                    // This means "address" has its own cooldown, "location" has its own, etc.
-                    if (matchedKeyword) {
-                        cooldownQuery.matchedKeyword = matchedKeyword;
-                    }
-                    const recentExecution = await BotExecution.findOne(cooldownQuery).lean();
+                    }).lean();
+
                     if (recentExecution) {
-                        logger.info(`Bot flow "${flow.name}" skipped for chat ${chat._id} — cooldown active (${flow.cooldownMinutes}min) for keyword "${matchedKeyword || 'any'}"`);
+                        logger.info(`Bot flow "${flow.name}" skipped for chat ${chat._id} (ID: ${chat.waId}) — cooldown active (${cooldownMinutes}min).`);
                         continue; // Try next flow instead of breaking
                     }
                 }
