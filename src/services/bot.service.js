@@ -20,26 +20,34 @@ async function processIncomingMessage({ waba, phoneNumberId, chat, message, text
         if (!flows.length) return;
 
         for (const flow of flows) {
-            const matched = evaluateTrigger(flow.trigger, { chat, message, text });
-            if (matched) {
-                // Cooldown check: skip if this flow ran for this chat within the cooldown window
+            const triggerResult = evaluateTrigger(flow.trigger, { chat, message, text });
+            if (triggerResult.matched) {
+                const matchedKeyword = triggerResult.matchedKeyword || '';
+
+                // Cooldown check: skip if this flow ran for this chat (and keyword) within the cooldown window
                 if (flow.cooldownMinutes && flow.cooldownMinutes > 0) {
                     const cooldownSince = new Date(Date.now() - flow.cooldownMinutes * 60 * 1000);
-                    const recentExecution = await BotExecution.findOne({
+                    const cooldownQuery = {
                         flowId: flow._id,
                         chatId: chat._id,
                         status: { $in: ['completed', 'running'] },
                         startedAt: { $gte: cooldownSince },
-                    }).lean();
+                    };
+                    // If a specific keyword was matched, check cooldown per-keyword.
+                    // This means "address" has its own cooldown, "location" has its own, etc.
+                    if (matchedKeyword) {
+                        cooldownQuery.matchedKeyword = matchedKeyword;
+                    }
+                    const recentExecution = await BotExecution.findOne(cooldownQuery).lean();
                     if (recentExecution) {
-                        logger.info(`Bot flow "${flow.name}" skipped for chat ${chat._id} — cooldown active (${flow.cooldownMinutes}min)`);
+                        logger.info(`Bot flow "${flow.name}" skipped for chat ${chat._id} — cooldown active (${flow.cooldownMinutes}min) for keyword "${matchedKeyword || 'any'}"`);
                         continue; // Try next flow instead of breaking
                     }
                 }
 
-                logger.info(`Bot flow "${flow.name}" (${flow._id}) triggered for chat ${chat._id}`);
+                logger.info(`Bot flow "${flow.name}" (${flow._id}) triggered for chat ${chat._id} [keyword: "${matchedKeyword || 'none'}"]`);
                 // Execute flow asynchronously (fire-and-forget, but log errors)
-                executeFlow(flow, { waba, phoneNumberId, chat, message, text })
+                executeFlow(flow, { waba, phoneNumberId, chat, message, text, matchedKeyword })
                     .catch(err => logger.error(`Bot flow execution error for "${flow.name}":`, err.message));
                 // Only execute the first matching flow
                 break;
@@ -104,48 +112,57 @@ async function processAgentAssign({ waba, phoneNumberId, chat, agentId }) {
 
 /**
  * Check if a trigger matches the context.
+ * Returns { matched: boolean, matchedKeyword?: string }
  */
 function evaluateTrigger(trigger, { chat, message, text }) {
-    if (!trigger || !trigger.type) return false;
+    if (!trigger || !trigger.type) return { matched: false };
 
     switch (trigger.type) {
         case 'on_message': {
             // If no keywords defined, match ALL messages
-            if (!trigger.keywords || trigger.keywords.length === 0) return true;
-            if (!text) return false;
+            if (!trigger.keywords || trigger.keywords.length === 0) return { matched: true };
+            if (!text) return { matched: false };
             const lowerText = text.toLowerCase().trim();
-            return trigger.keywords.some(keyword => {
+            for (const keyword of trigger.keywords) {
                 const lowerKeyword = keyword.toLowerCase().trim();
-                if (!lowerKeyword) return false;
+                if (!lowerKeyword) continue;
+                let keywordMatched = false;
                 switch (trigger.matchType) {
                     case 'exact':
-                        return lowerText === lowerKeyword;
+                        keywordMatched = lowerText === lowerKeyword;
+                        break;
                     case 'regex':
-                        try { return new RegExp(keyword, 'i').test(text); }
-                        catch { return false; }
+                        try { keywordMatched = new RegExp(keyword, 'i').test(text); }
+                        catch { keywordMatched = false; }
+                        break;
                     case 'partial':
                     default:
-                        return lowerText.includes(lowerKeyword);
+                        keywordMatched = lowerText.includes(lowerKeyword);
+                        break;
                 }
-            });
+                if (keywordMatched) {
+                    return { matched: true, matchedKeyword: lowerKeyword };
+                }
+            }
+            return { matched: false };
         }
         case 'on_first_daily_message': {
             // Match if no message was sent by customer today
-            if (!chat.lastCustomerMessageAt) return true;
+            if (!chat.lastCustomerMessageAt) return { matched: true };
             const today = new Date();
             const lastMsg = new Date(chat.lastCustomerMessageAt);
-            return lastMsg.toDateString() !== today.toDateString();
+            return { matched: lastMsg.toDateString() !== today.toDateString() };
         }
         case 'on_new_lead': {
             // Triggered when chat is completely new (no previous messages)
-            return true; // Only called for new chats
+            return { matched: true }; // Only called for new chats
         }
         case 'on_open_conversation':
         case 'on_close_conversation':
         case 'on_agent_assign':
-            return true; // These are event-based, already filtered by caller
+            return { matched: true }; // These are event-based, already filtered by caller
         default:
-            return false;
+            return { matched: false };
     }
 }
 
@@ -153,7 +170,7 @@ function evaluateTrigger(trigger, { chat, message, text }) {
  * Execute a full bot flow: walk through nodes via edges.
  */
 async function executeFlow(flow, context) {
-    const { waba, phoneNumberId, chat, message, text } = context;
+    const { waba, phoneNumberId, chat, message, text, matchedKeyword } = context;
     const nodeMap = {};
     const edgeMap = {}; // source -> [edges]
 
@@ -166,12 +183,13 @@ async function executeFlow(flow, context) {
         edgeMap[edge.source].push(edge);
     }
 
-    // Create execution record
+    // Create execution record (with matched keyword for cooldown tracking)
     const execution = await BotExecution.create({
         flowId: flow._id,
         chatId: chat._id,
         status: 'running',
         startedAt: new Date(),
+        matchedKeyword: matchedKeyword || '',
         executionLog: [],
     });
 
