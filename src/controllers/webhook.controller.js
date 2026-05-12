@@ -41,6 +41,14 @@ async function handle(req, res, next) {
                 return res.status(200).send('EVENT_RECEIVED');
             }
 
+            // Handle call webhook events
+            if (field === 'calls' && value) {
+                logger.info(`Call webhook received: ${JSON.stringify(value).substring(0, 300)}`);
+                require('../services/call.service').processCallWebhook(body.entry[0])
+                    .catch(e => logger.error('Error in call webhook service:', e));
+                return res.status(200).send('EVENT_RECEIVED');
+            }
+
             if (value && (
                 (value.messages && value.messages.length > 0) ||
                 (value.statuses && value.statuses.length > 0)

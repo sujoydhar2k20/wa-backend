@@ -130,7 +130,13 @@ async function downloadMedia(wabaId, mediaId) {
 async function uploadMedia(wabaId, phoneNumberId, fileBuffer, mimeType) {
   const FormData = require('form-data');
   const form = new FormData();
-  form.append('file', fileBuffer, { filename: 'file', contentType: mimeType, knownLength: fileBuffer.length });
+  const extMap = {
+    'audio/ogg': 'ogg', 'audio/mp4': 'm4a', 'audio/mpeg': 'mp3',
+    'audio/aac': 'aac', 'audio/amr': 'amr',
+    'image/jpeg': 'jpg', 'image/png': 'png', 'video/mp4': 'mp4',
+  };
+  const ext = extMap[mimeType] || mimeType.split('/')[1] || 'bin';
+  form.append('file', fileBuffer, { filename: `upload.${ext}`, contentType: mimeType, knownLength: fileBuffer.length });
   form.append('messaging_product', 'whatsapp');
   const token = await getAccessToken(wabaId);
   const path = `${BASE_URL}/${phoneNumberId}/media`;
@@ -368,4 +374,5 @@ module.exports = {
   createTemplate,
   getPhoneNumberMessagingLimit,
   resolveMessagingLimit,
+  getAccessToken,
 };

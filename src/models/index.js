@@ -25,4 +25,5 @@ module.exports = {
   QuickReply: require('./QuickReply'),
   AiSetting: require('./AiSetting'),
   AiCategory: require('./AiCategory'),
+  CallLog: require('./CallLog'),
 };

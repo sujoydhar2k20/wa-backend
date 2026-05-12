@@ -1,6 +1,33 @@
 const { Message, Chat } = require('../models');
 const whatsappService = require('../services/whatsapp.service');
 const { logger } = require('../utils/logger');
+const { execFile } = require('child_process');
+const os = require('os');
+const path = require('path');
+const fs = require('fs');
+
+/**
+ * Convert a WebM/Opus audio buffer to OGG/Opus using system ffmpeg.
+ * Required because browsers record in WebM but Meta only accepts
+ * AAC, MP3, MP4-audio, AMR, or OGG/Opus for outbound audio messages.
+ */
+async function convertWebmToOgg(buffer) {
+    const tmpIn = path.join(os.tmpdir(), `wa_audio_in_${Date.now()}_${process.pid}`);
+    const tmpOut = path.join(os.tmpdir(), `wa_audio_out_${Date.now()}_${process.pid}.ogg`);
+    try {
+        await fs.promises.writeFile(tmpIn, buffer);
+        await new Promise((resolve, reject) => {
+            execFile('ffmpeg', ['-y', '-i', tmpIn, '-c:a', 'libopus', '-b:a', '64k', tmpOut], { timeout: 30000 }, (err) => {
+                if (err) reject(new Error(`ffmpeg conversion failed: ${err.message}`));
+                else resolve();
+            });
+        });
+        return await fs.promises.readFile(tmpOut);
+    } finally {
+        fs.promises.unlink(tmpIn).catch(() => {});
+        fs.promises.unlink(tmpOut).catch(() => {});
+    }
+}
 
 /**
  * Retry a function with exponential backoff.
@@ -96,8 +123,18 @@ async function send(req, res, next) {
                     let mimeType = response.headers['content-type'] || 'image/jpeg';
                     mimeType = mimeType.split(';')[0].trim();
 
-                    // WhatsApp explicitly requires 'audio/mp4' for voice notes
-                    if (type === 'audio' && mimeType === 'video/mp4') {
+                    // Detect actual format from binary magic bytes (browsers may mislabel blobs).
+                    // WebM magic: 0x1A 0x45 0xDF 0xA3 (EBML header used by WebM/MKV).
+                    // Meta does not accept audio/webm — convert to OGG/Opus via ffmpeg.
+                    const isWebm = buffer.length >= 4 &&
+                        buffer[0] === 0x1A && buffer[1] === 0x45 &&
+                        buffer[2] === 0xDF && buffer[3] === 0xA3;
+
+                    if (type === 'audio' && isWebm) {
+                        buffer = await convertWebmToOgg(buffer);
+                        mimeType = 'audio/ogg';
+                        logger.info(`Audio converted from WebM to OGG/Opus (${buffer.length} bytes)`);
+                    } else if (type === 'audio' && mimeType === 'video/mp4') {
                         mimeType = 'audio/mp4';
                     }
 
@@ -329,7 +366,14 @@ async function retry(req, res, next) {
                     let mimeType = response.headers['content-type'] || 'image/jpeg';
                     mimeType = mimeType.split(';')[0].trim();
 
-                    if (type === 'audio' && mimeType === 'video/mp4') {
+                    const isWebm = buffer.length >= 4 &&
+                        buffer[0] === 0x1A && buffer[1] === 0x45 &&
+                        buffer[2] === 0xDF && buffer[3] === 0xA3;
+
+                    if (type === 'audio' && isWebm) {
+                        buffer = await convertWebmToOgg(buffer);
+                        mimeType = 'audio/ogg';
+                    } else if (type === 'audio' && mimeType === 'video/mp4') {
                         mimeType = 'audio/mp4';
                     }
 
