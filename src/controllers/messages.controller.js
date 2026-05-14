@@ -30,6 +30,78 @@ async function convertWebmToOgg(buffer) {
 }
 
 /**
+ * Detect the real MIME type of a document from its binary magic bytes.
+ * Server Content-Type headers are often wrong (guessed from extension).
+ * Meta rejects uploads whose declared MIME type doesn't match the content.
+ *
+ * Supported by Meta for documents:
+ *   PDF, DOC/DOCX, XLS/XLSX, PPT/PPTX, TXT, CSV, RTF, ZIP, RAR
+ */
+function detectDocumentMimeType(buffer, fallback) {
+    if (buffer.length < 8) return fallback;
+
+    // PDF: %PDF
+    if (buffer[0] === 0x25 && buffer[1] === 0x50 && buffer[2] === 0x44 && buffer[3] === 0x46) {
+        return 'application/pdf';
+    }
+    // ZIP-based (DOCX, XLSX, PPTX — all use the Office Open XML / ZIP container)
+    if (buffer[0] === 0x50 && buffer[1] === 0x4B && buffer[2] === 0x03 && buffer[3] === 0x04) {
+        // Distinguish by the declared fallback/extension since all share PK magic
+        if (fallback.includes('word') || fallback.includes('docx') || fallback.includes('doc')) {
+            return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+        }
+        if (fallback.includes('sheet') || fallback.includes('xlsx') || fallback.includes('xls')) {
+            return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+        }
+        if (fallback.includes('presentation') || fallback.includes('pptx') || fallback.includes('ppt')) {
+            return 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
+        }
+        return 'application/zip';
+    }
+    // OLE2 compound document (old DOC, XLS, PPT)
+    if (buffer[0] === 0xD0 && buffer[1] === 0xCF && buffer[2] === 0x11 && buffer[3] === 0xE0) {
+        if (fallback.includes('xls')) return 'application/vnd.ms-excel';
+        if (fallback.includes('ppt')) return 'application/vnd.ms-powerpoint';
+        return 'application/msword';
+    }
+    // RAR: Rar!
+    if (buffer[0] === 0x52 && buffer[1] === 0x61 && buffer[2] === 0x72 && buffer[3] === 0x21) {
+        return 'application/vnd.rar';
+    }
+
+    return fallback;
+}
+
+/**
+ * Re-encode a video to H.264/AAC MP4 using system ffmpeg.
+ * Meta only accepts H.264 video + AAC audio in an MP4 container.
+ * H.265/HEVC, VP9, AV1, and other codecs are rejected with error 131053.
+ */
+async function convertVideoToH264(buffer) {
+    const tmpIn = path.join(os.tmpdir(), `wa_video_in_${Date.now()}_${process.pid}.mp4`);
+    const tmpOut = path.join(os.tmpdir(), `wa_video_out_${Date.now()}_${process.pid}.mp4`);
+    try {
+        await fs.promises.writeFile(tmpIn, buffer);
+        await new Promise((resolve, reject) => {
+            execFile('ffmpeg', [
+                '-y', '-i', tmpIn,
+                '-c:v', 'libx264', '-preset', 'fast', '-crf', '28',
+                '-c:a', 'aac', '-b:a', '128k',
+                '-movflags', '+faststart',
+                tmpOut
+            ], { timeout: 120000 }, (err) => {
+                if (err) reject(new Error(`ffmpeg video conversion failed: ${err.message}`));
+                else resolve();
+            });
+        });
+        return await fs.promises.readFile(tmpOut);
+    } finally {
+        fs.promises.unlink(tmpIn).catch(() => {});
+        fs.promises.unlink(tmpOut).catch(() => {});
+    }
+}
+
+/**
  * Retry a function with exponential backoff.
  * Handles transient Meta API errors (429 rate limits, 500 server errors, network timeouts).
  * @param {Function} fn - async function to retry
@@ -138,6 +210,14 @@ async function send(req, res, next) {
                         mimeType = 'audio/mp4';
                     }
 
+                    // Always re-encode video to H.264/AAC MP4 — Meta rejects H.265/HEVC,
+                    // VP9, AV1, and any other codec with error 131053.
+                    if (type === 'video') {
+                        buffer = await convertVideoToH264(buffer);
+                        mimeType = 'video/mp4';
+                        logger.info(`Video re-encoded to H.264/AAC MP4 (${buffer.length} bytes)`);
+                    }
+
                     // Always convert ALL images to JPEG — CDN headers and file extensions
                     // are unreliable (e.g. WebP served as image/jpeg with .jpg extension).
                     // Running every image through sharp guarantees a valid JPEG for Meta.
@@ -146,6 +226,16 @@ async function send(req, res, next) {
                         buffer = await sharp(buffer).jpeg({ quality: 90 }).toBuffer();
                         mimeType = 'image/jpeg';
                         logger.info(`Image converted to JPEG (${buffer.length} bytes) from ${mediaUrl.substring(0, 80)}`);
+                    }
+
+                    // Correct document MIME type from magic bytes — servers often serve
+                    // wrong Content-Type for documents (e.g. application/octet-stream).
+                    if (type === 'document') {
+                        const corrected = detectDocumentMimeType(buffer, mimeType);
+                        if (corrected !== mimeType) {
+                            logger.info(`Document MIME corrected: ${mimeType} → ${corrected}`);
+                            mimeType = corrected;
+                        }
                     }
 
                     // Retry upload to Meta with exponential backoff (handles 429 rate limits)
@@ -377,11 +467,21 @@ async function retry(req, res, next) {
                         mimeType = 'audio/mp4';
                     }
 
+                    if (type === 'video') {
+                        buffer = await convertVideoToH264(buffer);
+                        mimeType = 'video/mp4';
+                    }
+
                     // Always convert images to JPEG for WhatsApp compatibility
                     if (type === 'image') {
                         const sharp = require('sharp');
                         buffer = await sharp(buffer).jpeg({ quality: 90 }).toBuffer();
                         mimeType = 'image/jpeg';
+                    }
+
+                    if (type === 'document') {
+                        const corrected = detectDocumentMimeType(buffer, mimeType);
+                        if (corrected !== mimeType) mimeType = corrected;
                     }
 
                     mediaIdToSend = await retryWithBackoff(
