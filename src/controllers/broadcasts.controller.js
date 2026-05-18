@@ -263,4 +263,51 @@ async function getBatches(req, res, next) {
     }
 }
 
-module.exports = { list, create, get, getStats, send, test, getMessages, getBatches };
+async function getTodayStats(req, res, next) {
+    try {
+        const { wabaId } = req.query;
+        const now = new Date();
+        const startOfDay = new Date(now.setHours(0, 0, 0, 0));
+        const endOfDay = new Date(now.setHours(23, 59, 59, 999));
+
+        const filter = {
+            $or: [
+                { createdAt: { $gte: startOfDay, $lte: endOfDay } },
+                { startedAt: { $gte: startOfDay, $lte: endOfDay } }
+            ]
+        };
+
+        if (wabaId) {
+            filter.wabaId = wabaId;
+        }
+
+        const broadcasts = await Broadcast.find(filter);
+
+        let totalBroadcasts = broadcasts.length;
+        let totalRecipients = 0;
+        let totalDelivered = 0;
+        let totalRead = 0;
+
+        broadcasts.forEach(b => {
+            const stats = b.statistics || {};
+            totalRecipients += (stats.total || 0);
+            totalDelivered += (stats.delivered || 0);
+            totalRead += (stats.read || 0);
+        });
+
+        res.json({
+            success: true,
+            data: {
+                broadcasts: totalBroadcasts,
+                recipients: totalRecipients,
+                delivered: totalDelivered,
+                read: totalRead
+            }
+        });
+    } catch (e) {
+        next(e);
+    }
+}
+
+module.exports = { list, create, get, getStats, getTodayStats, send, test, getMessages, getBatches };
+

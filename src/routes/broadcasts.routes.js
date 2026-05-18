@@ -6,6 +6,7 @@ const { authenticate, requireAdmin } = require('../middleware/auth.middleware');
 router.use(authenticate);
 router.get('/', broadcastsController.list);
 router.post('/', requireAdmin, broadcastsController.create);
+router.get('/stats/today', broadcastsController.getTodayStats);
 router.get('/:id', broadcastsController.get);
 router.get('/:id/stats', broadcastsController.getStats);
 router.post('/:id/send', requireAdmin, broadcastsController.send);
@@ -14,3 +15,4 @@ router.get('/:id/messages', broadcastsController.getMessages);
 router.get('/:id/batches', broadcastsController.getBatches);
 
 module.exports = router;
+
