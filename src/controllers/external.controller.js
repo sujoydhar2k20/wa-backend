@@ -55,6 +55,31 @@ const sendTemplate = async (req, res) => {
 
         const messageId = waResult?.messages?.[0]?.id;
 
+        // Look up template from DB for rich preview in chat
+        const Template = require('../models/Template');
+        const templateDoc = await Template.findOne({ wabaId: waba._id, name: templateName, language: language || 'en' });
+        let resolvedComponents = null;
+        let messageText = `[Template: ${templateName}]`;
+        if (templateDoc) {
+            resolvedComponents = (templateDoc.components || []).map(comp => {
+                const c = comp.toObject ? comp.toObject() : { ...comp };
+                if (c.text && (c.type === 'BODY' || c.type === 'HEADER')) {
+                    const compType = c.type.toLowerCase();
+                    const vars = (components || []).find(v => v.type === compType);
+                    if (vars && vars.parameters) {
+                        let resolvedText = c.text;
+                        vars.parameters.forEach((param, idx) => {
+                            resolvedText = resolvedText.replace(`{{${idx + 1}}}`, param.text || `{{${idx + 1}}}`);
+                        });
+                        c.text = resolvedText;
+                    }
+                }
+                return c;
+            });
+            const bodyComp = resolvedComponents.find(c => c.type === 'BODY');
+            if (bodyComp?.text) messageText = bodyComp.text;
+        }
+
         // Record the outbound message
         const message = await Message.create({
             chatId: chat._id,
@@ -64,11 +89,13 @@ const sendTemplate = async (req, res) => {
             waId,
             direction: 'outbound',
             type: 'template',
-            text: `[Template: ${templateName}]`,
+            text: messageText,
             status: 'sent',
             metadata: {
                 externalSource: keyName,
                 templateName,
+                templateLanguage: language,
+                templateComponents: resolvedComponents || undefined,
                 language,
                 components
             }

@@ -172,6 +172,35 @@ async function send(req, res, next) {
                 });
             }
 
+            // Look up the template from DB to store its components for chat preview
+            const Template = require('../models/Template');
+            const templateDoc = await Template.findOne({ wabaId: chat.wabaId, name: templateName, language: language || 'en' });
+            if (templateDoc) {
+                // Build resolved components with variables injected for display
+                const resolvedComponents = (templateDoc.components || []).map(comp => {
+                    const c = comp.toObject ? comp.toObject() : { ...comp };
+                    if (c.text && (c.type === 'BODY' || c.type === 'HEADER')) {
+                        // Find matching component variables from the request
+                        const compType = c.type.toLowerCase();
+                        const vars = (components || []).find(v => v.type === compType);
+                        if (vars && vars.parameters) {
+                            let resolvedText = c.text;
+                            vars.parameters.forEach((param, idx) => {
+                                resolvedText = resolvedText.replace(`{{${idx + 1}}}`, param.text || `{{${idx + 1}}}`);
+                            });
+                            c.text = resolvedText;
+                        }
+                    }
+                    return c;
+                });
+                // Store template data in a variable to be saved in metadata below
+                req._templateData = {
+                    templateName,
+                    language: language || 'en',
+                    components: resolvedComponents,
+                };
+            }
+
             waResult = await whatsappService.sendTemplateMessage(chat.wabaId, chat.phoneNumberId, chat.waId, templateName, language || 'en', components || []);
         } else if (['image', 'video', 'audio', 'document'].includes(type)) {
             if (!mediaUrl) return res.status(400).json({ success: false, message: 'mediaUrl is required for media messages' });
@@ -260,6 +289,16 @@ async function send(req, res, next) {
         }
 
         const msgId = waResult?.messages?.[0]?.id;
+
+        // Build readable text for template messages from the resolved body component
+        let messageText;
+        if (type === 'text') {
+            messageText = text;
+        } else if (type === 'template') {
+            const bodyComp = req._templateData?.components?.find(c => c.type === 'BODY');
+            messageText = bodyComp?.text || `[template message] ${templateName}`;
+        }
+
         const message = await Message.create({
             chatId,
             wabaId: chat.wabaId,
@@ -268,12 +307,17 @@ async function send(req, res, next) {
             waId: chat.waId,
             direction: 'outbound',
             type,
-            text: type === 'text' ? text : type === 'template' ? `[template message] ${templateName}` : undefined,
+            text: messageText,
             mediaUrl: mediaUrl || undefined,
             caption: caption || undefined,
             status: 'sent',
             sentBy: req.user._id,
             replyToMessageId: replyToMessageId || undefined,
+            metadata: type === 'template' && req._templateData ? {
+                templateName: req._templateData.templateName,
+                templateLanguage: req._templateData.language,
+                templateComponents: req._templateData.components,
+            } : undefined,
         });
 
         // Update chat last message timestamp
