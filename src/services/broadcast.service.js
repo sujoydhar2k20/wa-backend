@@ -1,4 +1,4 @@
-const { Broadcast, BroadcastBatch, BroadcastMessage, BroadcastListMember, Waba, Contact } = require('../models');
+const { Broadcast, BroadcastBatch, BroadcastMessage, BroadcastListMember, Waba, Contact, Chat, Message, Template } = require('../models');
 const whatsappService = require('./whatsapp.service');
 const { getIO } = require('../websocket/socket.server');
 const { logger } = require('../utils/logger');
@@ -165,6 +165,34 @@ async function processBroadcastBatch(batchId) {
   // Get the components from the broadcast (stored when the send was initiated)
   const components = broadcast.components || [];
 
+  // Pre-resolve template components with variables for chat preview (done once, reused for all recipients)
+  let resolvedTemplateComponents = null;
+  let resolvedTemplateText = `[Broadcast: ${template.name}]`;
+  try {
+    const templateDoc = await Template.findById(template._id || template);
+    if (templateDoc) {
+      resolvedTemplateComponents = (templateDoc.components || []).map(comp => {
+        const c = comp.toObject ? comp.toObject() : { ...comp };
+        if (c.text && (c.type === 'BODY' || c.type === 'HEADER')) {
+          const compType = c.type.toLowerCase();
+          const vars = (components || []).find(v => v.type === compType);
+          if (vars && vars.parameters) {
+            let resolvedText = c.text;
+            vars.parameters.forEach((param, idx) => {
+              resolvedText = resolvedText.replace(`{{${idx + 1}}}`, param.text || `{{${idx + 1}}}`);
+            });
+            c.text = resolvedText;
+          }
+        }
+        return c;
+      });
+      const bodyComp = resolvedTemplateComponents.find(c => c.type === 'BODY');
+      if (bodyComp?.text) resolvedTemplateText = bodyComp.text;
+    }
+  } catch (tplErr) {
+    logger.warn(`Failed to resolve template components for broadcast ${broadcast._id}: ${tplErr.message}`);
+  }
+
   // Process each phone number in the batch
   const phonesToSend = batch.memberPhones.slice(0, messagingLimit === Infinity ? undefined : remainingToday);
   const phonesDeferred = batch.memberPhones.slice(messagingLimit === Infinity ? batch.memberPhones.length : remainingToday);
@@ -226,6 +254,59 @@ async function processBroadcastBatch(batchId) {
         messageId,
         status: 'sent',
       });
+
+      // Also create a Message in the individual chat so it appears in chat history
+      try {
+        const waId = phoneNumber.replace(/\D/g, '');
+        let chat = await Chat.findOne({ wabaId: broadcast.wabaId, waId });
+        if (!chat) {
+          // Create a new chat for this contact if one doesn't exist
+          chat = await Chat.create({
+            wabaId: broadcast.wabaId,
+            phoneNumberId: broadcast.phoneNumberId,
+            phoneNumber: waId,
+            waId,
+            contactId: contactId || undefined,
+            status: 'closed',
+            lastMessageAt: new Date(),
+            lastCustomerMessageAt: new Date(0),
+            isUnread: false,
+          });
+        }
+
+        const chatMessage = await Message.create({
+          chatId: chat._id,
+          wabaId: broadcast.wabaId,
+          phoneNumberId: broadcast.phoneNumberId,
+          messageId,
+          waId,
+          direction: 'outbound',
+          type: 'template',
+          text: resolvedTemplateText,
+          status: 'sent',
+          metadata: {
+            templateName: template.name,
+            templateLanguage: template.language,
+            templateComponents: resolvedTemplateComponents || undefined,
+            broadcastId: broadcast._id.toString(),
+          },
+        });
+
+        // Update chat last message timestamp
+        await Chat.findByIdAndUpdate(chat._id, { lastMessageAt: new Date(), lastStaffMessageAt: new Date() });
+
+        // Emit socket event for real-time chat UI update
+        try {
+          const io = getIO();
+          io.emit('message:new', { chatId: chat._id, message: chatMessage });
+          const populatedChat = await Chat.findById(chat._id).populate('contactId');
+          io.emit('chat:update', { chatId: chat._id, chat: populatedChat });
+        } catch (socketErr) {
+          // Non-critical, just log
+        }
+      } catch (chatErr) {
+        logger.warn(`Failed to create chat message for broadcast ${broadcast._id}, phone ${phoneNumber}: ${chatErr.message}`);
+      }
 
       if (broadcast.broadcastListId) {
         await BroadcastListMember.updateOne(
