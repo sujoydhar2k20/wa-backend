@@ -309,5 +309,38 @@ async function getTodayStats(req, res, next) {
     }
 }
 
-module.exports = { list, create, get, getStats, getTodayStats, send, test, getMessages, getBatches };
+async function getStatusCounts(req, res, next) {
+    try {
+        const { wabaId } = req.query;
+        const filter = {};
+        if (wabaId) filter.wabaId = wabaId;
+
+        const [draft, scheduled, completed, sending, paused, failed] = await Promise.all([
+            Broadcast.countDocuments({ ...filter, status: 'draft' }),
+            Broadcast.countDocuments({ ...filter, status: 'scheduled' }),
+            Broadcast.countDocuments({ ...filter, status: 'completed' }),
+            Broadcast.countDocuments({ ...filter, status: 'sending' }),
+            Broadcast.countDocuments({ ...filter, status: 'paused' }),
+            Broadcast.countDocuments({ ...filter, status: 'failed' }),
+        ]);
+
+        res.json({
+            success: true,
+            data: {
+                draft,
+                scheduled,
+                completed,
+                sending,
+                paused,
+                failed,
+                total: draft + scheduled + completed + sending + paused + failed
+            }
+        });
+    } catch (e) {
+        next(e);
+    }
+}
+
+module.exports = { list, create, get, getStats, getTodayStats, getStatusCounts, send, test, getMessages, getBatches };
+
 
