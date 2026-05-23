@@ -22,5 +22,6 @@ router.use('/external', require('./external.routes'));
 router.use('/quick-replies', require('./quickReplies.routes'));
 router.use('/settings', require('./settings.routes'));
 router.use('/calls', require('./calls.routes'));
+router.use('/notifications', require('./notifications.routes'));
 
 module.exports = router;

@@ -272,13 +272,13 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
         throw createErr;
     }
 
-    // Send push notification
+    // Send push notification & save to Notification Center
     try {
-        // Skip if DND is enabled
+        // Skip if Chat DND is enabled
         if (chat.isDnd) {
-            logger.info(`Push notification skipped for DND chat ${chat._id}`);
+            logger.info(`Notification skipped for DND chat ${chat._id}`);
         } else {
-            const pushService = require('./push.service');
+            const notificationService = require('./notification.service');
             let userIdsToNotify = [];
 
             if (chat.assignedTo) {
@@ -294,10 +294,18 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
             }
 
             if (userIdsToNotify.length > 0) {
-                await pushService.sendPushNotificationToUsers(userIdsToNotify, {
-                    title: profileName ? `New message from ${profileName}` : `New message from ${waId}`,
-                    body: messageData.text || (messageData.mediaId ? `Received a ${msg.type}` : 'Received a new message'),
-                    url: `/chats/${chat._id}`
+                const displayName = profileName || waId;
+                const notificationType = isNewChat ? 'new_chat' : 'unread_reminder';
+                const title = isNewChat ? 'New Chat' : 'Unread Reminder';
+                const body = isNewChat 
+                    ? `You have a new chat from ${displayName}` 
+                    : `You have new messages from ${displayName}`;
+
+                await notificationService.notifyMultipleUsers(userIdsToNotify, {
+                    type: notificationType,
+                    title,
+                    body,
+                    metadata: { chatId: chat._id.toString() }
                 });
                 
                 // Update lastNotificationAt to track repeat intervals
@@ -305,8 +313,8 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
                 await chat.save();
             }
         }
-    } catch (pushErr) {
-        logger.error(`Error triggering push notification: ${pushErr.message}`);
+    } catch (notifErr) {
+        logger.error(`Error triggering notification: ${notifErr.message}`);
     }
 
     // Product code auto-reply + AI fallback

@@ -38,7 +38,7 @@ async function update(id, data, currentUser) {
   if (!user) throw Object.assign(new Error('User not found'), { statusCode: 404 });
   if (!['admin', 'superadmin'].includes(currentUser.role) && currentUser._id.toString() !== id) throw Object.assign(new Error('Forbidden'), { statusCode: 403 });
   
-  const allowed = ['name', 'email'];
+  const allowed = ['name', 'email', 'isDnd'];
   if (['admin', 'superadmin'].includes(currentUser.role)) allowed.push('role', 'isActive', 'assignedWabaId');
   
   const wasActive = user.isActive;

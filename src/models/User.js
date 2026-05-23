@@ -12,6 +12,7 @@ const userSchema = new mongoose.Schema(
     refreshToken: { type: String },
     assignedWabaId: { type: mongoose.Schema.Types.ObjectId, ref: 'Waba', default: null, index: true },
     pushSubscriptions: { type: Array, default: [] },
+    isDnd: { type: Boolean, default: false },
   },
   { timestamps: true }
 );

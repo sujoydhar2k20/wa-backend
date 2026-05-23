@@ -88,37 +88,54 @@ async function checkAndTransferNewChats() {
                 chatCounts.sort((a, b) => a.count - b.count);
                 const leastLoaded = chatCounts[0];
 
-                // Transfer chat
-                chat.assignedTo = leastLoaded.staffId;
-                await chat.save();
-
-                // Log activity
-                await ChatActivity.create({
-                    chatId: chat._id,
-                    type: 'auto_transferred',
-                    details: {
-                        fromStaffId: oldStaffId,
-                        toStaffId: leastLoaded.staffId,
-                        reason: 'staff_no_response'
-                    },
-                });
-
-                // Emit socket event
-                try {
-                    const io = getIO();
-                    const updatedChat = await Chat.findById(chat._id)
-                        .populate('assignedTo', 'name phone')
-                        .populate('contactId', 'name nameOnWhatsApp profilePicture');
-
-                    io.emit('chat:update', {
-                        chatId: chat._id,
-                        chat: updatedChat
-                    });
-                    
-                    logger.info(`Auto-transferred chat ${chat._id} from ${oldStaffId} to ${leastLoaded.staffId}`);
-                } catch (e) {
-                    logger.warn('Socket emit failed for auto-transferred chat:', e.message);
-                }
+                 // Transfer chat
+                 chat.assignedTo = leastLoaded.staffId;
+                 await chat.save();
+ 
+                 // Log activity
+                 await ChatActivity.create({
+                     chatId: chat._id,
+                     type: 'auto_transferred',
+                     details: {
+                         fromStaffId: oldStaffId,
+                         toStaffId: leastLoaded.staffId,
+                         reason: 'staff_no_response'
+                     },
+                 });
+ 
+                 // Create escalation notification
+                 try {
+                     const notificationService = require('./notification.service');
+                     const chatWithContact = await Chat.findById(chat._id).populate('contactId');
+                     const customerName = chatWithContact?.contactId?.name || chatWithContact?.contactId?.nameOnWhatsApp || chat.phoneNumber || 'customer';
+                     
+                     await notificationService.createNotification({
+                         recipientId: leastLoaded.staffId,
+                         type: 'escalation',
+                         title: 'Escalation Alert',
+                         body: `Chat with ${customerName} has been escalated to you`,
+                         metadata: { chatId: chat._id.toString() }
+                     });
+                 } catch (notifErr) {
+                     logger.error(`Failed to create escalation notification: ${notifErr.message}`);
+                 }
+ 
+                 // Emit socket event
+                 try {
+                     const io = getIO();
+                     const updatedChat = await Chat.findById(chat._id)
+                         .populate('assignedTo', 'name phone')
+                         .populate('contactId', 'name nameOnWhatsApp profilePicture');
+ 
+                     io.emit('chat:update', {
+                         chatId: chat._id,
+                         chat: updatedChat
+                     });
+                     
+                     logger.info(`Auto-transferred chat ${chat._id} from ${oldStaffId} to ${leastLoaded.staffId}`);
+                 } catch (e) {
+                     logger.warn('Socket emit failed for auto-transferred chat:', e.message);
+                 }
             } else {
                 logger.warn(`No other staff available to take chat ${chat._id}`);
             }
@@ -175,29 +192,46 @@ async function checkAndTransferInactiveChats() {
                 chatCounts.sort((a, b) => a.count - b.count);
                 const leastLoaded = chatCounts[0];
 
-                chat.assignedTo = leastLoaded.staffId;
-                await chat.save();
-
-                await ChatActivity.create({
-                    chatId: chat._id,
-                    type: 'auto_transferred',
-                    details: {
-                        fromStaffId: oldStaffId,
-                        toStaffId: leastLoaded.staffId,
-                        reason: 'staff_no_response_60m'
-                    },
-                });
-
-                try {
-                    const io = getIO();
-                    const updatedChat = await Chat.findById(chat._id)
-                        .populate('assignedTo', 'name phone')
-                        .populate('contactId', 'name nameOnWhatsApp profilePicture');
-
-                    io.emit('chat:update', { chatId: chat._id, chat: updatedChat });
-                } catch (e) {
-                    logger.warn('Socket emit failed for 60m transfer:', e.message);
-                }
+                 chat.assignedTo = leastLoaded.staffId;
+                 await chat.save();
+ 
+                 await ChatActivity.create({
+                     chatId: chat._id,
+                     type: 'auto_transferred',
+                     details: {
+                         fromStaffId: oldStaffId,
+                         toStaffId: leastLoaded.staffId,
+                         reason: 'staff_no_response_60m'
+                     },
+                 });
+ 
+                 // Create escalation notification
+                 try {
+                     const notificationService = require('./notification.service');
+                     const chatWithContact = await Chat.findById(chat._id).populate('contactId');
+                     const customerName = chatWithContact?.contactId?.name || chatWithContact?.contactId?.nameOnWhatsApp || chat.phoneNumber || 'customer';
+ 
+                     await notificationService.createNotification({
+                         recipientId: leastLoaded.staffId,
+                         type: 'escalation',
+                         title: 'Escalation Alert',
+                         body: `Chat with ${customerName} has been escalated to you`,
+                         metadata: { chatId: chat._id.toString() }
+                     });
+                 } catch (notifErr) {
+                     logger.error(`Failed to create escalation notification: ${notifErr.message}`);
+                 }
+ 
+                 try {
+                     const io = getIO();
+                     const updatedChat = await Chat.findById(chat._id)
+                         .populate('assignedTo', 'name phone')
+                         .populate('contactId', 'name nameOnWhatsApp profilePicture');
+ 
+                     io.emit('chat:update', { chatId: chat._id, chat: updatedChat });
+                 } catch (e) {
+                     logger.warn('Socket emit failed for 60m transfer:', e.message);
+                 }
             }
         }
     } catch (error) {
@@ -258,10 +292,20 @@ async function checkAndNudgeUnreadChats() {
 
             if (userIdsToNotify.length > 0) {
                 const profileName = chat.contactId?.name || chat.contactId?.nameOnWhatsApp || chat.waId;
-                await pushService.sendPushNotificationToUsers(userIdsToNotify, {
-                    title: `[Nudge] New message from ${profileName}`,
-                    body: lastMsg.text || (lastMsg.mediaId ? `Received a ${lastMsg.type}` : 'Received a new message'),
-                    url: `/chats/${chat._id}`
+                const notificationService = require('./notification.service');
+                
+                const isRepeated = !!chat.lastNotificationAt;
+                const notifType = isRepeated ? 'repeated_notification' : 'unread_reminder';
+                const title = isRepeated ? 'Repeated Notification' : 'Unread Reminder';
+                const body = isRepeated 
+                    ? `Nudge: Chat with ${profileName} is still unread`
+                    : `You have unread messages from ${profileName}`;
+
+                await notificationService.notifyMultipleUsers(userIdsToNotify, {
+                    type: notifType,
+                    title,
+                    body,
+                    metadata: { chatId: chat._id.toString() }
                 });
 
                 chat.lastNotificationAt = new Date();
