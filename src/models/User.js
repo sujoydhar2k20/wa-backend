@@ -13,6 +13,8 @@ const userSchema = new mongoose.Schema(
     assignedWabaId: { type: mongoose.Schema.Types.ObjectId, ref: 'Waba', default: null, index: true },
     pushSubscriptions: { type: Array, default: [] },
     isDnd: { type: Boolean, default: false },
+    profilePicture: { type: String, default: null },
+    primaryChannel: { type: String, default: null },
   },
   { timestamps: true }
 );

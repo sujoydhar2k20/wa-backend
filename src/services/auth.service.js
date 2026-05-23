@@ -109,7 +109,16 @@ async function verifyOtp(phone, otp, deviceType = 'web', deviceId = '') {
   });
   await User.updateOne({ _id: user._id }, { lastLogin: new Date(), loginExpiry });
   return {
-    user: { id: user._id, phone: user.phone, role: user.role, name: user.name, email: user.email },
+    user: { 
+      id: user._id, 
+      phone: user.phone, 
+      role: user.role, 
+      name: user.name, 
+      email: user.email,
+      profilePicture: user.profilePicture || null,
+      primaryChannel: user.primaryChannel || null,
+      isDnd: !!user.isDnd
+    },
     accessToken,
     refreshToken,
     expiresIn: 365 * 24 * 3600,
