@@ -15,6 +15,7 @@ const userSchema = new mongoose.Schema(
     isDnd: { type: Boolean, default: false },
     profilePicture: { type: String, default: null },
     primaryChannel: { type: String, default: null },
+    fcmTokens: { type: [String], default: [] },
   },
   { timestamps: true }
 );
