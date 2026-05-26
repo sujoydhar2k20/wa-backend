@@ -224,19 +224,14 @@ async function send(req, res, next) {
                     let mimeType = response.headers['content-type'] || 'image/jpeg';
                     mimeType = mimeType.split(';')[0].trim();
 
-                    // Detect actual format from binary magic bytes (browsers may mislabel blobs).
-                    // WebM magic: 0x1A 0x45 0xDF 0xA3 (EBML header used by WebM/MKV).
-                    // Meta does not accept audio/webm — convert to OGG/Opus via ffmpeg.
-                    const isWebm = buffer.length >= 4 &&
-                        buffer[0] === 0x1A && buffer[1] === 0x45 &&
-                        buffer[2] === 0xDF && buffer[3] === 0xA3;
-
-                    if (type === 'audio' && isWebm) {
+                    // Always re-encode audio to OGG/Opus via ffmpeg.
+                    // Browsers record in WebM, MP4, or other formats depending on platform.
+                    // Magic-byte detection is unreliable when the VPS serves wrong Content-Type.
+                    // ffmpeg accepts any valid input and always produces clean OGG/Opus for Meta.
+                    if (type === 'audio') {
                         buffer = await convertWebmToOgg(buffer);
                         mimeType = 'audio/ogg';
-                        logger.info(`Audio converted from WebM to OGG/Opus (${buffer.length} bytes)`);
-                    } else if (type === 'audio' && mimeType === 'video/mp4') {
-                        mimeType = 'audio/mp4';
+                        logger.info(`Audio converted to OGG/Opus (${buffer.length} bytes)`);
                     }
 
                     // Always re-encode video to H.264/AAC MP4 — Meta rejects H.265/HEVC,
@@ -500,15 +495,9 @@ async function retry(req, res, next) {
                     let mimeType = response.headers['content-type'] || 'image/jpeg';
                     mimeType = mimeType.split(';')[0].trim();
 
-                    const isWebm = buffer.length >= 4 &&
-                        buffer[0] === 0x1A && buffer[1] === 0x45 &&
-                        buffer[2] === 0xDF && buffer[3] === 0xA3;
-
-                    if (type === 'audio' && isWebm) {
+                    if (type === 'audio') {
                         buffer = await convertWebmToOgg(buffer);
                         mimeType = 'audio/ogg';
-                    } else if (type === 'audio' && mimeType === 'video/mp4') {
-                        mimeType = 'audio/mp4';
                     }
 
                     if (type === 'video') {
