@@ -511,7 +511,7 @@ async function retry(req, res, next) {
                     mimeType = mimeType.split(';')[0].trim();
 
                     if (type === 'audio') {
-                        buffer = await convertWebmToOgg(buffer);
+                        buffer = await convertAudioForMeta(buffer);
                         mimeType = 'audio/ogg';
                     }
 
