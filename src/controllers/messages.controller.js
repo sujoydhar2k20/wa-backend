@@ -7,22 +7,38 @@ const path = require('path');
 const fs = require('fs');
 
 /**
- * Convert a WebM/Opus audio buffer to OGG/Opus using system ffmpeg.
- * Required because browsers record in WebM but Meta only accepts
- * AAC, MP3, MP4-audio, AMR, or OGG/Opus for outbound audio messages.
+ * Convert any browser-recorded audio to AAC/M4A for Meta.
+ * Uses ffmpeg's built-in AAC encoder — no libopus or libmp3lame required.
+ * Meta supports audio/mp4 (AAC) natively for outbound audio messages.
  */
-async function convertWebmToOgg(buffer) {
-    const tmpIn = path.join(os.tmpdir(), `wa_audio_in_${Date.now()}_${process.pid}`);
-    const tmpOut = path.join(os.tmpdir(), `wa_audio_out_${Date.now()}_${process.pid}.ogg`);
+async function convertAudioForMeta(buffer) {
+    const id = `${Date.now()}_${process.pid}_${Math.random().toString(36).slice(2)}`;
+    const tmpIn = path.join(os.tmpdir(), `wa_audio_in_${id}`);
+    const tmpOut = path.join(os.tmpdir(), `wa_audio_out_${id}.m4a`);
     try {
         await fs.promises.writeFile(tmpIn, buffer);
         await new Promise((resolve, reject) => {
-            execFile('ffmpeg', ['-y', '-i', tmpIn, '-c:a', 'libopus', '-b:a', '64k', tmpOut], { timeout: 30000 }, (err) => {
-                if (err) reject(new Error(`ffmpeg conversion failed: ${err.message}`));
-                else resolve();
+            execFile('ffmpeg', [
+                '-y', '-i', tmpIn,
+                '-vn',                  // strip any video stream
+                '-c:a', 'aac',          // built-in AAC encoder, no extra library needed
+                '-b:a', '128k',
+                '-movflags', '+faststart',
+                tmpOut
+            ], { timeout: 60000 }, (err, _stdout, stderr) => {
+                if (err) {
+                    logger.error(`ffmpeg audio conversion failed: ${err.message}\nstderr: ${stderr}`);
+                    reject(new Error(`ffmpeg audio conversion failed: ${err.message}`));
+                } else {
+                    if (stderr) logger.info(`ffmpeg audio stderr: ${stderr.slice(-300)}`);
+                    resolve();
+                }
             });
         });
-        return await fs.promises.readFile(tmpOut);
+        const result = await fs.promises.readFile(tmpOut);
+        if (result.length === 0) throw new Error('ffmpeg produced an empty audio output file');
+        logger.info(`Audio converted to AAC/M4A: ${buffer.length} → ${result.length} bytes`);
+        return result;
     } finally {
         fs.promises.unlink(tmpIn).catch(() => {});
         fs.promises.unlink(tmpOut).catch(() => {});
@@ -229,9 +245,8 @@ async function send(req, res, next) {
                     // Magic-byte detection is unreliable when the VPS serves wrong Content-Type.
                     // ffmpeg accepts any valid input and always produces clean OGG/Opus for Meta.
                     if (type === 'audio') {
-                        buffer = await convertWebmToOgg(buffer);
-                        mimeType = 'audio/ogg';
-                        logger.info(`Audio converted to OGG/Opus (${buffer.length} bytes)`);
+                        buffer = await convertAudioForMeta(buffer);
+                        mimeType = 'audio/mp4';
                     }
 
                     // Always re-encode video to H.264/AAC MP4 — Meta rejects H.265/HEVC,
