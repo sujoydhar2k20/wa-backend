@@ -44,8 +44,7 @@ async function uploadToCloudinaryForOCR(buffer) {
     return new Promise((resolve, reject) => {
         const uploadStream = cloudinary.uploader.upload_stream(
             {
-                folder: 'ocr-temp',
-                transformation: 'c_limit,w_400,h_500,f_auto,q_auto'
+                folder: 'ocr-temp'
             },
             async (error, result) => {
                 if (error) {
@@ -153,8 +152,11 @@ async function extractTextWithOpenAI(imageUrl) {
  */
 async function extractTextFromImageBuffer(buffer) {
     try {
-        // Upload to Cloudinary with transformations for OCR processing
-        const imageUrl = await uploadToCloudinaryForOCR(buffer);
+        // Compress locally first to limit size (saves tokens)
+        const compressedBuffer = await compressImageForAI(buffer);
+        
+        // Upload to Cloudinary (no on-the-fly transformations, bypassing strict restrictions)
+        const imageUrl = await uploadToCloudinaryForOCR(compressedBuffer);
         logger.info(`Cloudinary-uploaded image for OCR: ${imageUrl}`);
         
         logger.info('Sending image URL directly to OpenAI...');
