@@ -32,11 +32,17 @@ function calculatePrice(productData, rate) {
 
 async function list(req, res, next) {
     try {
-        const { page = 1, limit = 20, category, isInStock, q, type } = req.query;
+        const { page = 1, limit = 20, category, isInStock, q, type, carat } = req.query;
         const skip = (parseInt(page, 10) - 1) * parseInt(limit, 10);
         const filter = {};
         if (category) filter.category = category;
         if (isInStock !== undefined) filter.isInStock = isInStock === 'true';
+        if (carat) {
+            const parsedCarat = parseFloat(carat);
+            if (!isNaN(parsedCarat)) {
+                filter.carat = parsedCarat;
+            }
+        }
         if (q) filter.$or = [
             { name: { $regex: q, $options: 'i' } },
             { code: { $regex: q, $options: 'i' } },
