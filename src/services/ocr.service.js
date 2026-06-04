@@ -45,7 +45,7 @@ async function uploadToCloudinaryForOCR(buffer) {
         const uploadStream = cloudinary.uploader.upload_stream(
             {
                 folder: 'ocr-temp',
-                transformation: 'c_fill_pad,g_auto,w_400,h_500,f_webp,e_sharpen:200,b_auto'
+                transformation: 'c_pad,g_auto,w_400,h_500,f_webp,e_sharpen:200,b_auto'
             },
             async (error, result) => {
                 if (error) {
