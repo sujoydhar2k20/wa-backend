@@ -119,7 +119,8 @@ async function search(req, res, next) {
                 { $group: {
                     _id: '$chatId',
                     matchedText: { $first: '$text' },
-                    matchedAt: { $first: '$createdAt' }
+                    matchedAt: { $first: '$createdAt' },
+                    matchedMessageId: { $first: '$_id' }
                 }},
                 { $limit: remaining + seenChatIds.size } // fetch extra to account for duplicates
             ]);
@@ -143,13 +144,20 @@ async function search(req, res, next) {
 
                 // Build a lookup for matched messages
                 const msgLookup = {};
-                msgChatIds.forEach(m => { msgLookup[m._id.toString()] = m.matchedText; });
+                msgChatIds.forEach(m => {
+                    msgLookup[m._id.toString()] = {
+                        text: m.matchedText,
+                        messageId: m.matchedMessageId
+                    };
+                });
 
                 for (const chat of msgChats) {
+                    const lookup = msgLookup[chat._id.toString()] || {};
                     results.push({
                         ...chat,
                         matchSource: 'message',
-                        matchedMessage: msgLookup[chat._id.toString()] || ''
+                        matchedMessage: lookup.text || '',
+                        matchedMessageId: lookup.messageId || null
                     });
                 }
             }
