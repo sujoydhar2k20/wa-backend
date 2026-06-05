@@ -296,10 +296,29 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
             if (userIdsToNotify.length > 0) {
                 const displayName = profileName || waId;
                 const notificationType = isNewChat ? 'new_chat' : 'unread_reminder';
-                const title = isNewChat ? 'New Chat' : 'Unread Reminder';
-                const body = isNewChat 
-                    ? `You have a new chat from ${displayName}` 
-                    : `You have new messages from ${displayName}`;
+                
+                // Construct WhatsApp-like title and body
+                const title = displayName;
+                let body = '';
+                if (msg.type === 'text') {
+                    body = msg.text?.body || '';
+                } else if (msg.type === 'image') {
+                    body = msg.image?.caption ? `📷 Image: ${msg.image.caption}` : '📷 Image';
+                } else if (msg.type === 'video') {
+                    body = msg.video?.caption ? `🎥 Video: ${msg.video.caption}` : '🎥 Video';
+                } else if (msg.type === 'audio') {
+                    body = '🎵 Audio';
+                } else if (msg.type === 'document') {
+                    body = msg.document?.filename ? `📄 ${msg.document.filename}` : '📄 Document';
+                } else {
+                    body = `Sent a ${msg.type}`;
+                }
+
+                // Truncate body if it is too long
+                const maxLen = 300;
+                if (body.length > maxLen) {
+                    body = body.substring(0, maxLen) + '...';
+                }
 
                 await notificationService.notifyMultipleUsers(userIdsToNotify, {
                     type: notificationType,
