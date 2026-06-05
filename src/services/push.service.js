@@ -83,16 +83,24 @@ async function sendPushNotificationToUsers(userIds, payload) {
 
         // Format FCM Multicast Message
         // For mobile and web clients, we include notification details and custom data
+        const fcmData = {
+            url: String(payload.url || ''),
+            title: String(payload.title || ''),
+            body: String(payload.body || ''),
+        };
+
+        if (payload.data) {
+            for (const [key, value] of Object.entries(payload.data)) {
+                if (value !== undefined && value !== null) {
+                    fcmData[key] = typeof value === 'object' ? JSON.stringify(value) : String(value);
+                }
+            }
+        }
+
         const message = {
-            notification: {
-                title: payload.title,
-                body: payload.body,
-            },
-            data: {
-                url: payload.url || '',
-                title: payload.title,
-                body: payload.body,
-                ...(payload.data || {}),
+            data: fcmData,
+            android: {
+                priority: 'high',
             },
             tokens: allTokens,
         };
