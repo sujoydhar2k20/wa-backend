@@ -409,18 +409,33 @@ async function markUnread(req, res, next) {
 
 async function getMessages(req, res, next) {
     try {
-        const { page = 1, limit = 50 } = req.query;
-        const skip = (parseInt(page, 10) - 1) * parseInt(limit, 10);
+        const { page = 1, limit = 50, messageId } = req.query;
         const filter = { chatId: req.params.id };
+
+        let finalLimit = parseInt(limit, 10);
+        let finalSkip = (parseInt(page, 10) - 1) * finalLimit;
+
+        if (messageId) {
+            const targetMsg = await Message.findById(messageId);
+            if (targetMsg) {
+                const newerCount = await Message.countDocuments({
+                    chatId: req.params.id,
+                    createdAt: { $gt: targetMsg.createdAt }
+                });
+                finalLimit = Math.max(finalLimit, newerCount + 50);
+                finalSkip = 0;
+            }
+        }
+
         const [messages, total] = await Promise.all([
             Message.find(filter)
                 .sort({ createdAt: -1 })
-                .skip(skip)
-                .limit(parseInt(limit, 10))
+                .skip(finalSkip)
+                .limit(finalLimit)
                 .populate('sentBy', 'name phone'),
             Message.countDocuments(filter),
         ]);
-        res.json({ data: messages.reverse(), total, page: parseInt(page, 10), limit: parseInt(limit, 10) });
+        res.json({ data: messages.reverse(), total, page: parseInt(page, 10), limit: finalLimit });
     } catch (e) {
         next(e);
     }
