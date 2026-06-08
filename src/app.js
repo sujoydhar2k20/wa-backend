@@ -21,7 +21,7 @@ app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 200,
+  max: 10000, // Increased from 200 to 10000 to prevent webhook / active staff rate-limiting issues
   message: { success: false, message: 'Too many requests' },
 });
 app.use('/api', limiter);
