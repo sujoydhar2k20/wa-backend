@@ -13,7 +13,7 @@ const { logger } = require('../utils/logger');
  * Main entry: evaluate all enabled bot flows against incoming message context.
  * Called from webhook.service.js after a message is saved.
  */
-async function processIncomingMessage({ waba, phoneNumberId, chat, message, text }) {
+async function processIncomingMessage({ waba, phoneNumberId, chat, message, text, isNewChat }) {
     try {
         // Check for active running execution for this chat
         const activeExecution = await BotExecution.findOne({
@@ -80,7 +80,7 @@ async function processIncomingMessage({ waba, phoneNumberId, chat, message, text
         if (!flows.length) return;
 
         for (const flow of flows) {
-            const triggerResult = evaluateTrigger(flow.trigger, { chat, message, text });
+            const triggerResult = evaluateTrigger(flow.trigger, { chat, message, text, isNewChat });
             if (triggerResult.matched) {
                 const matchedKeyword = triggerResult.matchedKeyword || '';
 
@@ -174,7 +174,7 @@ async function processAgentAssign({ waba, phoneNumberId, chat, agentId }) {
  * Check if a trigger matches the context.
  * Returns { matched: boolean, matchedKeyword?: string }
  */
-function evaluateTrigger(trigger, { chat, message, text }) {
+function evaluateTrigger(trigger, { chat, message, text, isNewChat }) {
     if (!trigger || !trigger.type) return { matched: false };
 
     switch (trigger.type) {
@@ -215,12 +215,12 @@ function evaluateTrigger(trigger, { chat, message, text }) {
         }
         case 'on_new_lead': {
             // Triggered when chat is completely new (no previous messages)
-            return { matched: true }; // Only called for new chats
+            return { matched: !!isNewChat };
         }
         case 'on_open_conversation':
         case 'on_close_conversation':
         case 'on_agent_assign':
-            return { matched: true }; // These are event-based, already filtered by caller
+            return { matched: false }; // These are event-based, not triggered by incoming customer messages
         default:
             return { matched: false };
     }

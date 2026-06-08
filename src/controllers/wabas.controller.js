@@ -353,7 +353,7 @@ async function getQuota(req, res, next) {
         res.json({
             success: true,
             dailyLimit: messagingLimit === Infinity ? 'Unlimited' : messagingLimit,
-            messagingLimitTier: messagingLimitTier || 'TIER_1K',
+            messagingLimitTier: messagingLimitTier || 'TIER_100K',
             sentToday,
             remaining,
             phoneNumberId: req.query.phoneNumberId,

@@ -389,11 +389,10 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
             .catch(e => logger.error('Product code auto-reply error:', e.message));
         }
     }
-
     // Bot flow execution (fire-and-forget)
     const msgText = msg.type === 'text' ? msg.text?.body : (msg.type === 'interactive' ? messageData.text : '');
     botService.processIncomingMessage({
-        waba, phoneNumberId, chat, message, text: msgText || '',
+        waba, phoneNumberId, chat, message, text: msgText || '', isNewChat
     }).catch(e => logger.error('Bot execution error:', e.message));
 
     // Trigger on_new_lead for brand new chats

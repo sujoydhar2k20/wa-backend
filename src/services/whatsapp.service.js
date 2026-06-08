@@ -332,7 +332,7 @@ function resolveMessagingLimit(tier) {
     case 'TIER_10K': return 10000;
     case 'TIER_100K': return 100000;
     case 'UNLIMITED': return Infinity;
-    default: return 1000; // Conservative default
+    default: return 100000; // Default to 100k
   }
 }
 

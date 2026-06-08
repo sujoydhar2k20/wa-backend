@@ -242,6 +242,25 @@ async function assign(req, res, next) {
             });
         }
 
+        // Trigger bot on agent assign
+        if (assigneeId) {
+            try {
+                const botService = require('../services/bot.service');
+                const Waba = require('../models/Waba');
+                const waba = await Waba.findById(chat.wabaId);
+                if (waba) {
+                    botService.processAgentAssign({
+                        waba,
+                        phoneNumberId: chat.phoneNumberId || waba.phoneNumbers?.[0]?.phoneNumberId,
+                        chat: populated,
+                        agentId: assigneeId
+                    }).catch(err => console.error('Error in bot processAgentAssign:', err));
+                }
+            } catch (botErr) {
+                console.error('Failed to trigger agent assign bot flow:', botErr);
+            }
+        }
+
         res.json(populated);
     } catch (e) {
         next(e);
@@ -314,6 +333,22 @@ async function close(req, res, next) {
             message: populatedSysMsg
         });
         io.emit('chat:update', { chatId: chat._id.toString(), chat: populated });
+
+        // Trigger bot on close conversation
+        try {
+            const botService = require('../services/bot.service');
+            const Waba = require('../models/Waba');
+            const waba = await Waba.findById(chat.wabaId);
+            if (waba) {
+                botService.processCloseConversation({
+                    waba,
+                    phoneNumberId: chat.phoneNumberId || waba.phoneNumbers?.[0]?.phoneNumberId,
+                    chat: populated
+                }).catch(err => console.error('Error in bot processCloseConversation:', err));
+            }
+        } catch (botErr) {
+            console.error('Failed to trigger close conversation bot flow:', botErr);
+        }
 
         res.json(populated);
     } catch (e) {

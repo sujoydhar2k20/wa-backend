@@ -33,8 +33,8 @@ async function getMessagingLimit(wabaId, phoneNumberId) {
 
     return limitData;
   } catch (err) {
-    logger.warn(`Failed to fetch messaging limit for phone ${phoneNumberId}, using default 1000:`, err.message);
-    return { messagingLimitTier: 'TIER_1K', messagingLimit: 1000 };
+    logger.warn(`Failed to fetch messaging limit for phone ${phoneNumberId}, using default 100000:`, err.message);
+    return { messagingLimitTier: 'TIER_100K', messagingLimit: 100000 };
   }
 }
 
