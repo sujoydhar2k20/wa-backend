@@ -721,13 +721,28 @@ async function executeNode(node, context) {
             const minute = parseInt(parts.find(p => p.type === 'minute')?.value || '0');
             const currentMinutes = hour * 60 + minute;
 
+            // Get current day of the week in target timezone
+            const dayFormatter = new Intl.DateTimeFormat('en-US', {
+                timeZone: tz,
+                weekday: 'long',
+            });
+            const currentDay = dayFormatter.format(now).toLowerCase();
+
+            // Validate day matches selected working days
+            let dayMatches = true;
+            if (config.workingDays && config.workingDays.length > 0) {
+                const workingDays = config.workingDays.map(d => String(d).toLowerCase().trim());
+                dayMatches = workingDays.includes(currentDay);
+            }
+
             const [startH, startM] = (config.startTime || '09:00').split(':').map(Number);
             const [endH, endM] = (config.endTime || '18:00').split(':').map(Number);
             const startMinutes = startH * 60 + startM;
             const endMinutes = endH * 60 + endM;
 
-            const withinHours = currentMinutes >= startMinutes && currentMinutes <= endMinutes;
-            return { branch: withinHours ? 'yes' : 'no', withinHours, currentTime: `${hour}:${minute}` };
+            const timeMatches = currentMinutes >= startMinutes && currentMinutes <= endMinutes;
+            const withinHours = dayMatches && timeMatches;
+            return { branch: withinHours ? 'yes' : 'no', withinHours, currentTime: `${hour}:${minute}`, currentDay };
         }
 
         case 'set_attribute': {
