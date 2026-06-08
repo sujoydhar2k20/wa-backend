@@ -15,6 +15,66 @@ const { logger } = require('../utils/logger');
  */
 async function processIncomingMessage({ waba, phoneNumberId, chat, message, text }) {
     try {
+        // Check for active running execution for this chat
+        const activeExecution = await BotExecution.findOne({
+            chatId: chat._id,
+            status: 'running',
+            currentNodeId: { $ne: null }
+        });
+
+        if (activeExecution) {
+            const flow = await BotFlow.findById(activeExecution.flowId).lean();
+            if (flow && flow.isEnabled) {
+                const nodeMap = {};
+                for (const node of (flow.nodes || [])) {
+                    nodeMap[node.id] = node;
+                }
+                const currentNode = nodeMap[activeExecution.currentNodeId];
+
+                if (currentNode && (currentNode.type === 'send_interactive' || currentNode.type === 'send_interactive_list')) {
+                    let replyId = null;
+
+                    // Get reply ID from message metadata (button_reply or list_reply)
+                    if (message?.metadata?.button_reply) {
+                        replyId = message.metadata.button_reply.id;
+                    } else if (message?.metadata?.list_reply) {
+                        replyId = message.metadata.list_reply.id;
+                    }
+
+                    // Fallback to text matching
+                    if (!replyId && text) {
+                        const lowerText = text.toLowerCase().trim();
+                        if (currentNode.type === 'send_interactive') {
+                            const buttons = currentNode.config?.buttons || [];
+                            const btnIdx = buttons.findIndex(btn => btn.toLowerCase().trim() === lowerText);
+                            if (btnIdx !== -1) {
+                                replyId = `btn_${btnIdx}`;
+                            }
+                        } else if (currentNode.type === 'send_interactive_list') {
+                            const listItems = currentNode.config?.listItems || [];
+                            const itemIdx = listItems.findIndex(item => item.toLowerCase().trim() === lowerText);
+                            if (itemIdx !== -1) {
+                                replyId = `item_${itemIdx}`;
+                            }
+                        }
+                    }
+
+                    if (replyId) {
+                        logger.info(`Resuming bot flow "${flow.name}" from node ${currentNode.id} on button/item reply "${replyId}"`);
+                        resumeFlow(flow, activeExecution, replyId, { waba, phoneNumberId, chat, message, text })
+                            .catch(err => logger.error(`Bot flow resume error for "${flow.name}":`, err.message));
+                        return; // Resumed successfully, stop processing further flows
+                    } else {
+                        // Customer sent something else: stop current flow execution so we don't lock future executions
+                        activeExecution.status = 'stopped';
+                        activeExecution.completedAt = new Date();
+                        await activeExecution.save();
+                        logger.info(`Terminated active flow "${flow.name}" because customer sent a non-button reply: "${text}"`);
+                    }
+                }
+            }
+        }
+
         // Fetch all enabled flows
         const flows = await BotFlow.find({ isEnabled: true }).lean();
         if (!flows.length) return;
@@ -206,6 +266,7 @@ async function executeFlow(flow, context) {
         const visited = new Set();
         let totalSteps = 0;
         const maxSteps = 50;
+        let isPaused = false;
 
         async function walkNode(nodeId) {
             if (!nodeId || totalSteps >= maxSteps) return;
@@ -241,6 +302,15 @@ async function executeFlow(flow, context) {
                         }
                         return;
                     }
+
+                    // If interactive node, pause execution at this node
+                    if (node.type === 'send_interactive' || node.type === 'send_interactive_list') {
+                        isPaused = true;
+                        execution.status = 'running';
+                        execution.currentNodeId = node.id;
+                        await execution.save();
+                        return;
+                    }
                 } catch (nodeErr) {
                     logger.error(`Bot flow "${flow.name}" node "${node.type}" (${node.id}) error: ${nodeErr.message}`);
                     execution.executionLog.push({
@@ -262,8 +332,127 @@ async function executeFlow(flow, context) {
 
         await walkNode(triggerNode.id);
 
-        await finishExecution(execution, 'completed');
-        logger.info(`Bot flow "${flow.name}" completed for chat ${chat._id}`);
+        if (!isPaused) {
+            await finishExecution(execution, 'completed');
+            logger.info(`Bot flow "${flow.name}" completed for chat ${chat._id}`);
+        } else {
+            logger.info(`Bot flow "${flow.name}" paused at node ${execution.currentNodeId} for chat ${chat._id}`);
+        }
+
+    } catch (err) {
+        execution.executionLog.push({
+            nodeId: execution.currentNodeId || 'unknown',
+            action: 'error',
+            result: { error: err.message },
+            timestamp: new Date(),
+        });
+        await finishExecution(execution, 'failed');
+        throw err;
+    }
+}
+
+/**
+ * Resume execution of a paused bot flow from a specific button or item reply edge.
+ */
+async function resumeFlow(flow, execution, replyId, context) {
+    const { waba, phoneNumberId, chat, message, text } = context;
+    const nodeMap = {};
+    const edgeMap = {}; // source -> [edges]
+
+    // Build lookup maps
+    for (const node of (flow.nodes || [])) {
+        nodeMap[node.id] = node;
+    }
+    for (const edge of (flow.edges || [])) {
+        if (!edgeMap[edge.source]) edgeMap[edge.source] = [];
+        edgeMap[edge.source].push(edge);
+    }
+
+    try {
+        const currentNodeId = execution.currentNodeId;
+        const edges = edgeMap[currentNodeId] || [];
+        
+        // Find the edge originating from the interactive node that matches the button/item ID
+        const matchedEdge = edges.find(e => e.sourceHandle === replyId);
+        
+        if (!matchedEdge) {
+            logger.warn(`No edge found matching sourceHandle ${replyId} on node ${currentNodeId} in flow ${flow.name}`);
+            await finishExecution(execution, 'completed');
+            return;
+        }
+
+        // Start walking from the target node of the matched edge
+        const visited = new Set();
+        let totalSteps = 0;
+        const maxSteps = 50;
+        let isPaused = false;
+
+        async function walkNode(nodeId) {
+            if (!nodeId || totalSteps >= maxSteps) return;
+            if (visited.has(nodeId)) {
+                logger.warn(`Bot flow "${flow.name}": cycle detected at node ${nodeId}`);
+                return;
+            }
+            visited.add(nodeId);
+            totalSteps++;
+
+            const node = nodeMap[nodeId];
+            if (!node) return;
+
+            // Execute node action
+            try {
+                const result = await executeNode(node, { waba, phoneNumberId, chat, message, text, flow });
+                execution.executionLog.push({
+                    nodeId: node.id,
+                    action: node.type,
+                    result: result,
+                    timestamp: new Date(),
+                });
+                execution.currentNodeId = node.id;
+
+                if (node.type === 'condition' || node.type === 'working_hours_condition') {
+                    const nodeEdges = edgeMap[nodeId] || [];
+                    const branch = result?.branch || 'yes';
+                    const matchedNodeEdge = nodeEdges.find(e => e.sourceHandle === branch) || nodeEdges[0];
+                    if (matchedNodeEdge) {
+                        await walkNode(matchedNodeEdge.target);
+                    }
+                    return;
+                }
+
+                if (node.type === 'send_interactive' || node.type === 'send_interactive_list') {
+                    isPaused = true;
+                    execution.status = 'running';
+                    execution.currentNodeId = node.id;
+                    await execution.save();
+                    return;
+                }
+            } catch (nodeErr) {
+                logger.error(`Bot flow "${flow.name}" node "${node.type}" (${node.id}) error: ${nodeErr.message}`);
+                execution.executionLog.push({
+                    nodeId: node.id,
+                    action: node.type,
+                    result: { error: nodeErr.message },
+                    timestamp: new Date(),
+                });
+            }
+
+            // Follow ALL edges from this node
+            const nodeEdges = edgeMap[nodeId] || [];
+            for (const edge of nodeEdges) {
+                await walkNode(edge.target);
+            }
+        }
+
+        // Run from the matched edge's target
+        await walkNode(matchedEdge.target);
+
+        if (!isPaused) {
+            await finishExecution(execution, 'completed');
+            logger.info(`Bot flow "${flow.name}" completed for chat ${chat._id}`);
+        } else {
+            logger.info(`Bot flow "${flow.name}" paused at node ${execution.currentNodeId} for chat ${chat._id}`);
+        }
 
     } catch (err) {
         execution.executionLog.push({
@@ -450,17 +639,64 @@ async function executeNode(node, context) {
         }
 
         case 'close_conversation': {
-            const Chat = require('../models/Chat');
-            await Chat.findByIdAndUpdate(chat._id, { status: 'closed' });
+            const ChatModel = require('../models/Chat');
+            const closedAt = new Date();
+            await ChatModel.findByIdAndUpdate(chat._id, { status: 'closed', closedAt });
+            
+            const populatedChat = await ChatModel.findById(chat._id)
+                .populate('contactId')
+                .populate('assignedTo', 'name phone')
+                .populate('wabaId', 'businessName phoneNumbers')
+                .populate('tags', 'name color')
+                .lean();
+
+            try {
+                const { getIO } = require('../websocket/socket.server');
+                const io = getIO();
+                io.emit('chat:update', { 
+                    chatId: chat._id.toString(), 
+                    chat: populatedChat 
+                });
+            } catch (e) {
+                logger.warn('Socket emit failed for bot close:', e.message);
+            }
             logger.info(`Bot closed conversation ${chat._id}`);
             return { closed: true };
         }
 
         case 'opt_out': {
             const Contact = require('../models/Contact');
+            const ChatModel = require('../models/Chat');
             if (chat.contactId) {
-                await Contact.findByIdAndUpdate(chat.contactId, { optedOut: true });
+                await Contact.findByIdAndUpdate(chat.contactId, { 
+                    isOptedOut: true,
+                    optedOutAt: new Date()
+                });
             }
+            
+            // Close the chat conversation as well
+            const closedAt = new Date();
+            await ChatModel.findByIdAndUpdate(chat._id, { status: 'closed', closedAt });
+
+            const populatedChat = await ChatModel.findById(chat._id)
+                .populate('contactId')
+                .populate('assignedTo', 'name phone')
+                .populate('wabaId', 'businessName phoneNumbers')
+                .populate('tags', 'name color')
+                .lean();
+
+            try {
+                const { getIO } = require('../websocket/socket.server');
+                const io = getIO();
+                io.emit('chat:update', { 
+                    chatId: chat._id.toString(), 
+                    chat: populatedChat 
+                });
+            } catch (e) {
+                logger.warn('Socket emit failed for bot opt-out:', e.message);
+            }
+
+            logger.info(`Bot opted out contact ${chat.contactId} and closed conversation ${chat._id}`);
             return { optedOut: true };
         }
 

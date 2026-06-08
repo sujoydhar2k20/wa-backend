@@ -247,6 +247,28 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
         } catch (err) {
             logger.error(`Failed to process media ${msg.type} for message ${msg.id}:`, err);
         }
+    } else if (msg.type === 'interactive') {
+        const interactive = msg.interactive;
+        if (interactive) {
+            if (interactive.type === 'button_reply' && interactive.button_reply) {
+                messageData.text = interactive.button_reply.title;
+                messageData.metadata = {
+                    button_reply: {
+                        id: interactive.button_reply.id,
+                        title: interactive.button_reply.title
+                    }
+                };
+            } else if (interactive.type === 'list_reply' && interactive.list_reply) {
+                messageData.text = interactive.list_reply.title;
+                messageData.metadata = {
+                    list_reply: {
+                        id: interactive.list_reply.id,
+                        title: interactive.list_reply.title,
+                        description: interactive.list_reply.description
+                    }
+                };
+            }
+        }
     }
     // Add other types as needed
 
@@ -369,7 +391,7 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
     }
 
     // Bot flow execution (fire-and-forget)
-    const msgText = msg.type === 'text' ? msg.text?.body : '';
+    const msgText = msg.type === 'text' ? msg.text?.body : (msg.type === 'interactive' ? messageData.text : '');
     botService.processIncomingMessage({
         waba, phoneNumberId, chat, message, text: msgText || '',
     }).catch(e => logger.error('Bot execution error:', e.message));
