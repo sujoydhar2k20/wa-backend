@@ -6,6 +6,7 @@ const { authenticate, requireAdmin } = require('../middleware/auth.middleware');
 router.use(authenticate);
 router.get('/', broadcastsController.list);
 router.post('/', requireAdmin, broadcastsController.create);
+router.post('/bulk-delete', requireAdmin, broadcastsController.bulkDelete);
 router.get('/stats/today', broadcastsController.getTodayStats);
 router.get('/status-counts', broadcastsController.getStatusCounts);
 router.get('/:id', broadcastsController.get);

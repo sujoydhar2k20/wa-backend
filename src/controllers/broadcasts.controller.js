@@ -341,6 +341,26 @@ async function getStatusCounts(req, res, next) {
     }
 }
 
-module.exports = { list, create, get, getStats, getTodayStats, getStatusCounts, send, test, getMessages, getBatches };
+async function bulkDelete(req, res, next) {
+    try {
+        const { ids } = req.body;
+        if (!Array.isArray(ids) || ids.length === 0) {
+            return res.status(400).json({ success: false, message: 'Invalid or empty IDs list' });
+        }
+
+        await Promise.all([
+            Broadcast.deleteMany({ _id: { $in: ids } }),
+            BroadcastBatch.deleteMany({ broadcastId: { $in: ids } }),
+            BroadcastMessage.deleteMany({ broadcastId: { $in: ids } })
+        ]);
+
+        res.json({ success: true });
+    } catch (e) {
+        next(e);
+    }
+}
+
+module.exports = { list, create, get, getStats, getTodayStats, getStatusCounts, send, test, getMessages, getBatches, bulkDelete };
+
 
 
