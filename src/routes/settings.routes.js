@@ -16,6 +16,7 @@ router.put('/ai', aiSettingsController.updateAiSettings);
 router.get('/ai/categories', aiCategoriesController.listCategories);
 router.post('/ai/categories', aiCategoriesController.createCategory);
 router.put('/ai/categories/:id', aiCategoriesController.updateCategory);
+router.delete('/ai/categories', aiCategoriesController.deleteAllCategories);
 router.delete('/ai/categories/:id', aiCategoriesController.deleteCategory);
 
 // Subcategory management

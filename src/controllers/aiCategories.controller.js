@@ -107,11 +107,22 @@ async function deleteSubcategory(req, res, next) {
     }
 }
 
+// Delete all categories
+async function deleteAllCategories(req, res, next) {
+    try {
+        await AiCategory.deleteMany({});
+        res.json({ success: true, message: 'All categories and subcategories deleted successfully' });
+    } catch (e) {
+        next(e);
+    }
+}
+
 module.exports = {
     listCategories,
     createCategory,
     updateCategory,
     deleteCategory,
+    deleteAllCategories,
     addSubcategory,
     updateSubcategory,
     deleteSubcategory,
