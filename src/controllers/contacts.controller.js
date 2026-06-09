@@ -98,7 +98,7 @@ async function importContacts(req, res, next) {
     try {
         if (!req.file) return res.status(400).json({ success: false, message: 'No file uploaded' });
 
-        const content = fs.readFileSync(req.file.path, 'utf8');
+        const content = req.file.buffer.toString('utf8');
         const lines = content.split('\n').filter(Boolean);
 
         // Skip header if first cell is non-numeric
@@ -127,9 +127,6 @@ async function importContacts(req, res, next) {
         }
 
         if (ops.length > 0) await Contact.bulkWrite(ops);
-
-        // Clean up file
-        try { fs.unlinkSync(req.file.path); } catch (_) { }
 
         res.json({ success: true, imported: importedCount });
     } catch (e) {

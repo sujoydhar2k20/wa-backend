@@ -34,7 +34,7 @@ async function list(req, res, next) {
                 .sort({ lastMessageAt: -1 })
                 .skip(skip)
                 .limit(parseInt(limit, 10))
-                .populate('contactId', 'name nickname profilePicture isOptedOut isBlocked')
+                .populate('contactId', 'name nameOnWhatsApp nickname profilePicture isOptedOut isBlocked')
                 .populate('assignedTo', 'name phone')
                 .populate('wabaId', 'businessName phoneNumbers')
                 .populate('tags', 'name color'),
@@ -86,7 +86,7 @@ async function search(req, res, next) {
         const namePhoneChats = await Chat.find(namePhoneFilter)
             .sort({ lastMessageAt: -1 })
             .limit(parsedLimit)
-            .populate('contactId', 'name nickname profilePicture')
+            .populate('contactId', 'name nameOnWhatsApp nickname profilePicture')
             .populate('assignedTo', 'name phone')
             .populate('wabaId', 'businessName phoneNumbers')
             .populate('tags', 'name color')
@@ -136,7 +136,7 @@ async function search(req, res, next) {
                     _id: { $in: msgChatIds.map(m => m._id) }
                 };
                 const msgChats = await Chat.find(msgChatFilter)
-                    .populate('contactId', 'name nickname profilePicture')
+                    .populate('contactId', 'name nameOnWhatsApp nickname profilePicture')
                     .populate('assignedTo', 'name phone')
                     .populate('wabaId', 'businessName phoneNumbers')
                     .populate('tags', 'name color')
@@ -175,7 +175,7 @@ async function search(req, res, next) {
 async function get(req, res, next) {
     try {
         const chat = await Chat.findById(req.params.id)
-            .populate('contactId', 'name nickname profilePicture isOptedOut isBlocked customFields')
+            .populate('contactId', 'name nameOnWhatsApp nickname profilePicture isOptedOut isBlocked customFields')
             .populate('assignedTo', 'name phone')
             .populate('wabaId', 'businessName phoneNumbers')
             .populate('collaborators', 'name phone')
@@ -206,7 +206,7 @@ async function assign(req, res, next) {
 
         // Re-fetch with full population so the response matches GET /chats/:id
         const populated = await Chat.findById(chat._id)
-            .populate('contactId', 'name nickname profilePicture isOptedOut isBlocked customFields')
+            .populate('contactId', 'name nameOnWhatsApp nickname profilePicture isOptedOut isBlocked customFields')
             .populate('assignedTo', 'name phone')
             .populate('wabaId', 'businessName phoneNumbers')
             .populate('collaborators', 'name phone')
@@ -321,7 +321,7 @@ async function close(req, res, next) {
 
         // Re-fetch with full population so the frontend keeps contact info, assignment, and tags
         const populated = await Chat.findById(chat._id)
-            .populate('contactId', 'name nickname profilePicture isOptedOut isBlocked customFields')
+            .populate('contactId', 'name nameOnWhatsApp nickname profilePicture isOptedOut isBlocked customFields')
             .populate('assignedTo', 'name phone')
             .populate('wabaId', 'businessName phoneNumbers')
             .populate('collaborators', 'name phone')
@@ -395,7 +395,7 @@ async function reopen(req, res, next) {
 
         // Re-fetch with full population so the frontend keeps contact info, assignment, and tags
         const populated = await Chat.findById(chat._id)
-            .populate('contactId', 'name nickname profilePicture isOptedOut isBlocked customFields')
+            .populate('contactId', 'name nameOnWhatsApp nickname profilePicture isOptedOut isBlocked customFields')
             .populate('assignedTo', 'name phone')
             .populate('wabaId', 'businessName phoneNumbers')
             .populate('collaborators', 'name phone')

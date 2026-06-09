@@ -516,6 +516,38 @@ async function handleStatusUpdate(statusObj) {
             } catch (emitError) {
                 logger.warn('Socket emit failed for message status:', emitError.message);
             }
+
+            // Sync status to parent Chat if this message is the latest message in the chat
+            try {
+                const latestMsg = await Message.findOne({ chatId: message.chatId }).sort({ createdAt: -1 }).select('_id');
+                if (latestMsg && latestMsg._id.toString() === message._id.toString()) {
+                    const Chat = mongoose.model('Chat');
+                    const updatedChat = await Chat.findByIdAndUpdate(
+                        message.chatId,
+                        { $set: { lastMessageStatus: status } },
+                        { new: true }
+                    )
+                    .populate('contactId', 'name nameOnWhatsApp nickname profilePicture isOptedOut isBlocked customFields')
+                    .populate('assignedTo', 'name phone')
+                    .populate('wabaId', 'businessName phoneNumbers')
+                    .populate('collaborators', 'name phone')
+                    .populate('tags', 'name color')
+                    .lean();
+
+                    if (updatedChat) {
+                        const io = getIO();
+                        io.emit('chat:update', {
+                            chatId: message.chatId.toString(),
+                            chat: {
+                                ...updatedChat,
+                                lastMessage: message.toObject ? message.toObject() : message
+                            }
+                        });
+                    }
+                }
+            } catch (chatUpdateErr) {
+                logger.error('Failed to sync lastMessageStatus to Chat:', chatUpdateErr);
+            }
         } else {
             const { BroadcastMessage, Broadcast, BroadcastListMember } = require('../models');
             const broadcastMessage = await BroadcastMessage.findOneAndUpdate(
