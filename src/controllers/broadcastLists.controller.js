@@ -83,61 +83,97 @@ async function importMembers(req, res, next) {
         const phoneColIdx = req.body.phoneColumn !== undefined ? parseInt(req.body.phoneColumn, 10) : 0;
         const nameColIdx = req.body.nameColumn !== undefined ? parseInt(req.body.nameColumn, 10) : -1;
 
-        let importedCount = 0;
-        const ops = [];
+        // Step 1: Parse data lines to extract unique phone numbers and mapped names
+        const csvContacts = new Map(); // phoneNumber -> name
         for (const line of dataLines) {
-            const cols = line.split(',');
+            const cols = line.split(',').map(c => c.trim().replace(/^"|"$/g, ''));
             if (cols.length <= phoneColIdx) continue;
 
-            const phoneNumber = cols[phoneColIdx]?.trim().replace(/\D/g, '');
+            const phoneNumber = cols[phoneColIdx]?.replace(/\D/g, '');
             if (!phoneNumber || phoneNumber.length < 7) continue;
 
-            let contact = await Contact.findOne({ phoneNumber });
+            const name = nameColIdx !== -1 && cols.length > nameColIdx ? cols[nameColIdx] : '';
 
-            // Auto-create or update Contact if Name column was mapped
-            if (nameColIdx !== -1 && cols.length > nameColIdx) {
-                const name = cols[nameColIdx]?.trim();
-                if (name) {
-                    if (contact) {
-                        // Optionally update name if blank, but typically we keep existing 
-                        if (!contact.name || contact.name === phoneNumber) {
-                            contact.name = name;
-                            await contact.save();
-                        }
-                    } else {
-                        // Create brand new contact
-                        contact = new Contact({
-                            phoneNumber,
-                            waId: phoneNumber,
-                            name,
-                        });
-                        await contact.save();
-                    }
-                }
+            // If we have a name, prefer to store it. Otherwise, store empty if not present.
+            if (!csvContacts.has(phoneNumber) || (name && !csvContacts.get(phoneNumber))) {
+                csvContacts.set(phoneNumber, name);
             }
+        }
 
-            ops.push({
+        const phoneNumbers = Array.from(csvContacts.keys());
+        if (phoneNumbers.length === 0) {
+            const memberCount = await BroadcastListMember.countDocuments({ broadcastListId: broadcastList._id });
+            return res.json({ success: true, imported: 0, total: memberCount });
+        }
+
+        // Step 2: Fetch existing contacts in a single query
+        const existingContacts = await Contact.find({ phoneNumber: { $in: phoneNumbers } });
+        const existingContactsMap = new Map(existingContacts.map(c => [c.phoneNumber, c]));
+
+        // Step 3: Prepare bulk operations for Contact model
+        const contactOps = [];
+        for (const [phoneNumber, name] of csvContacts.entries()) {
+            const contact = existingContactsMap.get(phoneNumber);
+            if (!contact) {
+                // Brand new contact
+                contactOps.push({
+                    updateOne: {
+                        filter: { phoneNumber },
+                        update: {
+                            $setOnInsert: { phoneNumber, waId: phoneNumber },
+                            $set: { name: name || phoneNumber }
+                        },
+                        upsert: true
+                    }
+                });
+            } else if (name) {
+                // Existing contact - update name to match Excel upload (client requirement)
+                contactOps.push({
+                    updateOne: {
+                        filter: { phoneNumber },
+                        update: {
+                            $set: { name }
+                        }
+                    }
+                });
+            }
+        }
+
+        if (contactOps.length > 0) {
+            await Contact.bulkWrite(contactOps);
+        }
+
+        // Step 4: Retrieve all contact IDs (including newly inserted ones) to build contactIdMap
+        const allContacts = await Contact.find({ phoneNumber: { $in: phoneNumbers } }).select('_id phoneNumber');
+        const contactIdMap = new Map(allContacts.map(c => [c.phoneNumber, c._id]));
+
+        // Step 5: Prepare bulk operations for BroadcastListMember model
+        const memberOps = [];
+        for (const phoneNumber of phoneNumbers) {
+            const contactId = contactIdMap.get(phoneNumber);
+            memberOps.push({
                 updateOne: {
                     filter: { broadcastListId: broadcastList._id, phoneNumber },
                     update: {
                         $set: {
                             broadcastListId: broadcastList._id,
                             phoneNumber,
-                            ...(contact ? { contactId: contact._id } : {}),
-                        },
+                            ...(contactId ? { contactId } : {}),
+                        }
                     },
-                    upsert: true,
-                },
+                    upsert: true
+                }
             });
-            importedCount++;
         }
 
-        if (ops.length > 0) await BroadcastListMember.bulkWrite(ops);
+        if (memberOps.length > 0) {
+            await BroadcastListMember.bulkWrite(memberOps);
+        }
 
         const memberCount = await BroadcastListMember.countDocuments({ broadcastListId: broadcastList._id });
         await BroadcastList.findByIdAndUpdate(broadcastList._id, { memberCount, importedFile: req.file.originalname, source: 'import' });
 
-        res.json({ success: true, imported: importedCount, total: memberCount });
+        res.json({ success: true, imported: phoneNumbers.length, total: memberCount });
     } catch (e) {
         next(e);
     }
@@ -172,9 +208,7 @@ async function addMembers(req, res, next) {
             return res.status(400).json({ success: false, message: 'Invalid payload: expected members array' });
         }
 
-        let importedCount = 0;
-        const ops = [];
-
+        const inputContacts = new Map(); // phoneNumber -> name
         for (const member of members) {
             const rawPhone = member.phoneNumber;
             if (!rawPhone) continue;
@@ -182,54 +216,85 @@ async function addMembers(req, res, next) {
             const phoneNumber = rawPhone.toString().trim().replace(/\D/g, '');
             if (phoneNumber.length < 7) continue;
 
-            let contact = await Contact.findOne({ phoneNumber });
-
-            const name = member.name?.trim() || '';
-            if (name) {
-                if (contact) {
-                    if (!contact.name || contact.name === phoneNumber) {
-                        contact.name = name;
-                        await contact.save();
-                    }
-                } else {
-                    contact = new Contact({
-                        phoneNumber,
-                        waId: phoneNumber,
-                        name,
-                    });
-                    await contact.save();
-                }
-            } else if (!contact) {
-                contact = new Contact({
-                    phoneNumber,
-                    waId: phoneNumber,
-                    name: phoneNumber,
-                });
-                await contact.save();
+            const name = member.name?.toString().trim() || '';
+            if (!inputContacts.has(phoneNumber) || (name && !inputContacts.get(phoneNumber))) {
+                inputContacts.set(phoneNumber, name);
             }
+        }
 
-            ops.push({
+        const phoneNumbers = Array.from(inputContacts.keys());
+        if (phoneNumbers.length === 0) {
+            const memberCount = await BroadcastListMember.countDocuments({ broadcastListId: broadcastList._id });
+            return res.json({ success: true, added: 0, total: memberCount });
+        }
+
+        // Fetch existing contacts
+        const existingContacts = await Contact.find({ phoneNumber: { $in: phoneNumbers } });
+        const existingContactsMap = new Map(existingContacts.map(c => [c.phoneNumber, c]));
+
+        // Prepare Contact bulk operations
+        const contactOps = [];
+        for (const [phoneNumber, name] of inputContacts.entries()) {
+            const contact = existingContactsMap.get(phoneNumber);
+            if (!contact) {
+                contactOps.push({
+                    updateOne: {
+                        filter: { phoneNumber },
+                        update: {
+                            $setOnInsert: { phoneNumber, waId: phoneNumber },
+                            $set: { name: name || phoneNumber }
+                        },
+                        upsert: true
+                    }
+                });
+            } else if (name) {
+                // Overwrite name if provided (client requirement)
+                contactOps.push({
+                    updateOne: {
+                        filter: { phoneNumber },
+                        update: {
+                            $set: { name }
+                        }
+                    }
+                });
+            }
+        }
+
+        if (contactOps.length > 0) {
+            await Contact.bulkWrite(contactOps);
+        }
+
+        // Retrieve contact IDs
+        const allContacts = await Contact.find({ phoneNumber: { $in: phoneNumbers } }).select('_id phoneNumber');
+        const contactIdMap = new Map(allContacts.map(c => [c.phoneNumber, c._id]));
+
+        // Prepare BroadcastListMember bulk operations
+        const memberOps = [];
+        for (const phoneNumber of phoneNumbers) {
+            const contactId = contactIdMap.get(phoneNumber);
+            memberOps.push({
                 updateOne: {
                     filter: { broadcastListId: broadcastList._id, phoneNumber },
                     update: {
                         $set: {
                             broadcastListId: broadcastList._id,
                             phoneNumber,
-                            ...(contact ? { contactId: contact._id } : {}),
-                        },
+                            ...(contactId ? { contactId } : {}),
+                        }
                     },
-                    upsert: true,
-                },
+                    upsert: true
+                }
             });
-            importedCount++;
         }
 
-        if (ops.length > 0) await BroadcastListMember.bulkWrite(ops);
+        if (memberOps.length > 0) {
+            await BroadcastListMember.bulkWrite(memberOps);
+        }
 
         const memberCount = await BroadcastListMember.countDocuments({ broadcastListId: broadcastList._id });
         await BroadcastList.findByIdAndUpdate(broadcastList._id, { memberCount });
 
-        res.json({ success: true, added: importedCount, total: memberCount });
+        res.json({ success: true, added: phoneNumbers.length, total: memberCount });
     } catch (e) {
         next(e);
     }
