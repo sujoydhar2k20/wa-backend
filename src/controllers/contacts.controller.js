@@ -139,8 +139,21 @@ async function importContacts(req, res, next) {
 
 async function remove(req, res, next) {
     try {
-        const contact = await Contact.findByIdAndDelete(req.params.id);
+        const contactId = req.params.id;
+        const contact = await Contact.findById(contactId);
         if (!contact) return res.status(404).json({ success: false, message: 'Contact not found' });
+
+        const { Chat, Message } = require('../models');
+        
+        // Find all chats for this contact
+        const chats = await Chat.find({ contactId });
+        const chatIds = chats.map(c => c._id);
+
+        // Cascading delete messages, chats, and finally the contact
+        await Message.deleteMany({ chatId: { $in: chatIds } });
+        await Chat.deleteMany({ contactId });
+        await Contact.findByIdAndDelete(contactId);
+
         res.json({ success: true });
     } catch (e) {
         next(e);
@@ -153,7 +166,18 @@ async function bulkDelete(req, res, next) {
         if (!Array.isArray(ids) || ids.length === 0) {
             return res.status(400).json({ success: false, message: 'Invalid or empty IDs list' });
         }
+
+        const { Chat, Message } = require('../models');
+
+        // Find all chats for these contacts
+        const chats = await Chat.find({ contactId: { $in: ids } });
+        const chatIds = chats.map(c => c._id);
+
+        // Cascading delete messages, chats, and finally the contacts
+        await Message.deleteMany({ chatId: { $in: chatIds } });
+        await Chat.deleteMany({ contactId: { $in: ids } });
         await Contact.deleteMany({ _id: { $in: ids } });
+
         res.json({ success: true });
     } catch (e) {
         next(e);
