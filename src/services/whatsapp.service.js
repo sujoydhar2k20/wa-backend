@@ -48,6 +48,11 @@ async function request(wabaId, method, path, data = null) {
   } catch (error) {
     if (error.response) {
       logger.error(`WhatsApp API Error: ${JSON.stringify(error.response.data)}`);
+      const metaMsg = error.response.data?.error?.message;
+      if (metaMsg) {
+        error.message = `Meta API Error: ${metaMsg}`;
+        error.statusCode = error.response.status || 400;
+      }
     } else {
       logger.error(`WhatsApp API Request Error: ${error.message}`);
     }
