@@ -5,7 +5,7 @@
  * When a trigger matches, executes action nodes in sequence.
  */
 
-const { BotFlow, BotExecution, Chat, User, Message } = require('../models');
+const { BotFlow, BotExecution, Chat, User, Message, Contact } = require('../models');
 const whatsappService = require('./whatsapp.service');
 const { logger } = require('../utils/logger');
 
@@ -224,6 +224,51 @@ function evaluateTrigger(trigger, { chat, message, text, isNewChat }) {
         default:
             return { matched: false };
     }
+}
+
+/**
+ * Resolves template variables in the message text.
+ * Supported variables:
+ * - {{agent_name}}, {{staff_name}}, {{agent.name}}: Assigned agent's name (fallback: "our representative")
+ * - {{contact_name}}, {{contact.name}}, {{customer_name}}: Customer's name (fallback: chat.name or contact's name)
+ */
+async function resolveMessageTemplate(textTemplate, chat) {
+    if (!textTemplate) return '';
+    let resolvedText = textTemplate;
+
+    // Fetch assigned agent name if present
+    let agentName = 'our representative';
+    if (chat.assignedTo) {
+        try {
+            const agentId = chat.assignedTo._id || chat.assignedTo;
+            const agent = await User.findById(agentId).select('name').lean();
+            if (agent && agent.name) {
+                agentName = agent.name;
+            }
+        } catch (err) {
+            logger.error('Error fetching agent for template resolution:', err.message);
+        }
+    }
+
+    // Fetch customer/contact name if present
+    let contactName = chat.name || '';
+    if (chat.contactId) {
+        try {
+            const contactId = chat.contactId._id || chat.contactId;
+            const contact = await Contact.findById(contactId).select('name nameOnWhatsApp').lean();
+            if (contact) {
+                contactName = contact.name || contact.nameOnWhatsApp || '';
+            }
+        } catch (err) {
+            logger.error('Error fetching contact for template resolution:', err.message);
+        }
+    }
+
+    // Replace variables
+    resolvedText = resolvedText.replace(/\{\{(agent_name|staff_name|agent\.name)\}\}/g, agentName);
+    resolvedText = resolvedText.replace(/\{\{(contact_name|contact\.name|customer_name)\}\}/g, contactName);
+
+    return resolvedText;
 }
 
 /**
@@ -477,13 +522,15 @@ async function executeNode(node, context) {
         case 'send_message': {
             if (!config.text && !config.imageUrl) return { skipped: true, reason: 'No message text or image configured' };
 
+            const resolvedText = await resolveMessageTemplate(config.text || '', chat);
+
             // If an image URL is provided, send as media message
             if (config.imageUrl) {
                 const waResult = await whatsappService.sendMediaMessage(
-                    waba._id, phoneNumberId, chat.waId, 'image', config.imageUrl, config.text || ''
+                    waba._id, phoneNumberId, chat.waId, 'image', config.imageUrl, resolvedText
                 );
                 const msgId = waResult?.messages?.[0]?.id;
-                await saveOutboundMessage(chat, waba, phoneNumberId, msgId, 'image', config.text || '', {
+                await saveOutboundMessage(chat, waba, phoneNumberId, msgId, 'image', resolvedText, {
                     mediaUrl: config.imageUrl,
                 });
                 return { sent: true, messageId: msgId, type: 'image' };
@@ -491,10 +538,10 @@ async function executeNode(node, context) {
 
             // Plain text message
             const waResult = await whatsappService.sendTextMessage(
-                waba._id, phoneNumberId, chat.waId, config.text
+                waba._id, phoneNumberId, chat.waId, resolvedText
             );
             const msgId = waResult?.messages?.[0]?.id;
-            await saveOutboundMessage(chat, waba, phoneNumberId, msgId, 'text', config.text);
+            await saveOutboundMessage(chat, waba, phoneNumberId, msgId, 'text', resolvedText);
             return { sent: true, messageId: msgId };
         }
 
@@ -512,10 +559,13 @@ async function executeNode(node, context) {
         }
 
         case 'send_interactive': {
+            const resolvedHeader = config.headerText ? await resolveMessageTemplate(config.headerText, chat) : undefined;
+            const resolvedBody = await resolveMessageTemplate(config.bodyText || '', chat);
+
             const payload = {
                 type: 'button',
-                header: config.headerText ? { type: 'text', text: config.headerText } : undefined,
-                body: { text: config.bodyText || '' },
+                header: resolvedHeader ? { type: 'text', text: resolvedHeader } : undefined,
+                body: { text: resolvedBody },
                 action: {
                     buttons: (config.buttons || []).map((btn, i) => ({
                         type: 'reply',
@@ -527,26 +577,30 @@ async function executeNode(node, context) {
                 waba._id, phoneNumberId, chat.waId, payload
             );
             const msgId = waResult?.messages?.[0]?.id;
-            await saveOutboundMessage(chat, waba, phoneNumberId, msgId, 'interactive', config.bodyText || 'Interactive message', {
+            await saveOutboundMessage(chat, waba, phoneNumberId, msgId, 'interactive', resolvedBody || 'Interactive message', {
                 interactiveType: 'button',
-                headerText: config.headerText || '',
-                bodyText: config.bodyText || '',
+                headerText: resolvedHeader || '',
+                bodyText: resolvedBody || '',
                 buttons: config.buttons || [],
             });
             return { sent: true, messageId: msgId };
         }
 
         case 'send_interactive_list': {
+            const resolvedHeader = config.headerText ? await resolveMessageTemplate(config.headerText, chat) : undefined;
+            const resolvedBody = await resolveMessageTemplate(config.bodyText || '', chat);
+            const resolvedButton = config.buttonText ? await resolveMessageTemplate(config.buttonText, chat) : 'View Options';
+
             const listItems = (config.listItems || []).map((item, i) => ({
                 id: `item_${i}`,
                 title: item.substring(0, 24),
             }));
             const payload = {
                 type: 'list',
-                header: config.headerText ? { type: 'text', text: config.headerText } : undefined,
-                body: { text: config.bodyText || '' },
+                header: resolvedHeader ? { type: 'text', text: resolvedHeader } : undefined,
+                body: { text: resolvedBody },
                 action: {
-                    button: config.buttonText || 'View Options',
+                    button: resolvedButton.substring(0, 20),
                     sections: [{
                         title: 'Options',
                         rows: listItems,
@@ -557,11 +611,11 @@ async function executeNode(node, context) {
                 waba._id, phoneNumberId, chat.waId, payload
             );
             const msgId = waResult?.messages?.[0]?.id;
-            await saveOutboundMessage(chat, waba, phoneNumberId, msgId, 'interactive', config.bodyText || 'List message', {
+            await saveOutboundMessage(chat, waba, phoneNumberId, msgId, 'interactive', resolvedBody || 'List message', {
                 interactiveType: 'list',
-                headerText: config.headerText || '',
-                bodyText: config.bodyText || '',
-                buttonText: config.buttonText || 'View Options',
+                headerText: resolvedHeader || '',
+                bodyText: resolvedBody || '',
+                buttonText: resolvedButton || 'View Options',
                 listItems: config.listItems || [],
             });
             return { sent: true, messageId: msgId };
@@ -615,10 +669,10 @@ async function executeNode(node, context) {
                 }).select('_id').lean();
 
                 if (staffMembers.length > 0) {
-                    const Chat = require('../models/Chat');
+                    const ChatModel = require('../models/Chat');
                     const chatCounts = await Promise.all(
                         staffMembers.map(async (staff) => {
-                            const count = await Chat.countDocuments({
+                            const count = await ChatModel.countDocuments({
                                 assignedTo: staff._id,
                                 status: { $ne: 'closed' },
                             });
@@ -631,9 +685,31 @@ async function executeNode(node, context) {
             }
 
             if (agentId) {
-                const Chat = require('../models/Chat');
-                await Chat.findByIdAndUpdate(chat._id, { assignedTo: agentId });
+                const ChatModel = require('../models/Chat');
+                await ChatModel.findByIdAndUpdate(chat._id, { assignedTo: agentId });
+                chat.assignedTo = agentId; // Update in-memory reference for subsequent nodes
+
                 logger.info(`Bot assigned chat ${chat._id} to agent ${agentId}`);
+
+                // Emit socket event to update the frontend in real-time
+                try {
+                    const populatedChat = await ChatModel.findById(chat._id)
+                        .populate('contactId', 'name nickname profilePicture isOptedOut isBlocked customFields')
+                        .populate('assignedTo', 'name phone')
+                        .populate('wabaId', 'businessName phoneNumbers')
+                        .populate('collaborators', 'name phone')
+                        .populate('tags', 'name color')
+                        .lean();
+
+                    const { getIO } = require('../websocket/socket.server');
+                    const io = getIO();
+                    io.emit('chat:update', {
+                        chatId: chat._id.toString(),
+                        chat: populatedChat
+                    });
+                } catch (e) {
+                    logger.warn('Socket emit failed for bot agent assign:', e.message);
+                }
             }
             return { assigned: true, agentId: agentId?.toString() };
         }

@@ -410,13 +410,19 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
             message
         });
 
-        await chat.populate('contactId', 'name nameOnWhatsApp profilePicture');
+        const populatedChat = await Chat.findById(chat._id)
+            .populate('contactId', 'name nameOnWhatsApp nickname profilePicture isOptedOut isBlocked customFields')
+            .populate('assignedTo', 'name phone')
+            .populate('wabaId', 'businessName phoneNumbers')
+            .populate('collaborators', 'name phone')
+            .populate('tags', 'name color')
+            .lean();
 
         // Also notify about chat update (unread count, last msg)
         io.emit('chat:update', {
-            chatId: chat._id,
+            chatId: chat._id.toString(),
             chat: {
-                ...chat.toObject(),
+                ...populatedChat,
                 lastMessage: message
             }
         });

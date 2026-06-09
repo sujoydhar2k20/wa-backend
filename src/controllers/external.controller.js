@@ -43,6 +43,13 @@ const sendTemplate = async (req, res) => {
             });
         }
 
+        // Block sending to blocked or opted-out contacts
+        if (contact.isBlocked || contact.isOptedOut) {
+            return res.status(403).json({
+                error: 'Cannot send messages to blocked or opted-out contacts.'
+            });
+        }
+
         // Send template via WhatsApp Service
         const waResult = await whatsappService.sendTemplateMessage(
             waba._id,

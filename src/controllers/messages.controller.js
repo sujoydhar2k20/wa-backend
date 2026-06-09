@@ -154,6 +154,14 @@ async function send(req, res, next) {
         const chat = await Chat.findById(chatId).populate('contactId');
         if (!chat) return res.status(404).json({ success: false, message: 'Chat not found' });
 
+        // Block sending to blocked or opted-out contacts
+        if (chat.contactId && (chat.contactId.isBlocked || chat.contactId.isOptedOut)) {
+            return res.status(403).json({
+                success: false,
+                message: 'Cannot send messages to blocked or opted-out contacts.',
+            });
+        }
+
         // Enforce 24-hour customer service window rule for non-template messages
         if (type !== 'template') {
             const now = new Date();
@@ -180,13 +188,6 @@ async function send(req, res, next) {
             waResult = await whatsappService.sendTextMessage(chat.wabaId, chat.phoneNumberId, chat.waId, text, metaMessageIdToReply);
         } else if (type === 'template') {
             if (!templateName) return res.status(400).json({ success: false, message: 'templateName is required for template messages' });
-            
-            if (chat.contactId && (chat.contactId.isBlocked || chat.contactId.isOptedOut)) {
-                return res.status(403).json({
-                    success: false,
-                    message: 'Cannot send template messages to blocked or opted-out contacts.',
-                });
-            }
 
             // Look up the template from DB to store its components for chat preview
             const Template = require('../models/Template');
@@ -486,6 +487,14 @@ async function retry(req, res, next) {
 
         const chat = await Chat.findById(message.chatId).populate('contactId');
         if (!chat) return res.status(404).json({ success: false, message: 'Chat not found' });
+
+        // Block retrying to blocked or opted-out contacts
+        if (chat.contactId && (chat.contactId.isBlocked || chat.contactId.isOptedOut)) {
+            return res.status(403).json({
+                success: false,
+                message: 'Cannot send messages to blocked or opted-out contacts.',
+            });
+        }
 
         const type = message.type;
         const mediaUrl = message.mediaUrl;

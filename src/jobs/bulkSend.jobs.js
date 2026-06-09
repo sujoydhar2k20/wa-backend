@@ -12,9 +12,32 @@ module.exports = function (agenda) {
     const whatsappService = require('../services/whatsapp.service');
     const { getIO } = require('../websocket/socket.server');
 
-    const chat = await Chat.findById(chatId);
+    const chat = await Chat.findById(chatId).populate('contactId', 'isBlocked isOptedOut');
     if (!chat) {
       logger.error(`[BulkSend] Chat ${chatId} not found, aborting job`);
+      return;
+    }
+
+    // Block sending to blocked or opted-out contacts
+    if (chat.contactId && (chat.contactId.isBlocked || chat.contactId.isOptedOut)) {
+      const reason = chat.contactId.isBlocked ? 'blocked' : 'opted-out';
+      logger.info(`[BulkSend] Chat ${chatId} contact is ${reason}, marking all messages as failed`);
+
+      for (const msgId of messageIds) {
+        const message = await Message.findById(msgId);
+        if (message && message.status === 'queued') {
+          message.status = 'failed';
+          message.errorMessage = `Cannot send messages to ${reason} contacts.`;
+          await message.save();
+
+          getIO().emit('message:status', {
+            chatId: chat._id.toString(),
+            messageId: message._id.toString(),
+            status: 'failed',
+            errorMessage: message.errorMessage
+          });
+        }
+      }
       return;
     }
 

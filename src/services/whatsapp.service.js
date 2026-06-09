@@ -1,6 +1,7 @@
 const axios = require('axios');
 const Waba = require('../models/Waba');
 const Template = require('../models/Template');
+const Contact = require('../models/Contact');
 const config = require('../config');
 const { logger } = require('../utils/logger');
 
@@ -15,6 +16,25 @@ async function getWaba(wabaId) {
 async function getAccessToken(wabaId) {
   const waba = await getWaba(wabaId);
   return waba.accessToken;
+}
+
+/**
+ * Guard: check if the recipient contact is blocked or opted-out.
+ * Throws a 403-status error if so, preventing the Meta API call.
+ * Silently passes through if the contact is not found in the DB
+ * (e.g. first outbound to an unknown number).
+ */
+async function checkContactBlockedOrOptedOut(to) {
+  const sanitized = to.replace(/\D/g, '');
+  const contact = await Contact.findOne({
+    $or: [{ waId: sanitized }, { phoneNumber: sanitized }]
+  }).select('isBlocked isOptedOut').lean();
+  if (contact && (contact.isBlocked || contact.isOptedOut)) {
+    const reason = contact.isBlocked ? 'blocked' : 'opted-out';
+    const err = new Error(`Cannot send messages to ${reason} contacts.`);
+    err.statusCode = 403;
+    throw err;
+  }
 }
 
 async function request(wabaId, method, path, data = null) {
@@ -37,6 +57,7 @@ async function request(wabaId, method, path, data = null) {
 }
 
 async function sendTextMessage(wabaId, phoneNumberId, to, text, replyToMessageId = null) {
+  await checkContactBlockedOrOptedOut(to);
   const path = `/${phoneNumberId}/messages`;
   const body = {
     messaging_product: 'whatsapp',
@@ -52,6 +73,7 @@ async function sendTextMessage(wabaId, phoneNumberId, to, text, replyToMessageId
 }
 
 async function sendMediaMessage(wabaId, phoneNumberId, to, type, urlOrId, caption = '', replyToMessageId = null) {
+  await checkContactBlockedOrOptedOut(to);
   const path = `/${phoneNumberId}/messages`;
   const key = type === 'document' ? 'document' : type;
   const isId = !urlOrId.startsWith('http');
@@ -72,6 +94,7 @@ async function sendMediaMessage(wabaId, phoneNumberId, to, type, urlOrId, captio
 }
 
 async function sendTemplateMessage(wabaId, phoneNumberId, to, templateName, language = 'en', components = []) {
+  await checkContactBlockedOrOptedOut(to);
   const path = `/${phoneNumberId}/messages`;
   const body = {
     messaging_product: 'whatsapp',
@@ -84,6 +107,7 @@ async function sendTemplateMessage(wabaId, phoneNumberId, to, templateName, lang
 }
 
 async function sendInteractiveMessage(wabaId, phoneNumberId, to, interactivePayload) {
+  await checkContactBlockedOrOptedOut(to);
   const path = `/${phoneNumberId}/messages`;
   const body = {
     messaging_product: 'whatsapp',
