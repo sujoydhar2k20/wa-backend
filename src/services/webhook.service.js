@@ -521,7 +521,6 @@ async function handleStatusUpdate(statusObj) {
             try {
                 const latestMsg = await Message.findOne({ chatId: message.chatId }).sort({ createdAt: -1 }).select('_id');
                 if (latestMsg && latestMsg._id.toString() === message._id.toString()) {
-                    const Chat = mongoose.model('Chat');
                     const updatedChat = await Chat.findByIdAndUpdate(
                         message.chatId,
                         { $set: { lastMessageStatus: status } },
