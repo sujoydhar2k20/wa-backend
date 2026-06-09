@@ -42,9 +42,9 @@ function passesFilters(text, allowlist, blocklist) {
 }
 
 /**
- * Build the full system prompt by appending the category list to the user's custom prompt.
+ * Build the full system prompt by appending the category list, filter parameters, and strict JSON format schema to the user's custom prompt.
  */
-function buildSystemPrompt(basePrompt, categories) {
+function buildSystemPrompt(basePrompt, categories, filterParameters = []) {
     let categoryText = '\n\nAllowed Main Category and Sub Category:\n\n';
     categories.forEach((cat, idx) => {
         categoryText += `${idx + 1}. Main Category: ${cat.name}\n`;
@@ -54,7 +54,37 @@ function buildSystemPrompt(basePrompt, categories) {
         categoryText += '\n';
     });
 
-    return basePrompt + categoryText;
+    const allowedFilterKeys = filterParameters.map(param => 
+        param.replace(/^[&?]/, '').replace(/=$/, '')
+    );
+
+    let filterInstructions = '\nAllowed Filter Parameter Keys:\n';
+    if (allowedFilterKeys.length > 0) {
+        filterInstructions += allowedFilterKeys.map(k => `- ${k}`).join('\n') + '\n';
+    } else {
+        filterInstructions += '(None)\n';
+    }
+
+    const formatInstructions = `
+CRITICAL: You MUST respond ONLY with a valid JSON object matching the following structure. Do NOT wrap it in HTML or markdown fences other than raw text. Do NOT add any extra conversational text, prefix or suffix.
+
+JSON Schema:
+{
+  "language": "english" | "hindi" | "bengali", // Detect the language used by the customer. Use "english" if it is not one of these three.
+  "results": [
+    {
+      "category": "Matched Main Category Name from the allowed list",
+      "subcategory": "Matched Sub Category Name from the allowed list, or null if not specified",
+      // For each of the Allowed Filter Parameter Keys listed above, extract its value from the customer message if specified.
+      // If a filter parameter key is not mentioned, set its value to null.
+      // For the "purity" filter, preserve the unit if mentioned by the user (e.g. "10k", "22k"). For other filters, extract only numeric values.
+      ${allowedFilterKeys.map(k => `"${k}": "extracted value or null"`).join(',\n      ')}
+    }
+  ]
+}
+`;
+
+    return basePrompt + categoryText + filterInstructions + formatInstructions;
 }
 
 /**
@@ -109,7 +139,7 @@ async function callOpenAI(systemPrompt, userMessage) {
  * Match the AI response to category/subcategory links and build reply URLs.
  * Supports single or multiple category matches from the AI.
  */
-function buildCategoryLinks(aiResponse, categories) {
+function buildCategoryLinks(aiResponse, categories, settings) {
     const results = [];
 
     // Normalize AI response: could be { results: [...] } or single object or array
@@ -122,6 +152,10 @@ function buildCategoryLinks(aiResponse, categories) {
         items = [aiResponse];
     }
 
+    const allowedFilterKeys = (settings?.filterParameters || ['&purity=', '&size=', '&priceMax=', '&weightMax=']).map(param => 
+        param.replace(/^[&?]/, '').replace(/=$/, '')
+    );
+
     for (const item of items) {
         // Normalize keys: OpenAI may return "Main Category", "mainCategory", "main_category", etc.
         const normalized = {};
@@ -133,11 +167,13 @@ function buildCategoryLinks(aiResponse, categories) {
         const subCatName = normalized.subcategory || '';
         const filters = {};
 
-        // Extract filters (also from normalized keys)
-        if (normalized.purity != null && normalized.purity !== '' && normalized.purity !== null) filters.purity = normalized.purity;
-        if (normalized.size != null && normalized.size !== '' && normalized.size !== null) filters.size = normalized.size;
-        if (normalized.pricemax != null && normalized.pricemax !== '' && normalized.pricemax !== null) filters.priceMax = normalized.pricemax;
-        if (normalized.weightmax != null && normalized.weightmax !== '' && normalized.weightmax !== null) filters.weightMax = normalized.weightmax;
+        // Extract filters dynamically
+        for (const key of Object.keys(normalized)) {
+            const matchedKey = allowedFilterKeys.find(k => k.toLowerCase() === key.toLowerCase());
+            if (matchedKey && normalized[key] != null && normalized[key] !== '' && normalized[key] !== 'null' && normalized[key] !== null) {
+                filters[matchedKey] = normalized[key];
+            }
+        }
 
         // Find matching category
         const matchedCat = categories.find(c =>
@@ -176,32 +212,44 @@ function buildCategoryLinks(aiResponse, categories) {
 function appendFilters(baseUrl, filters) {
     if (!filters || Object.keys(filters).length === 0) return baseUrl;
 
-    const url = new URL(baseUrl);
-    for (const [key, value] of Object.entries(filters)) {
-        if (value != null && value !== '' && value !== 'null') {
-            url.searchParams.set(key, String(value));
+    try {
+        const url = new URL(baseUrl);
+        for (const [key, value] of Object.entries(filters)) {
+            if (value != null && value !== '' && value !== 'null') {
+                url.searchParams.set(key, String(value));
+            }
         }
+        return url.toString();
+    } catch (e) {
+        // Fallback for non-absolute URLs
+        let urlStr = baseUrl;
+        for (const [key, value] of Object.entries(filters)) {
+            if (value != null && value !== '' && value !== 'null') {
+                const separator = urlStr.includes('?') ? '&' : '?';
+                urlStr += `${separator}${key}=${encodeURIComponent(String(value))}`;
+            }
+        }
+        return urlStr;
     }
-    return url.toString();
 }
 
 /**
  * Build a language-appropriate reply message from the matched links.
  */
-function buildReplyMessage(links, aiResponse, language) {
+function buildReplyMessage(links, aiResponse, settings) {
     // Detect language from AI response
-    const lang = (language || aiResponse?.language || 'english').toLowerCase();
+    const lang = (aiResponse?.language || 'english').toLowerCase();
 
     const greetings = {
-        english: '✨ Here are the results for your search:',
-        hindi: '✨ यहाँ आपकी खोज के नतीजे हैं:',
-        bengali: '✨ আপনার অনুসন্ধানের ফলাফল এখানে:',
+        english: settings?.englishGreeting || '✨ Here are the results for your search:',
+        hindi: settings?.hindiGreeting || '✨ यहाँ आपकी खोज के नतीजे हैं:',
+        bengali: settings?.bengaliGreeting || '✨ আপনার অনুসন্ধানের ফলাফল এখানে:',
     };
 
     const viewText = {
-        english: '👉 View',
-        hindi: '👉 देखें',
-        bengali: '👉 দেখুন',
+        english: settings?.englishViewText || '👉 View',
+        hindi: settings?.hindiViewText || '👉 देखें',
+        bengali: settings?.bengaliViewText || '👉 দেখুন',
     };
 
     const greeting = greetings[lang] || greetings.english;
@@ -297,7 +345,8 @@ async function handleAiFallback(waba, phoneNumberId, chat, message, text, whatsa
         }
 
         // 6. Build prompt and call OpenAI
-        const systemPrompt = buildSystemPrompt(settings.systemPrompt, categories);
+        const filterParameters = settings.filterParameters || ['&purity=', '&size=', '&priceMax=', '&weightMax='];
+        const systemPrompt = buildSystemPrompt(settings.systemPrompt, categories, filterParameters);
         const openaiResult = await callOpenAI(systemPrompt, text);
 
         if (!openaiResult || !openaiResult.parsed) {
@@ -308,7 +357,7 @@ async function handleAiFallback(waba, phoneNumberId, chat, message, text, whatsa
         const { parsed: aiResponse, usage } = openaiResult;
 
         // 7. Match to category links
-        const links = buildCategoryLinks(aiResponse, categories);
+        const links = buildCategoryLinks(aiResponse, categories, settings);
 
         if (!links.length) {
             logger.info('AI Fallback: No category match found in AI response');
@@ -331,7 +380,7 @@ async function handleAiFallback(waba, phoneNumberId, chat, message, text, whatsa
         }
 
         // 8. Build and send reply
-        const replyText = buildReplyMessage(links, aiResponse);
+        const replyText = buildReplyMessage(links, aiResponse, settings);
         
         logger.info(`AI Fallback: Sending reply with ${links.length} link(s) to ${chat.waId}`);
 

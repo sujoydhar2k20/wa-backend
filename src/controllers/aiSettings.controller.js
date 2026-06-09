@@ -16,7 +16,13 @@ async function getAiSettings(req, res, next) {
 
 async function updateAiSettings(req, res, next) {
     try {
-        const { isAiFallbackEnabled, isTestingMode, testPhoneNumber, allowlist, blocklist, systemPrompt, blockedPhoneNumbers } = req.body;
+        const { 
+            isAiFallbackEnabled, isTestingMode, testPhoneNumber, allowlist, blocklist, systemPrompt, blockedPhoneNumbers,
+            filterParameters,
+            englishGreeting, englishViewText,
+            hindiGreeting, hindiViewText,
+            bengaliGreeting, bengaliViewText
+        } = req.body;
         
         let settings = await AiSetting.findOne();
         if (!settings) {
@@ -30,6 +36,14 @@ async function updateAiSettings(req, res, next) {
         if (blocklist !== undefined) settings.blocklist = blocklist;
         if (systemPrompt !== undefined) settings.systemPrompt = systemPrompt;
         if (blockedPhoneNumbers !== undefined) settings.blockedPhoneNumbers = blockedPhoneNumbers;
+        
+        if (filterParameters !== undefined) settings.filterParameters = filterParameters;
+        if (englishGreeting !== undefined) settings.englishGreeting = englishGreeting;
+        if (englishViewText !== undefined) settings.englishViewText = englishViewText;
+        if (hindiGreeting !== undefined) settings.hindiGreeting = hindiGreeting;
+        if (hindiViewText !== undefined) settings.hindiViewText = hindiViewText;
+        if (bengaliGreeting !== undefined) settings.bengaliGreeting = bengaliGreeting;
+        if (bengaliViewText !== undefined) settings.bengaliViewText = bengaliViewText;
 
         await settings.save();
         res.json({ success: true, data: settings });
