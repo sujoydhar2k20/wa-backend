@@ -83,6 +83,22 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
     }
 
     const waId = msg.from; // Sender's phone number
+    
+    // Check if the number is globally blocked in AI settings
+    try {
+        const { AiSetting } = require('../models');
+        const aiSettings = await AiSetting.findOne().lean();
+        if (aiSettings && aiSettings.blockedPhoneNumbers) {
+            const blockedNumbers = aiSettings.blockedPhoneNumbers.split(',').map(n => n.trim()).filter(Boolean);
+            if (blockedNumbers.includes(waId)) {
+                logger.info(`Webhook: Message from globally blocked customer number ${waId} ignored early (AI settings blocklist).`);
+                return;
+            }
+        }
+    } catch (err) {
+        logger.error('Error checking global blocked numbers in webhook:', err);
+    }
+
     const contactData = contacts.find(c => c.wa_id === waId);
     const profileName = contactData?.profile?.name || waId;
 

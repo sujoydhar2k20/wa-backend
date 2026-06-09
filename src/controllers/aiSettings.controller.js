@@ -16,7 +16,7 @@ async function getAiSettings(req, res, next) {
 
 async function updateAiSettings(req, res, next) {
     try {
-        const { isAiFallbackEnabled, isTestingMode, testPhoneNumber, allowlist, blocklist, systemPrompt } = req.body;
+        const { isAiFallbackEnabled, isTestingMode, testPhoneNumber, allowlist, blocklist, systemPrompt, blockedPhoneNumbers } = req.body;
         
         let settings = await AiSetting.findOne();
         if (!settings) {
@@ -29,6 +29,7 @@ async function updateAiSettings(req, res, next) {
         if (allowlist !== undefined) settings.allowlist = allowlist;
         if (blocklist !== undefined) settings.blocklist = blocklist;
         if (systemPrompt !== undefined) settings.systemPrompt = systemPrompt;
+        if (blockedPhoneNumbers !== undefined) settings.blockedPhoneNumbers = blockedPhoneNumbers;
 
         await settings.save();
         res.json({ success: true, data: settings });

@@ -231,18 +231,26 @@ async function handleAiFallback(waba, phoneNumberId, chat, message, text, whatsa
     try {
         // 1. Load AI Settings
         const settings = await AiSetting.findOne().lean();
-        if (!settings || !settings.isAiFallbackEnabled) {
-            logger.info('AI Fallback: Disabled, skipping.');
-            return false;
-        }
+        if (!settings) return false;
 
-        // 2. Testing mode gate
-        if (!settings.isTestingMode && settings.testPhoneNumber) {
-            if (chat.waId !== settings.testPhoneNumber) {
-                logger.info(`AI Fallback: Testing mode active, skipping for ${chat.waId}`);
+        // Check if the current user is the test user
+        const isTestUser = !settings.isTestingMode && settings.testPhoneNumber && chat.waId === settings.testPhoneNumber;
+
+        if (settings.isAiFallbackEnabled) {
+            // Restrict to test number if isTestingMode is false (Specific Number)
+            if (!settings.isTestingMode && !isTestUser) {
+                logger.info(`AI Fallback: Testing mode active, skipping for non-test user ${chat.waId}`);
                 return false;
             }
+        } else {
+            // Globally disabled. Only allow if testing mode is active (isTestingMode = false) AND this is the test user.
+            if (!isTestUser) {
+                logger.info(`AI Fallback: Disabled globally, skipping for ${chat.waId}`);
+                return false;
+            }
+            logger.info(`AI Fallback: Disabled globally but allowing test user ${chat.waId}`);
         }
+
 
         // 3. Pre-filter (Length)
         if (text.length < 3) {
