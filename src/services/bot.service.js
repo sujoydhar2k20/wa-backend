@@ -561,11 +561,13 @@ async function executeNode(node, context) {
         case 'send_interactive': {
             const resolvedHeader = config.headerText ? await resolveMessageTemplate(config.headerText, chat) : undefined;
             const resolvedBody = await resolveMessageTemplate(config.bodyText || '', chat);
+            const resolvedFooter = config.footerText ? await resolveMessageTemplate(config.footerText, chat) : undefined;
 
             const payload = {
                 type: 'button',
                 header: resolvedHeader ? { type: 'text', text: resolvedHeader } : undefined,
                 body: { text: resolvedBody },
+                footer: resolvedFooter ? { text: resolvedFooter } : undefined,
                 action: {
                     buttons: (config.buttons || []).map((btn, i) => ({
                         type: 'reply',
@@ -581,6 +583,7 @@ async function executeNode(node, context) {
                 interactiveType: 'button',
                 headerText: resolvedHeader || '',
                 bodyText: resolvedBody || '',
+                footerText: resolvedFooter || '',
                 buttons: config.buttons || [],
             });
             return { sent: true, messageId: msgId };
@@ -590,6 +593,7 @@ async function executeNode(node, context) {
             const resolvedHeader = config.headerText ? await resolveMessageTemplate(config.headerText, chat) : undefined;
             const resolvedBody = await resolveMessageTemplate(config.bodyText || '', chat);
             const resolvedButton = config.buttonText ? await resolveMessageTemplate(config.buttonText, chat) : 'View Options';
+            const resolvedFooter = config.footerText ? await resolveMessageTemplate(config.footerText, chat) : undefined;
 
             const listItems = (config.listItems || []).map((item, i) => ({
                 id: `item_${i}`,
@@ -599,6 +603,7 @@ async function executeNode(node, context) {
                 type: 'list',
                 header: resolvedHeader ? { type: 'text', text: resolvedHeader } : undefined,
                 body: { text: resolvedBody },
+                footer: resolvedFooter ? { text: resolvedFooter } : undefined,
                 action: {
                     button: resolvedButton.substring(0, 20),
                     sections: [{
@@ -615,6 +620,7 @@ async function executeNode(node, context) {
                 interactiveType: 'list',
                 headerText: resolvedHeader || '',
                 bodyText: resolvedBody || '',
+                footerText: resolvedFooter || '',
                 buttonText: resolvedButton || 'View Options',
                 listItems: config.listItems || [],
             });
