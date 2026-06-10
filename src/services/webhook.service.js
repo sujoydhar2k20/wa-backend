@@ -638,11 +638,20 @@ function extractProductCodeCandidates(text) {
     const direct = detectProductCode(normalized);
     if (direct) candidates.add(direct);
 
-    // Keep slash/dash/underscore/space formats: 21/401, BJS 20/112, ABC-22, SKU_101
-    // Also capture compact OCR forms like "Bis20m2" (no separators).
-    const matches = normalized.match(/[A-Za-z0-9]+(?:[\s\/_-][A-Za-z0-9]+)+|[A-Za-z]{2,}\d+[A-Za-z0-9]*|[A-Za-z]{2,}\d+|\d+[\/]\d+/g) || [];
+    // Revised regex with word boundaries
+    const regex = /\b[A-Za-z]{2,4}\s+\d+(?:[\/_-][A-Za-z0-9]+)+\b|\b[A-Za-z0-9]+(?:[\/_-][A-Za-z0-9]+)+\b|\b[A-Za-z]{2,}\d+[A-Za-z0-9]*\b/g;
+    const matches = normalized.match(regex) || [];
     for (const raw of matches) {
         const cleaned = raw.replace(/^[^A-Za-z0-9]+|[^A-Za-z0-9]+$/g, '').replace(/\s+/g, ' ');
+        
+        // If there's a space (e.g. "BJS 20/112"), also extract the sub-code after the space (e.g. "20/112")
+        if (cleaned.includes(' ')) {
+            const parts = cleaned.split(' ');
+            const subCode = parts[parts.length - 1];
+            const subCodeClean = detectProductCode(subCode);
+            if (subCodeClean) candidates.add(subCodeClean);
+        }
+
         const code = detectProductCode(cleaned);
         if (code) candidates.add(code);
 
@@ -736,7 +745,10 @@ function expandCodeVariants(candidate) {
         }
     }
 
-    return Array.from(variants).filter(v => detectProductCode(v));
+    return Array.from(variants).filter(v => {
+        const trimmed = v.trim();
+        return trimmed.length > 0 && trimmed.length <= 40 && /[a-zA-Z0-9]/.test(trimmed);
+    });
 }
 
 async function findProductByCandidates(candidates) {
