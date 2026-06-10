@@ -126,6 +126,21 @@ async function processOpenConversation({ waba, phoneNumberId, chat, message, tex
     try {
         const flows = await BotFlow.find({ isEnabled: true, 'trigger.type': 'on_open_conversation' }).lean();
         for (const flow of flows) {
+            // Cooldown check
+            const cooldownMinutes = (flow.cooldownMinutes && flow.cooldownMinutes > 0) ? flow.cooldownMinutes : 0;
+            if (cooldownMinutes > 0) {
+                const cooldownSince = new Date(Date.now() - cooldownMinutes * 60 * 1000);
+                const recentExecution = await BotExecution.findOne({
+                    flowId: flow._id,
+                    chatId: chat._id,
+                    status: { $in: ['completed', 'running'] },
+                    startedAt: { $gte: cooldownSince },
+                }).lean();
+                if (recentExecution) {
+                    logger.info(`Bot flow "${flow.name}" skipped for chat ${chat._id} (open conversation) — cooldown active (${cooldownMinutes}min).`);
+                    continue;
+                }
+            }
             logger.info(`Bot flow "${flow.name}" triggered on open conversation for chat ${chat._id}`);
             executeFlow(flow, { waba, phoneNumberId, chat, message, text })
                 .catch(err => logger.error(`Bot flow execution error:`, err.message));
@@ -143,6 +158,21 @@ async function processCloseConversation({ waba, phoneNumberId, chat }) {
     try {
         const flows = await BotFlow.find({ isEnabled: true, 'trigger.type': 'on_close_conversation' }).lean();
         for (const flow of flows) {
+            // Cooldown check
+            const cooldownMinutes = (flow.cooldownMinutes && flow.cooldownMinutes > 0) ? flow.cooldownMinutes : 0;
+            if (cooldownMinutes > 0) {
+                const cooldownSince = new Date(Date.now() - cooldownMinutes * 60 * 1000);
+                const recentExecution = await BotExecution.findOne({
+                    flowId: flow._id,
+                    chatId: chat._id,
+                    status: { $in: ['completed', 'running'] },
+                    startedAt: { $gte: cooldownSince },
+                }).lean();
+                if (recentExecution) {
+                    logger.info(`Bot flow "${flow.name}" skipped for chat ${chat._id} (close conversation) — cooldown active (${cooldownMinutes}min).`);
+                    continue;
+                }
+            }
             logger.info(`Bot flow "${flow.name}" triggered on close conversation for chat ${chat._id}`);
             executeFlow(flow, { waba, phoneNumberId, chat, message: null, text: '' })
                 .catch(err => logger.error(`Bot flow execution error:`, err.message));
@@ -160,6 +190,21 @@ async function processAgentAssign({ waba, phoneNumberId, chat, agentId }) {
     try {
         const flows = await BotFlow.find({ isEnabled: true, 'trigger.type': 'on_agent_assign' }).lean();
         for (const flow of flows) {
+            // Cooldown check
+            const cooldownMinutes = (flow.cooldownMinutes && flow.cooldownMinutes > 0) ? flow.cooldownMinutes : 0;
+            if (cooldownMinutes > 0) {
+                const cooldownSince = new Date(Date.now() - cooldownMinutes * 60 * 1000);
+                const recentExecution = await BotExecution.findOne({
+                    flowId: flow._id,
+                    chatId: chat._id,
+                    status: { $in: ['completed', 'running'] },
+                    startedAt: { $gte: cooldownSince },
+                }).lean();
+                if (recentExecution) {
+                    logger.info(`Bot flow "${flow.name}" skipped for chat ${chat._id} (agent assign) — cooldown active (${cooldownMinutes}min).`);
+                    continue;
+                }
+            }
             logger.info(`Bot flow "${flow.name}" triggered on agent assign for chat ${chat._id}`);
             executeFlow(flow, { waba, phoneNumberId, chat, message: null, text: '', agentId })
                 .catch(err => logger.error(`Bot flow execution error:`, err.message));
