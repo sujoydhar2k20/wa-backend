@@ -69,6 +69,9 @@ async function addToChat(req, res, next) {
 
         // Only add if not already present
         if (!chat.tags.includes(tag._id)) {
+            if (tag.name && tag.name.toLowerCase() === 'monthly' && req.user.role !== 'superadmin') {
+                return res.status(403).json({ success: false, message: 'Only superadmins can assign the monthly tag.' });
+            }
             chat.tags.push(tag._id);
             await chat.save();
 
@@ -116,6 +119,9 @@ async function removeFromChat(req, res, next) {
         if (!tag) return res.status(404).json({ success: false, message: 'Tag not found' });
 
         const before = chat.tags.length;
+        if (tag.name && tag.name.toLowerCase() === 'monthly' && req.user.role !== 'superadmin') {
+            return res.status(403).json({ success: false, message: 'Only superadmins can remove the monthly tag.' });
+        }
         chat.tags = chat.tags.filter((t) => t.toString() !== tagId);
         if (chat.tags.length < before) {
             await chat.save();

@@ -655,6 +655,11 @@ async function executeNode(node, context) {
         }
 
         case 'assign_agent': {
+            const { isMonthly } = require('../utils/tag');
+            if (await isMonthly({ chat })) {
+                logger.info(`Bot skipped agent assignment for monthly chat ${chat._id}`);
+                return { assigned: false, reason: 'Chat has monthly tag' };
+            }
             const method = config.assignMethod || 'auto';
             let agentId = null;
 

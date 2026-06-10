@@ -194,6 +194,11 @@ async function assign(req, res, next) {
         const chat = await Chat.findById(req.params.id);
         if (!chat) return res.status(404).json({ success: false, message: 'Chat not found' });
 
+        const { isMonthly } = require('../utils/tag');
+        if (await isMonthly({ chat }) && req.user.role !== 'superadmin') {
+            return res.status(403).json({ success: false, message: 'Only superadmins can assign or transfer monthly chats.' });
+        }
+
         chat.assignedTo = assigneeId || null;
         await chat.save();
 
@@ -274,6 +279,11 @@ async function transfer(req, res, next) {
 
         const chat = await Chat.findById(req.params.id);
         if (!chat) return res.status(404).json({ success: false, message: 'Chat not found' });
+
+        const { isMonthly } = require('../utils/tag');
+        if (await isMonthly({ chat }) && req.user.role !== 'superadmin') {
+            return res.status(403).json({ success: false, message: 'Only superadmins can assign or transfer monthly chats.' });
+        }
 
         const fromUserId = chat.assignedTo;
         chat.assignedTo = toUserId;

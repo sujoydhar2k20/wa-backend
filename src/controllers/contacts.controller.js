@@ -39,6 +39,24 @@ async function get(req, res, next) {
 
 async function update(req, res, next) {
     try {
+        if (req.body.tags && req.user.role !== 'superadmin') {
+            const { getMonthlyTagId } = require('../utils/tag');
+            const monthlyTagId = await getMonthlyTagId();
+            if (monthlyTagId) {
+                const contact = await Contact.findById(req.params.id);
+                if (contact) {
+                    const hasMonthlyBefore = contact.tags && contact.tags.map(t => t.toString()).includes(monthlyTagId);
+                    const hasMonthlyAfter = req.body.tags.map(t => t.toString()).includes(monthlyTagId);
+                    if (hasMonthlyBefore !== hasMonthlyAfter) {
+                        return res.status(403).json({
+                            success: false,
+                            message: 'Only superadmins can assign or remove the monthly tag.'
+                        });
+                    }
+                }
+            }
+        }
+
         const contact = await Contact.findByIdAndUpdate(
             req.params.id,
             req.body,

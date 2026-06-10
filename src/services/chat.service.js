@@ -1,6 +1,7 @@
 const { Chat, ChatActivity, User } = require('../models');
 const { getIO } = require('../websocket/socket.server');
 const { logger } = require('../utils/logger');
+const { isMonthly } = require('../utils/tag');
 
 async function checkAndCloseExpiredChats() {
     try {
@@ -63,6 +64,10 @@ async function checkAndTransferNewChats() {
         logger.info(`Found ${chatsToTransfer.length} inactive new chats to transfer.`);
 
         for (const chat of chatsToTransfer) {
+            if (await isMonthly({ chat })) {
+                logger.info(`Chat ${chat._id} has monthly tag. Skipping auto-transfer.`);
+                continue;
+            }
             const oldStaffId = chat.assignedTo;
 
             // Find other staff on the same WABA
@@ -168,6 +173,10 @@ async function checkAndTransferInactiveChats() {
         logger.info(`Found ${chatsToTransfer.length} inactive chats to reassign.`);
 
         for (const chat of chatsToTransfer) {
+            if (await isMonthly({ chat })) {
+                logger.info(`Chat ${chat._id} has monthly tag. Skipping auto-transfer.`);
+                continue;
+            }
             const oldStaffId = chat.assignedTo;
 
             // Reassign to other available staff (round-robin)

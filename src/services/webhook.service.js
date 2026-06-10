@@ -152,7 +152,9 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
     }
 
     // Auto-assign new chat to the least-loaded active staff member on this WABA (round-robin by open chat count)
-    if (isNewChat && !chat.assignedTo) {
+    const { isMonthly } = require('../utils/tag');
+    const isMonthlyCustomer = await isMonthly({ chat, contact });
+    if (isNewChat && !chat.assignedTo && !isMonthlyCustomer) {
         try {
             const staffMembers = await User.find({
                 isActive: true,
