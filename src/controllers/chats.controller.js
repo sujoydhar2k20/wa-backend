@@ -296,7 +296,65 @@ async function transfer(req, res, next) {
             details: { transferredFrom: fromUserId, transferredTo: toUserId },
         });
 
-        res.json(chat);
+        // Re-fetch with full population so the response matches GET /chats/:id
+        const populated = await Chat.findById(chat._id)
+            .populate('contactId', 'name nameOnWhatsApp nickname profilePicture isOptedOut isBlocked customFields')
+            .populate('assignedTo', 'name phone')
+            .populate('wabaId', 'businessName phoneNumbers')
+            .populate('collaborators', 'name phone')
+            .populate('tags', 'name color');
+
+        // Resolve staff names for system message
+        const { User } = require('../models');
+        const toUser = await User.findById(toUserId, 'name');
+        const toName = toUser?.name || populated.assignedTo?.name || 'someone';
+        const fromName = req.user.name || 'Admin';
+
+        // Create a system message so it appears in the chat history
+        const sysMessage = await Message.create({
+            chatId: chat._id,
+            wabaId: chat.wabaId,
+            direction: 'internal',
+            type: 'system',
+            text: `${fromName} assigned this chat to ${toName}`,
+            sentBy: req.user._id,
+        });
+        const populatedSysMsg = await sysMessage.populate('sentBy', 'name phone');
+
+        // Broadcast real-time update to all connected clients
+        const io = getIO();
+        io.emit('message:new', {
+            chatId: chat._id.toString(),
+            message: populatedSysMsg,
+        });
+        io.emit('chat:assigned', { chatId: chat._id.toString(), chat: populated, systemMessage: populatedSysMsg });
+        io.emit('chat:update', { chatId: chat._id.toString(), chat: populated });
+
+        // Notify the new assignee's personal room
+        io.to(`user:${toUserId}`).emit('chat:assigned:me', {
+            chatId: chat._id.toString(),
+            chat: populated,
+            assignedByName: fromName,
+        });
+
+        // Trigger bot on agent assign
+        try {
+            const botService = require('../services/bot.service');
+            const Waba = require('../models/Waba');
+            const waba = await Waba.findById(chat.wabaId);
+            if (waba) {
+                botService.processAgentAssign({
+                    waba,
+                    phoneNumberId: chat.phoneNumberId || waba.phoneNumbers?.[0]?.phoneNumberId,
+                    chat: populated,
+                    agentId: toUserId
+                }).catch(err => console.error('Error in bot processAgentAssign:', err));
+            }
+        } catch (botErr) {
+            console.error('Failed to trigger agent assign bot flow on transfer:', botErr);
+        }
+
+        res.json(populated);
     } catch (e) {
         next(e);
     }
