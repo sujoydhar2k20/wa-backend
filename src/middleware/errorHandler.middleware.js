@@ -1,7 +1,7 @@
 const logger = require('../utils/logger').logger;
 
 function errorHandler(err, req, res, next) {
-  logger.error({ err: err.message, stack: err.stack });
+  logger.error(err);
 
   // Handle Multer size limit error
   if (err.code === 'LIMIT_FILE_SIZE') {
