@@ -5,7 +5,7 @@
  * When a trigger matches, executes action nodes in sequence.
  */
 
-const { BotFlow, BotExecution, Chat, User, Message, Contact } = require('../models');
+const { BotFlow, BotExecution, Chat, User, Message, Contact, Waba } = require('../models');
 const whatsappService = require('./whatsapp.service');
 const { logger } = require('../utils/logger');
 
@@ -316,15 +316,57 @@ async function resolveMessageTemplate(textTemplate, chat) {
     return resolvedText;
 }
 
+// Delays at or below this run inline (in-process) for natural pacing between messages.
+// Anything longer is persisted via Agenda so it survives restarts and can wait hours/days.
+const INLINE_DELAY_MAX_MS = 30 * 1000;
+
 /**
- * Execute a full bot flow: walk through nodes via edges.
+ * Convert a time_delay node config into milliseconds.
  */
-async function executeFlow(flow, context) {
-    const { waba, phoneNumberId, chat, message, text, matchedKeyword } = context;
+function computeDelayMs(config = {}) {
+    const duration = config.duration || 1;
+    const unit = config.unit || 'seconds';
+    if (unit === 'minutes') return duration * 60 * 1000;
+    if (unit === 'hours') return duration * 60 * 60 * 1000;
+    if (unit === 'days') return duration * 24 * 60 * 60 * 1000;
+    return duration * 1000;
+}
+
+/**
+ * Persist a delayed continuation of a flow via Agenda. The execution is left in
+ * 'waiting' status at the delay node; the 'resume-bot-flow' job picks it up later.
+ */
+async function scheduleFlowResume(executionId, ms) {
+    try {
+        const { getAgenda } = require('../jobs/agenda');
+        const agenda = getAgenda();
+        if (!agenda) {
+            logger.error('Agenda unavailable; cannot schedule delayed bot flow continuation');
+            return false;
+        }
+        await agenda.schedule(new Date(Date.now() + ms), 'resume-bot-flow', {
+            executionId: executionId.toString(),
+        });
+        logger.info(`Scheduled bot flow resume for execution ${executionId} in ${ms}ms`);
+        return true;
+    } catch (err) {
+        logger.error('Failed to schedule delayed bot flow continuation:', err.message);
+        return false;
+    }
+}
+
+/**
+ * Shared flow walker. Walks node graph starting from each id in startNodeIds,
+ * executing actions and following edges. Handles condition branching, interactive
+ * pauses, and time_delay (inline for short delays, Agenda-scheduled for long ones).
+ *
+ * Returns { isPaused } — true when the flow paused on an interactive reply or a
+ * scheduled time delay (execution state already saved); false when it ran to the end.
+ */
+async function walkFlowNodes(flow, execution, startNodeIds, context) {
+    const { waba, phoneNumberId, chat, message, text } = context;
     const nodeMap = {};
     const edgeMap = {}; // source -> [edges]
-
-    // Build lookup maps
     for (const node of (flow.nodes || [])) {
         nodeMap[node.id] = node;
     }
@@ -332,6 +374,115 @@ async function executeFlow(flow, context) {
         if (!edgeMap[edge.source]) edgeMap[edge.source] = [];
         edgeMap[edge.source].push(edge);
     }
+
+    const visited = new Set();
+    let totalSteps = 0;
+    const maxSteps = 50;
+    let isPaused = false;
+
+    async function walkNode(nodeId) {
+        if (!nodeId || totalSteps >= maxSteps || isPaused) return;
+        if (visited.has(nodeId)) {
+            logger.warn(`Bot flow "${flow.name}": cycle detected at node ${nodeId}`);
+            return;
+        }
+        visited.add(nodeId);
+        totalSteps++;
+
+        const node = nodeMap[nodeId];
+        if (!node) return;
+
+        if (node.type === 'trigger') {
+            // Skip the trigger node itself, just follow its edges.
+        } else if (node.type === 'time_delay') {
+            const ms = computeDelayMs(node.config || {});
+            execution.currentNodeId = node.id;
+            if (ms > INLINE_DELAY_MAX_MS) {
+                // Long delay: persist and hand off to Agenda so it survives restarts.
+                execution.status = 'waiting';
+                await execution.save();
+                const scheduled = await scheduleFlowResume(execution._id, ms);
+                execution.executionLog.push({
+                    nodeId: node.id,
+                    action: 'time_delay',
+                    result: { scheduled, delayMs: ms, resumeAt: new Date(Date.now() + ms) },
+                    timestamp: new Date(),
+                });
+                await execution.save();
+                isPaused = true;
+                return;
+            }
+            // Short delay: wait inline.
+            await new Promise(resolve => setTimeout(resolve, ms));
+            execution.executionLog.push({
+                nodeId: node.id,
+                action: 'time_delay',
+                result: { waitedMs: ms },
+                timestamp: new Date(),
+            });
+        } else {
+            try {
+                const result = await executeNode(node, { waba, phoneNumberId, chat, message, text, flow });
+                execution.executionLog.push({
+                    nodeId: node.id,
+                    action: node.type,
+                    result: result,
+                    timestamp: new Date(),
+                });
+                execution.currentNodeId = node.id;
+
+                // Condition node: choose only the matching branch.
+                if (node.type === 'condition' || node.type === 'working_hours_condition') {
+                    const edges = edgeMap[nodeId] || [];
+                    const branch = result?.branch || 'yes';
+                    const matchedEdge = edges.find(e => e.sourceHandle === branch) || edges[0];
+                    if (matchedEdge) {
+                        await walkNode(matchedEdge.target);
+                    }
+                    return;
+                }
+
+                // Interactive node: pause execution here until the customer replies.
+                if (node.type === 'send_interactive' || node.type === 'send_interactive_list') {
+                    isPaused = true;
+                    execution.status = 'running';
+                    execution.currentNodeId = node.id;
+                    await execution.save();
+                    return;
+                }
+            } catch (nodeErr) {
+                logger.error(`Bot flow "${flow.name}" node "${node.type}" (${node.id}) error: ${nodeErr.message}`);
+                execution.executionLog.push({
+                    nodeId: node.id,
+                    action: node.type,
+                    result: { error: nodeErr.message },
+                    timestamp: new Date(),
+                });
+                // Continue to next branches even if this node fails.
+            }
+        }
+
+        // Follow ALL edges from this node (supports branching).
+        const edges = edgeMap[nodeId] || [];
+        for (const edge of edges) {
+            if (isPaused) break;
+            await walkNode(edge.target);
+        }
+    }
+
+    for (const startId of startNodeIds) {
+        if (isPaused) break;
+        await walkNode(startId);
+    }
+
+    return { isPaused };
+}
+
+/**
+ * Execute a full bot flow: walk through nodes via edges, starting from the trigger.
+ */
+async function executeFlow(flow, context) {
+    const { chat, matchedKeyword } = context;
 
     // Create execution record (with matched keyword for cooldown tracking)
     const execution = await BotExecution.create({
@@ -344,7 +495,6 @@ async function executeFlow(flow, context) {
     });
 
     try {
-        // Find the trigger node (starting point)
         const triggerNode = (flow.nodes || []).find(n => n.type === 'trigger');
         if (!triggerNode) {
             logger.warn(`Bot flow "${flow.name}" has no trigger node`);
@@ -352,75 +502,7 @@ async function executeFlow(flow, context) {
             return;
         }
 
-        // Recursive node walker that handles multiple branches
-        const visited = new Set();
-        let totalSteps = 0;
-        const maxSteps = 50;
-        let isPaused = false;
-
-        async function walkNode(nodeId) {
-            if (!nodeId || totalSteps >= maxSteps) return;
-            if (visited.has(nodeId)) {
-                logger.warn(`Bot flow "${flow.name}": cycle detected at node ${nodeId}`);
-                return;
-            }
-            visited.add(nodeId);
-            totalSteps++;
-
-            const node = nodeMap[nodeId];
-            if (!node) return;
-
-            // Execute node action (skip trigger node itself)
-            if (node.type !== 'trigger') {
-                try {
-                    const result = await executeNode(node, { waba, phoneNumberId, chat, message, text, flow });
-                    execution.executionLog.push({
-                        nodeId: node.id,
-                        action: node.type,
-                        result: result,
-                        timestamp: new Date(),
-                    });
-                    execution.currentNodeId = node.id;
-
-                    // If condition node, choose only the matching branch
-                    if (node.type === 'condition' || node.type === 'working_hours_condition') {
-                        const edges = edgeMap[nodeId] || [];
-                        const branch = result?.branch || 'yes';
-                        const matchedEdge = edges.find(e => e.sourceHandle === branch) || edges[0];
-                        if (matchedEdge) {
-                            await walkNode(matchedEdge.target);
-                        }
-                        return;
-                    }
-
-                    // If interactive node, pause execution at this node
-                    if (node.type === 'send_interactive' || node.type === 'send_interactive_list') {
-                        isPaused = true;
-                        execution.status = 'running';
-                        execution.currentNodeId = node.id;
-                        await execution.save();
-                        return;
-                    }
-                } catch (nodeErr) {
-                    logger.error(`Bot flow "${flow.name}" node "${node.type}" (${node.id}) error: ${nodeErr.message}`);
-                    execution.executionLog.push({
-                        nodeId: node.id,
-                        action: node.type,
-                        result: { error: nodeErr.message },
-                        timestamp: new Date(),
-                    });
-                    // Continue to next branches even if this node fails
-                }
-            }
-
-            // Follow ALL edges from this node (supports branching)
-            const edges = edgeMap[nodeId] || [];
-            for (const edge of edges) {
-                await walkNode(edge.target);
-            }
-        }
-
-        await walkNode(triggerNode.id);
+        const { isPaused } = await walkFlowNodes(flow, execution, [triggerNode.id], context);
 
         if (!isPaused) {
             await finishExecution(execution, 'completed');
@@ -428,7 +510,6 @@ async function executeFlow(flow, context) {
         } else {
             logger.info(`Bot flow "${flow.name}" paused at node ${execution.currentNodeId} for chat ${chat._id}`);
         }
-
     } catch (err) {
         execution.executionLog.push({
             nodeId: execution.currentNodeId || 'unknown',
@@ -445,14 +526,8 @@ async function executeFlow(flow, context) {
  * Resume execution of a paused bot flow from a specific button or item reply edge.
  */
 async function resumeFlow(flow, execution, replyId, context) {
-    const { waba, phoneNumberId, chat, message, text } = context;
-    const nodeMap = {};
+    const { chat } = context;
     const edgeMap = {}; // source -> [edges]
-
-    // Build lookup maps
-    for (const node of (flow.nodes || [])) {
-        nodeMap[node.id] = node;
-    }
     for (const edge of (flow.edges || [])) {
         if (!edgeMap[edge.source]) edgeMap[edge.source] = [];
         edgeMap[edge.source].push(edge);
@@ -461,81 +536,18 @@ async function resumeFlow(flow, execution, replyId, context) {
     try {
         const currentNodeId = execution.currentNodeId;
         const edges = edgeMap[currentNodeId] || [];
-        
+
         // Find the edge originating from the interactive node that matches the button/item ID
         const matchedEdge = edges.find(e => e.sourceHandle === replyId);
-        
+
         if (!matchedEdge) {
             logger.warn(`No edge found matching sourceHandle ${replyId} on node ${currentNodeId} in flow ${flow.name}`);
             await finishExecution(execution, 'completed');
             return;
         }
 
-        // Start walking from the target node of the matched edge
-        const visited = new Set();
-        let totalSteps = 0;
-        const maxSteps = 50;
-        let isPaused = false;
-
-        async function walkNode(nodeId) {
-            if (!nodeId || totalSteps >= maxSteps) return;
-            if (visited.has(nodeId)) {
-                logger.warn(`Bot flow "${flow.name}": cycle detected at node ${nodeId}`);
-                return;
-            }
-            visited.add(nodeId);
-            totalSteps++;
-
-            const node = nodeMap[nodeId];
-            if (!node) return;
-
-            // Execute node action
-            try {
-                const result = await executeNode(node, { waba, phoneNumberId, chat, message, text, flow });
-                execution.executionLog.push({
-                    nodeId: node.id,
-                    action: node.type,
-                    result: result,
-                    timestamp: new Date(),
-                });
-                execution.currentNodeId = node.id;
-
-                if (node.type === 'condition' || node.type === 'working_hours_condition') {
-                    const nodeEdges = edgeMap[nodeId] || [];
-                    const branch = result?.branch || 'yes';
-                    const matchedNodeEdge = nodeEdges.find(e => e.sourceHandle === branch) || nodeEdges[0];
-                    if (matchedNodeEdge) {
-                        await walkNode(matchedNodeEdge.target);
-                    }
-                    return;
-                }
-
-                if (node.type === 'send_interactive' || node.type === 'send_interactive_list') {
-                    isPaused = true;
-                    execution.status = 'running';
-                    execution.currentNodeId = node.id;
-                    await execution.save();
-                    return;
-                }
-            } catch (nodeErr) {
-                logger.error(`Bot flow "${flow.name}" node "${node.type}" (${node.id}) error: ${nodeErr.message}`);
-                execution.executionLog.push({
-                    nodeId: node.id,
-                    action: node.type,
-                    result: { error: nodeErr.message },
-                    timestamp: new Date(),
-                });
-            }
-
-            // Follow ALL edges from this node
-            const nodeEdges = edgeMap[nodeId] || [];
-            for (const edge of nodeEdges) {
-                await walkNode(edge.target);
-            }
-        }
-
-        // Run from the matched edge's target
-        await walkNode(matchedEdge.target);
+        execution.status = 'running';
+        const { isPaused } = await walkFlowNodes(flow, execution, [matchedEdge.target], context);
 
         if (!isPaused) {
             await finishExecution(execution, 'completed');
@@ -543,7 +555,75 @@ async function resumeFlow(flow, execution, replyId, context) {
         } else {
             logger.info(`Bot flow "${flow.name}" paused at node ${execution.currentNodeId} for chat ${chat._id}`);
         }
+    } catch (err) {
+        execution.executionLog.push({
+            nodeId: execution.currentNodeId || 'unknown',
+            action: 'error',
+            result: { error: err.message },
+            timestamp: new Date(),
+        });
+        await finishExecution(execution, 'failed');
+        throw err;
+    }
+}
 
+/**
+ * Resume a flow that was paused on a time_delay node. Invoked by the
+ * 'resume-bot-flow' Agenda job once the delay has elapsed. Rebuilds the
+ * execution context from the stored chat and continues past the delay node.
+ */
+async function resumeDelayedFlow(executionId) {
+    const execution = await BotExecution.findById(executionId);
+    if (!execution) {
+        logger.warn(`resumeDelayedFlow: execution ${executionId} not found`);
+        return;
+    }
+    if (execution.status !== 'waiting') {
+        logger.info(`resumeDelayedFlow: execution ${executionId} is '${execution.status}', not 'waiting' — skipping`);
+        return;
+    }
+
+    const flow = await BotFlow.findById(execution.flowId).lean();
+    if (!flow || !flow.isEnabled) {
+        logger.info(`resumeDelayedFlow: flow for execution ${executionId} missing or disabled — stopping`);
+        await finishExecution(execution, 'stopped');
+        return;
+    }
+
+    const chat = await Chat.findById(execution.chatId).lean();
+    if (!chat) {
+        logger.warn(`resumeDelayedFlow: chat for execution ${executionId} not found`);
+        await finishExecution(execution, 'failed');
+        return;
+    }
+
+    const waba = await Waba.findById(chat.wabaId).lean();
+    if (!waba) {
+        logger.warn(`resumeDelayedFlow: waba for execution ${executionId} not found`);
+        await finishExecution(execution, 'failed');
+        return;
+    }
+
+    const delayNodeId = execution.currentNodeId;
+    const edgeMap = {};
+    for (const edge of (flow.edges || [])) {
+        if (!edgeMap[edge.source]) edgeMap[edge.source] = [];
+        edgeMap[edge.source].push(edge);
+    }
+    const nextStartIds = (edgeMap[delayNodeId] || []).map(e => e.target);
+
+    execution.status = 'running';
+    await execution.save();
+
+    const context = { waba, phoneNumberId: chat.phoneNumberId, chat, message: null, text: '' };
+    try {
+        const { isPaused } = await walkFlowNodes(flow, execution, nextStartIds, context);
+        if (!isPaused) {
+            await finishExecution(execution, 'completed');
+            logger.info(`Bot flow "${flow.name}" completed (after delay) for chat ${chat._id}`);
+        } else {
+            logger.info(`Bot flow "${flow.name}" paused again at node ${execution.currentNodeId} for chat ${chat._id}`);
+        }
     } catch (err) {
         execution.executionLog.push({
             nodeId: execution.currentNodeId || 'unknown',
@@ -673,16 +753,12 @@ async function executeNode(node, context) {
         }
 
         case 'time_delay': {
-            const duration = config.duration || 1;
-            const unit = config.unit || 'seconds';
-            let ms = duration * 1000;
-            if (unit === 'minutes') ms = duration * 60 * 1000;
-            else if (unit === 'hours') ms = duration * 60 * 60 * 1000;
-            else if (unit === 'days') ms = duration * 24 * 60 * 60 * 1000;
-            // Cap at 5 minutes for safety in sync execution
-            ms = Math.min(ms, 5 * 60 * 1000);
+            // Note: time_delay is normally handled directly by walkFlowNodes (inline for
+            // short delays, Agenda-scheduled for long ones). This branch is a safety net
+            // and only waits inline up to the inline cap.
+            const ms = Math.min(computeDelayMs(config), INLINE_DELAY_MAX_MS);
             await new Promise(resolve => setTimeout(resolve, ms));
-            return { waited: true, duration, unit };
+            return { waited: true, ms };
         }
 
         case 'condition': {
@@ -965,5 +1041,6 @@ module.exports = {
     processOpenConversation,
     processCloseConversation,
     processAgentAssign,
+    resumeDelayedFlow,
     evaluateTrigger,
 };

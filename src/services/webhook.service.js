@@ -195,6 +195,8 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
     // Set WhatsApp Session Expiry exactly 24 hours from the incoming message timestamp
     chat.sessionExpiresAt = new Date((msg.timestamp * 1000) + (24 * 60 * 60 * 1000));
 
+    // Detect a reopen: an existing chat that was closed and is now receiving a new customer message.
+    const wasReopened = !isNewChat && chat.status === 'closed';
     if (chat.status === 'closed') chat.status = 'open';
 
     await chat.save();
@@ -413,11 +415,11 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
         waba, phoneNumberId, chat, message, text: msgText || '', isNewChat
     }).catch(e => logger.error('Bot execution error:', e.message));
 
-    // Trigger on_new_lead for brand new chats
-    if (isNewChat) {
+    // Trigger on_open_conversation for brand new chats AND for chats reopened after being closed
+    if (isNewChat || wasReopened) {
         botService.processOpenConversation({
             waba, phoneNumberId, chat, message, text: msgText || '',
-        }).catch(e => logger.error('Bot on_new_lead error:', e.message));
+        }).catch(e => logger.error('Bot on_open_conversation error:', e.message));
     }
 
     // Emit socket event

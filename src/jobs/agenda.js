@@ -17,6 +17,7 @@ async function initAgenda() {
   require('./template.jobs')(agenda);
   require('./bulkSend.jobs')(agenda);
   require('./mediaCleanup.jobs')(agenda);
+  require('./bot.jobs')(agenda);
 
   // Schedule cleanup to run every 24 hours
   await agenda.every('24 hours', 'cleanup-expired-media');

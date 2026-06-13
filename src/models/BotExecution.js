@@ -13,7 +13,7 @@ const botExecutionSchema = new mongoose.Schema(
     chatId: { type: mongoose.Schema.Types.ObjectId, ref: 'Chat', required: true, index: true },
     currentNodeId: { type: String },
     matchedKeyword: { type: String, default: '' }, // The keyword that triggered this execution (for per-keyword cooldown)
-    status: { type: String, enum: ['running', 'completed', 'failed', 'stopped'], default: 'running', index: true },
+    status: { type: String, enum: ['running', 'waiting', 'completed', 'failed', 'stopped'], default: 'running', index: true },
     executionLog: [executionLogSchema],
     startedAt: { type: Date, default: Date.now },
     completedAt: { type: Date },
