@@ -416,6 +416,7 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
     }).catch(e => logger.error('Bot execution error:', e.message));
 
     // Trigger on_open_conversation for brand new chats AND for chats reopened after being closed
+    logger.info(`[bot] open-conversation check for chat ${chat._id} (waId: ${waId}): isNewChat=${isNewChat}, wasReopened=${wasReopened}`);
     if (isNewChat || wasReopened) {
         botService.processOpenConversation({
             waba, phoneNumberId, chat, message, text: msgText || '',

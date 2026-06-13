@@ -125,6 +125,8 @@ async function processIncomingMessage({ waba, phoneNumberId, chat, message, text
 async function processOpenConversation({ waba, phoneNumberId, chat, message, text }) {
     try {
         const flows = await BotFlow.find({ isEnabled: true, 'trigger.type': 'on_open_conversation' }).lean();
+        logger.info(`[bot] processOpenConversation for chat ${chat._id}: found ${flows.length} enabled on_open_conversation flow(s)`);
+        if (!flows.length) return;
         for (const flow of flows) {
             // Cooldown check
             const cooldownMinutes = (flow.cooldownMinutes && flow.cooldownMinutes > 0) ? flow.cooldownMinutes : 0;
