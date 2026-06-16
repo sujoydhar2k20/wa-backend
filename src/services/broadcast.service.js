@@ -164,6 +164,10 @@ async function processBroadcastBatch(batchId) {
 
   // Get the components from the broadcast (stored when the send was initiated)
   const components = broadcast.components || [];
+  const variableMapping = broadcast.variableMapping || [];
+
+  // Check if any variable uses dynamic contact fields
+  const hasDynamicVars = variableMapping.some(m => m.source === 'contact_field');
 
   // Warn if template expects variables but components are empty
   if (components.length === 0 && template.components) {
@@ -174,11 +178,84 @@ async function processBroadcastBatch(batchId) {
     }
   }
 
+  /**
+   * Resolve components for a specific contact by replacing dynamic placeholders
+   * with actual contact field values.
+   */
+  function resolveComponentsForContact(baseComponents, contactDoc) {
+    if (!hasDynamicVars || !contactDoc) return baseComponents;
+
+    return baseComponents.map(comp => {
+      const section = comp.type; // 'header', 'body', 'button'
+      if (section !== 'header' && section !== 'body') return comp;
+
+      const sectionMappings = variableMapping.filter(m => m.section === section);
+      if (sectionMappings.length === 0) return comp;
+
+      const newParams = (comp.parameters || []).map((param, idx) => {
+        const mapping = sectionMappings.find(m => m.index === idx);
+        if (mapping && mapping.source === 'contact_field' && mapping.field) {
+          // Resolve the field value from the contact document
+          let fieldValue = '';
+          if (mapping.field === 'phoneNumber') {
+            fieldValue = contactDoc.phoneNumber || '';
+          } else if (mapping.field === 'name') {
+            fieldValue = contactDoc.name || contactDoc.nameOnWhatsApp || contactDoc.phoneNumber || '';
+          } else if (mapping.field === 'nameOnWhatsApp') {
+            fieldValue = contactDoc.nameOnWhatsApp || contactDoc.name || '';
+          } else if (mapping.field === 'nickname') {
+            fieldValue = contactDoc.nickname || contactDoc.name || '';
+          } else {
+            // Try custom fields
+            fieldValue = contactDoc.customFields?.get?.(mapping.field) 
+              || contactDoc.customFields?.[mapping.field] 
+              || contactDoc[mapping.field] 
+              || '';
+          }
+          return { ...param, text: fieldValue || ' ' };
+        }
+        return param;
+      });
+
+      return { ...comp, parameters: newParams };
+    });
+  }
+
+  /**
+   * Resolve template text for chat preview for a specific contact
+   */
+  function resolveTemplateTextForContact(templateDoc, perContactComponents) {
+    try {
+      let resolvedText = `[Broadcast: ${template.name}]`;
+      if (templateDoc) {
+        const bodyTemplateComp = (templateDoc.components || []).find(c => {
+          const t = c.toObject ? c.toObject() : c;
+          return t.type === 'BODY';
+        });
+        if (bodyTemplateComp) {
+          const bt = bodyTemplateComp.toObject ? bodyTemplateComp.toObject() : bodyTemplateComp;
+          let text = bt.text || '';
+          const bodyVars = (perContactComponents || []).find(v => v.type === 'body');
+          if (bodyVars && bodyVars.parameters) {
+            bodyVars.parameters.forEach((param, idx) => {
+              text = text.replace(`{{${idx + 1}}}`, param.text || `{{${idx + 1}}}`);
+            });
+          }
+          resolvedText = text;
+        }
+      }
+      return resolvedText;
+    } catch (err) {
+      return `[Broadcast: ${template.name}]`;
+    }
+  }
+
   // Pre-resolve template components with variables for chat preview (done once, reused for all recipients)
+  // This is used as fallback when there are no dynamic variables
   let resolvedTemplateComponents = null;
   let resolvedTemplateText = `[Broadcast: ${template.name}]`;
+  const templateDoc = await Template.findById(template._id || template).catch(() => null);
   try {
-    const templateDoc = await Template.findById(template._id || template);
     if (templateDoc) {
       resolvedTemplateComponents = (templateDoc.components || []).map(comp => {
         const c = comp.toObject ? comp.toObject() : { ...comp };
@@ -210,30 +287,38 @@ async function processBroadcastBatch(batchId) {
     // Declare contactId outside try so it's accessible in catch
     let contactId = null;
     try {
-      // Find the member or contact
+      // Find the member or contact — fetch full doc if we have dynamic vars
       let isBlocked = false;
       let isOptedOut = false;
+      let contactDoc = null;
 
       if (broadcast.broadcastListId) {
+        const populateFields = hasDynamicVars
+          ? 'isBlocked isOptedOut name nameOnWhatsApp nickname phoneNumber customFields'
+          : 'isBlocked isOptedOut';
         const member = await BroadcastListMember.findOne({
           broadcastListId: broadcast.broadcastListId,
           phoneNumber,
-        }).populate('contactId', 'isBlocked isOptedOut');
+        }).populate('contactId', populateFields);
 
-        if (member) {
-          contactId = member.contactId?._id;
-          isBlocked = member.contactId?.isBlocked;
-          isOptedOut = member.contactId?.isOptedOut;
+        if (member && member.contactId) {
+          contactId = member.contactId._id;
+          isBlocked = member.contactId.isBlocked;
+          isOptedOut = member.contactId.isOptedOut;
+          if (hasDynamicVars) contactDoc = member.contactId;
         }
       }
 
       // If no member found or no list used, check Contact model directly
       if (!contactId) {
-        const contact = await Contact.findOne({ phoneNumber });
+        const contact = hasDynamicVars
+          ? await Contact.findOne({ phoneNumber })
+          : await Contact.findOne({ phoneNumber }).select('_id isBlocked isOptedOut');
         if (contact) {
           contactId = contact._id;
           isBlocked = contact.isBlocked;
           isOptedOut = contact.isOptedOut;
+          if (hasDynamicVars) contactDoc = contact;
         }
       }
 
@@ -243,13 +328,16 @@ async function processBroadcastBatch(batchId) {
         throw skipErr;
       }
 
+      // Resolve per-contact components (dynamic fields replaced with actual values)
+      const perContactComponents = resolveComponentsForContact(components, contactDoc);
+
       const result = await whatsappService.sendTemplateMessage(
         broadcast.wabaId,
         broadcast.phoneNumberId,
         phoneNumber,
         template.name,
         template.language,
-        components
+        perContactComponents
       );
 
       let messageId = null;
@@ -284,6 +372,11 @@ async function processBroadcastBatch(batchId) {
           });
         }
 
+        // Resolve text per-contact when dynamic variables are used
+        const contactResolvedText = hasDynamicVars
+          ? resolveTemplateTextForContact(templateDoc, perContactComponents)
+          : resolvedTemplateText;
+
         const chatMessage = await Message.create({
           chatId: chat._id,
           wabaId: broadcast.wabaId,
@@ -292,7 +385,7 @@ async function processBroadcastBatch(batchId) {
           waId,
           direction: 'outbound',
           type: 'template',
-          text: resolvedTemplateText,
+          text: contactResolvedText,
           status: 'sent',
           metadata: {
             templateName: template.name,

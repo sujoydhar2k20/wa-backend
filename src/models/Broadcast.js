@@ -27,6 +27,7 @@ const broadcastSchema = new mongoose.Schema(
     nextBatchAt: { type: Date },
     dailyLimit: { type: Number }, // Snapshot of the WABA limit when broadcast was created
     components: { type: [mongoose.Schema.Types.Mixed], default: [] }, // Template variable components sent to Meta API
+    variableMapping: { type: [mongoose.Schema.Types.Mixed], default: [] }, // Maps variables to contact fields for dynamic resolution
     statistics: { type: statsSchema, default: () => ({}) },
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   },

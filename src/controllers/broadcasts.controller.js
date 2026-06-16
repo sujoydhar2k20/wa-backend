@@ -136,6 +136,7 @@ async function send(req, res, next) {
             dailyLimit: messagingLimit === Infinity ? null : messagingLimit,
             'statistics.total': phoneNumbers.length,
             components: req.body.components || [],
+            variableMapping: req.body.variableMapping || [],
             nextBatchAt: totalBatches > 1 ? batches[1]?.scheduledAt : null,
         });
 
