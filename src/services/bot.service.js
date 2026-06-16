@@ -334,6 +334,27 @@ function computeDelayMs(config = {}) {
     return duration * 1000;
 }
 
+// India Standard Time is a fixed UTC+5:30 offset (no DST).
+const IST_OFFSET_MS = (5 * 60 + 30) * 60 * 1000;
+
+/**
+ * Parse a wait_till datetime string ("YYYY-MM-DDTHH:mm" from the date/time pickers)
+ * as IST wall-clock time, returning a UTC Date — so the wait fires at the intended
+ * Indian local time regardless of the server's timezone.
+ */
+function parseIstDateTime(value) {
+    if (!value) return null;
+    const m = String(value).match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?/);
+    if (!m) {
+        const d = new Date(value);
+        return isNaN(d.getTime()) ? null : d;
+    }
+    const [, y, mo, d, h, mi, sec] = m;
+    // Treat the components as IST wall-clock, then subtract the IST offset to get true UTC.
+    const utcMs = Date.UTC(+y, +mo - 1, +d, +h, +mi, sec ? +sec : 0) - IST_OFFSET_MS;
+    return new Date(utcMs);
+}
+
 /**
  * Persist a delayed continuation of a flow via Agenda. The execution is left in
  * 'waiting' status at the delay node; the 'resume-bot-flow' job picks it up later.
@@ -424,7 +445,7 @@ async function walkFlowNodes(flow, execution, startNodeIds, context) {
             });
         } else if (node.type === 'wait_till') {
             execution.currentNodeId = node.id;
-            const target = node.config?.datetime ? new Date(node.config.datetime) : null;
+            const target = parseIstDateTime(node.config?.datetime);
             const ms = (target && !isNaN(target.getTime())) ? (target.getTime() - Date.now()) : 0;
             if (ms > INLINE_DELAY_MAX_MS) {
                 // Wait until a future datetime: persist and hand off to Agenda.
