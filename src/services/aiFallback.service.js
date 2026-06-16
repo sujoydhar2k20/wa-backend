@@ -281,8 +281,20 @@ async function handleAiFallback(waba, phoneNumberId, chat, message, text, whatsa
         const settings = await AiSetting.findOne().lean();
         if (!settings) return false;
 
-        // Check if the current user is the test user
-        const isTestUser = !settings.isTestingMode && settings.testPhoneNumber && chat.waId === settings.testPhoneNumber;
+        // Check if the current user is the test user.
+        // Match tolerantly: waIds carry the country code (e.g. "917278665321") while the
+        // admin often enters the number without it (e.g. "7278665321"). Compare digits-only
+        // and allow a country-code-less suffix match so either form works.
+        const normalizeNumber = (n) => String(n || '').replace(/\D/g, '');
+        const waDigits = normalizeNumber(chat.waId);
+        const testDigits = normalizeNumber(settings.testPhoneNumber);
+        const minLen = Math.min(waDigits.length, testDigits.length);
+        const numberMatches = testDigits.length > 0 && minLen >= 8 && (
+            waDigits === testDigits ||
+            waDigits.endsWith(testDigits) ||
+            testDigits.endsWith(waDigits)
+        );
+        const isTestUser = !settings.isTestingMode && numberMatches;
 
         if (settings.isAiFallbackEnabled) {
             // Restrict to test number if isTestingMode is false (Specific Number)
