@@ -165,6 +165,15 @@ async function processBroadcastBatch(batchId) {
   // Get the components from the broadcast (stored when the send was initiated)
   const components = broadcast.components || [];
 
+  // Warn if template expects variables but components are empty
+  if (components.length === 0 && template.components) {
+    const bodyComp = (template.components || []).find(c => (c.type || c.get?.('type')) === 'BODY');
+    const bodyText = bodyComp?.text || bodyComp?.get?.('text') || '';
+    if (/\{\{\d+\}\}/.test(bodyText)) {
+      logger.warn(`Broadcast ${broadcast._id}: Template "${template.name}" has body variables but components array is empty. Messages will likely fail with parameter mismatch error.`);
+    }
+  }
+
   // Pre-resolve template components with variables for chat preview (done once, reused for all recipients)
   let resolvedTemplateComponents = null;
   let resolvedTemplateText = `[Broadcast: ${template.name}]`;
@@ -198,9 +207,10 @@ async function processBroadcastBatch(batchId) {
   const phonesDeferred = batch.memberPhones.slice(messagingLimit === Infinity ? batch.memberPhones.length : remainingToday);
 
   for (const phoneNumber of phonesToSend) {
+    // Declare contactId outside try so it's accessible in catch
+    let contactId = null;
     try {
       // Find the member or contact
-      let contactId = null;
       let isBlocked = false;
       let isOptedOut = false;
 
