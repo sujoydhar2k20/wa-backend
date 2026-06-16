@@ -93,6 +93,20 @@ async function checkAndTransferNewChats() {
                 chatCounts.sort((a, b) => a.count - b.count);
                 const leastLoaded = chatCounts[0];
 
+                 // Re-validate against the latest state: the assigned staff may have replied
+                 // (or the chat changed) while we were computing the target. A reply must
+                 // retain the chat, so only transfer if it is STILL unanswered and unchanged.
+                 const fresh = await Chat.findById(chat._id)
+                     .select('status assignedTo lastStaffMessageAt lastCustomerMessageAt').lean();
+                 if (!fresh
+                     || fresh.status !== 'open'
+                     || String(fresh.assignedTo) !== String(oldStaffId)
+                     || fresh.lastStaffMessageAt
+                     || !(fresh.lastCustomerMessageAt && fresh.lastCustomerMessageAt < threshold)) {
+                     logger.info(`Chat ${chat._id} no longer eligible for new-chat transfer (staff responded or state changed). Skipping.`);
+                     continue;
+                 }
+
                  // Transfer chat
                  chat.assignedTo = leastLoaded.staffId;
                  await chat.save();
@@ -201,9 +215,24 @@ async function checkAndTransferInactiveChats() {
                 chatCounts.sort((a, b) => a.count - b.count);
                 const leastLoaded = chatCounts[0];
 
+                 // Re-validate against the latest state: if the assigned staff replied to the
+                 // customer's latest message while we were computing the target, the chat is
+                 // no longer eligible — a reply must retain the chat.
+                 const fresh = await Chat.findById(chat._id)
+                     .select('status assignedTo lastStaffMessageAt lastCustomerMessageAt').lean();
+                 const stillUnanswered = fresh
+                     && fresh.status === 'open'
+                     && String(fresh.assignedTo) === String(oldStaffId)
+                     && fresh.lastCustomerMessageAt && fresh.lastCustomerMessageAt < threshold
+                     && (!fresh.lastStaffMessageAt || fresh.lastCustomerMessageAt > fresh.lastStaffMessageAt);
+                 if (!stillUnanswered) {
+                     logger.info(`Chat ${chat._id} no longer eligible for inactivity transfer (staff responded or state changed). Skipping.`);
+                     continue;
+                 }
+
                  chat.assignedTo = leastLoaded.staffId;
                  await chat.save();
- 
+
                  await ChatActivity.create({
                      chatId: chat._id,
                      type: 'auto_transferred',

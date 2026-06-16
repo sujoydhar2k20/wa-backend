@@ -39,12 +39,16 @@ async function isMonthly(params = {}) {
     if (chat && hasTag(chat.tags)) return true;
     if (contact && hasTag(contact.tags)) return true;
 
-    // If chat is provided but contact is not, and contactId is a ref, check contact tags
+    // If chat is provided but contact is not, and contactId is a ref, check contact tags.
+    // NOTE: a populated contact is an object with a `tags` array; a raw ObjectId is ALSO
+    // `typeof 'object'`, so we must detect the populated case by the presence of a tags
+    // array — otherwise we'd read `.tags` off an ObjectId (undefined) and skip the DB lookup.
     if (chat && chat.contactId && !contact) {
-        if (typeof chat.contactId === 'object' && chat.contactId !== null) {
-            if (hasTag(chat.contactId.tags)) return true;
+        const ref = chat.contactId;
+        if (ref && typeof ref === 'object' && Array.isArray(ref.tags)) {
+            if (hasTag(ref.tags)) return true;
         } else {
-            const dbContact = await Contact.findById(chat.contactId).select('tags').lean();
+            const dbContact = await Contact.findById(ref).select('tags').lean();
             if (dbContact && hasTag(dbContact.tags)) return true;
         }
     }
