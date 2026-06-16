@@ -422,6 +422,33 @@ async function walkFlowNodes(flow, execution, startNodeIds, context) {
                 result: { waitedMs: ms },
                 timestamp: new Date(),
             });
+        } else if (node.type === 'wait_till') {
+            execution.currentNodeId = node.id;
+            const target = node.config?.datetime ? new Date(node.config.datetime) : null;
+            const ms = (target && !isNaN(target.getTime())) ? (target.getTime() - Date.now()) : 0;
+            if (ms > INLINE_DELAY_MAX_MS) {
+                // Wait until a future datetime: persist and hand off to Agenda.
+                execution.status = 'waiting';
+                await execution.save();
+                const scheduled = await scheduleFlowResume(execution._id, ms);
+                execution.executionLog.push({
+                    nodeId: node.id,
+                    action: 'wait_till',
+                    result: { scheduled, datetime: node.config?.datetime, resumeAt: new Date(Date.now() + ms) },
+                    timestamp: new Date(),
+                });
+                await execution.save();
+                isPaused = true;
+                return;
+            }
+            // Target is in the past/now, or within the inline window: wait the remainder (if any).
+            if (ms > 0) await new Promise(resolve => setTimeout(resolve, ms));
+            execution.executionLog.push({
+                nodeId: node.id,
+                action: 'wait_till',
+                result: { datetime: node.config?.datetime, waitedMs: Math.max(0, ms) },
+                timestamp: new Date(),
+            });
         } else {
             try {
                 const result = await executeNode(node, { waba, phoneNumberId, chat, message, text, flow });
