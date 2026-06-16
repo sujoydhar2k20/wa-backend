@@ -9,9 +9,11 @@ async function list(req, res, next) {
       ]
     };
 
-    // If user has an assigned WABA, filter by it as well
+    // If user has an assigned WABA, show that WABA's replies AND global ones.
+    // Super-admin "everyone" replies are saved with no wabaId (global, since super admins
+    // have no assignedWabaId); without including null here, staff would never see them.
     if (req.user.assignedWabaId) {
-      query.wabaId = req.user.assignedWabaId;
+      query.wabaId = { $in: [req.user.assignedWabaId, null] };
     }
 
     const quickReplies = await QuickReply.find(query).sort({ shortcut: 1 });
