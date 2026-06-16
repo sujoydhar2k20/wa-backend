@@ -126,8 +126,17 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
         }
     }
 
-    // Block logic: discard messages if contact is blocked
-    if (contact.isBlocked) {
+    // Block logic: discard inbound messages if this number is blocked.
+    // waId is NOT unique, so duplicate Contact docs can exist for the same number —
+    // the chat (and the UI "Blocked" badge) may point to one document while this webhook
+    // loaded another. Check by waId OR phoneNumber so a block on ANY matching contact
+    // reliably drops incoming messages.
+    const sanitizedWaId = String(waId).replace(/\D/g, '');
+    const isContactBlocked = contact.isBlocked || await Contact.exists({
+        $or: [{ waId: sanitizedWaId }, { phoneNumber: sanitizedWaId }],
+        isBlocked: true,
+    });
+    if (isContactBlocked) {
         logger.info(`Message from blocked contact ${waId} ignored.`);
         return;
     }
