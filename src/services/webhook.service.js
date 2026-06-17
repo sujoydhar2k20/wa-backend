@@ -126,19 +126,26 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
         }
     }
 
-    // Block logic: discard inbound messages if this number is blocked.
-    // waId is NOT unique, so duplicate Contact docs can exist for the same number —
-    // the chat (and the UI "Blocked" badge) may point to one document while this webhook
-    // loaded another. Check by waId OR phoneNumber so a block on ANY matching contact
-    // reliably drops incoming messages.
+    // waId is NOT unique, so duplicate Contact docs can exist for the same number — the chat
+    // (and the UI badge) may point to one document while this webhook loaded another. Match by
+    // waId OR phoneNumber so block/opt-out state on ANY matching contact is honoured.
     const sanitizedWaId = String(waId).replace(/\D/g, '');
-    const isContactBlocked = contact.isBlocked || await Contact.exists({
-        $or: [{ waId: sanitizedWaId }, { phoneNumber: sanitizedWaId }],
-        isBlocked: true,
-    });
+    const numberMatch = { $or: [{ waId: sanitizedWaId }, { phoneNumber: sanitizedWaId }] };
+
+    // Block logic: discard inbound messages if this number is blocked.
+    const isContactBlocked = contact.isBlocked || await Contact.exists({ ...numberMatch, isBlocked: true });
     if (isContactBlocked) {
         logger.info(`Message from blocked contact ${waId} ignored.`);
         return;
+    }
+
+    // Auto opt-in: an inbound message means the customer re-engaged, so clear any opt-out
+    // and re-enable messaging. Applied across duplicate contact docs for this number.
+    const wasOptedOut = contact.isOptedOut || await Contact.exists({ ...numberMatch, isOptedOut: true });
+    if (wasOptedOut) {
+        await Contact.updateMany(numberMatch, { $set: { isOptedOut: false }, $unset: { optedOutAt: '' } });
+        contact.isOptedOut = false;
+        logger.info(`Auto opted-in contact ${waId} after inbound message.`);
     }
 
     // Find or create chat
