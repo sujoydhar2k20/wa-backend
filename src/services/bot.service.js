@@ -1086,6 +1086,31 @@ async function finishExecution(execution, status) {
     await execution.save();
 }
 
+/**
+ * Cancel all stale bot executions for a chat.
+ * Called when a closed chat is reopened so old running/waiting flows
+ * (e.g., close-conversation delay timers) don't interfere with the
+ * new on_open_conversation flow.
+ */
+async function cancelStaleExecutions(chatId) {
+    try {
+        const result = await BotExecution.updateMany(
+            {
+                chatId,
+                status: { $in: ['running', 'waiting'] },
+            },
+            {
+                $set: { status: 'stopped', completedAt: new Date() },
+            }
+        );
+        if (result.modifiedCount > 0) {
+            logger.info(`[bot] Cancelled ${result.modifiedCount} stale bot execution(s) for chat ${chatId} on reopen`);
+        }
+    } catch (err) {
+        logger.error(`[bot] Failed to cancel stale executions for chat ${chatId}:`, err.message);
+    }
+}
+
 module.exports = {
     processIncomingMessage,
     processOpenConversation,
@@ -1093,4 +1118,5 @@ module.exports = {
     processAgentAssign,
     resumeDelayedFlow,
     evaluateTrigger,
+    cancelStaleExecutions,
 };

@@ -427,6 +427,17 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
     }
     // Bot flow execution (fire-and-forget)
     const msgText = msg.type === 'text' ? msg.text?.body : (msg.type === 'interactive' ? messageData.text : '');
+
+    // When a chat is reopened, cancel any stale bot executions left from previous flows
+    // (e.g., close-conversation delay timers) BEFORE processing new flows.
+    if (wasReopened) {
+        try {
+            await botService.cancelStaleExecutions(chat._id);
+        } catch (e) {
+            logger.error('Failed to cancel stale bot executions on reopen:', e.message);
+        }
+    }
+
     botService.processIncomingMessage({
         waba, phoneNumberId, chat, message, text: msgText || '', isNewChat
     }).catch(e => logger.error('Bot execution error:', e.message));
