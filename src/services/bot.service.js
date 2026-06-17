@@ -394,6 +394,8 @@ async function walkFlowNodes(flow, execution, startNodeIds, context) {
         nodeMap[node.id] = node;
     }
     for (const edge of (flow.edges || [])) {
+        // Skip edges where the target node doesn't exist (ghost/deleted nodes)
+        if (!nodeMap[edge.target]) continue;
         if (!edgeMap[edge.source]) edgeMap[edge.source] = [];
         edgeMap[edge.source].push(edge);
     }
@@ -485,9 +487,14 @@ async function walkFlowNodes(flow, execution, startNodeIds, context) {
                 if (node.type === 'condition' || node.type === 'working_hours_condition') {
                     const edges = edgeMap[nodeId] || [];
                     const branch = result?.branch || 'yes';
-                    const matchedEdge = edges.find(e => e.sourceHandle === branch) || edges[0];
-                    if (matchedEdge) {
-                        await walkNode(matchedEdge.target);
+                    const matchedEdges = edges.filter(e => e.sourceHandle === branch);
+                    
+                    // Fallback to first edge if no handles match (backward compatibility)
+                    const edgesToFollow = matchedEdges.length > 0 ? matchedEdges : (edges[0] ? [edges[0]] : []);
+                    
+                    for (const edge of edgesToFollow) {
+                        if (isPaused) break;
+                        await walkNode(edge.target);
                     }
                     return;
                 }
