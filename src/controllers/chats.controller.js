@@ -245,6 +245,28 @@ async function assign(req, res, next) {
                 chat: populated,
                 assignedByName: req.user.name || 'Admin',
             });
+
+            // Persistent notification + web push so the assignee is notified even when offline.
+            // Don't notify the actor if they assigned the chat to themselves.
+            if (String(assigneeId) !== String(req.user._id)) {
+                try {
+                    const notificationService = require('../services/notification.service');
+                    const customerName = populated.contactId?.name
+                        || populated.contactId?.nameOnWhatsApp
+                        || populated.contactId?.nickname
+                        || chat.phoneNumber
+                        || 'a customer';
+                    await notificationService.createNotification({
+                        recipientId: assigneeId,
+                        type: 'assignment',
+                        title: 'Chat assigned to you',
+                        body: `${req.user.name || 'Admin'} assigned the chat with ${customerName} to you`,
+                        metadata: { chatId: chat._id.toString() },
+                    });
+                } catch (notifErr) {
+                    console.error('Failed to create assignment notification:', notifErr);
+                }
+            }
         }
 
         // Trigger bot on agent assign
@@ -336,6 +358,28 @@ async function transfer(req, res, next) {
             chat: populated,
             assignedByName: fromName,
         });
+
+        // Persistent notification + web push so the new assignee is notified even when offline.
+        // Don't notify the actor if they transferred the chat to themselves.
+        if (String(toUserId) !== String(req.user._id)) {
+            try {
+                const notificationService = require('../services/notification.service');
+                const customerName = populated.contactId?.name
+                    || populated.contactId?.nameOnWhatsApp
+                    || populated.contactId?.nickname
+                    || chat.phoneNumber
+                    || 'a customer';
+                await notificationService.createNotification({
+                    recipientId: toUserId,
+                    type: 'assignment',
+                    title: 'Chat transferred to you',
+                    body: `${fromName} transferred the chat with ${customerName} to you`,
+                    metadata: { chatId: chat._id.toString() },
+                });
+            } catch (notifErr) {
+                console.error('Failed to create transfer notification:', notifErr);
+            }
+        }
 
         // Trigger bot on agent assign
         try {
