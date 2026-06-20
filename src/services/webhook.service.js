@@ -230,6 +230,16 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
         timestamp: new Date(msg.timestamp * 1000),
     };
 
+    // Preserve reply threading for inbound customer replies.
+    // WhatsApp provides the parent wa message ID in context.message_id.
+    const repliedWaMessageId = msg.context?.message_id;
+    if (repliedWaMessageId) {
+        const parentMessage = await Message.findOne({ messageId: repliedWaMessageId }).select('_id');
+        if (parentMessage?._id) {
+            messageData.replyToMessageId = parentMessage._id;
+        }
+    }
+
     // Handle message types
     if (msg.type === 'text') {
         messageData.text = msg.text.body;
