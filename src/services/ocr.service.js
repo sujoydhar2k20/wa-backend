@@ -1,4 +1,5 @@
 const Tesseract = require('tesseract.js');
+const sharp = require('sharp');
 const axios = require('axios');
 const cloudinary = require('../config/cloudinary');
 const streamifier = require('streamifier');
@@ -6,6 +7,33 @@ const Media = require('../models/Media');
 const { logger } = require('../utils/logger');
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+
+/**
+ * OCR works much better on high-contrast, denoised images.
+ * Preprocess before passing to Tesseract.
+ */
+async function preprocessImageForOcr(buffer) {
+    return sharp(buffer)
+        .rotate() // auto-orient using EXIF metadata
+        .grayscale()
+        .normalize()
+        .sharpen()
+        .resize({ width: 1600, withoutEnlargement: true })
+        .png()
+        .toBuffer();
+}
+
+/**
+ * Compress the image to a small JPEG for sending to OpenAI (saves credits).
+ * Resizes to max 800px wide and uses 60% JPEG quality.
+ */
+async function compressImageForAI(buffer) {
+    return sharp(buffer)
+        .rotate()
+        .resize({ width: 800, withoutEnlargement: true })
+        .jpeg({ quality: 60 })
+        .toBuffer();
+}
 
 /**
  * Upload an image buffer to Cloudinary with OCR-specific transformations.
