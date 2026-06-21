@@ -100,17 +100,11 @@ async function extractTextWithOpenAI(imageUrl) {
                     {
                         role: 'system',
                         content:
-                            'You are an OCR assistant. Please extract all the text you can see in this image. ' +
-                            'Pay special attention to product codes, SKU numbers, or model numbers (e.g., "BJS 20/112", "138/3"). ' +
-                            'Just output the text. If you cannot find any text, please output: [NO TEXT VISIBLE].',
+                            'You are an OCR extraction model. Look carefully at the image and extract a product code. Valid code formats: S/number/number, D/number/number, or number/number. If the code starts with BJS or CODE, remove those prefixes and return only the code. Respond only with the code. If no valid code exists, respond with NONE.',
                     },
                     {
                         role: 'user',
                         content: [
-                            {
-                                type: 'text',
-                                text: 'What text is visible in this image?',
-                            },
                             {
                                 type: 'image_url',
                                 image_url: { url: imageUrl, detail: 'high' },
@@ -118,14 +112,12 @@ async function extractTextWithOpenAI(imageUrl) {
                         ],
                     },
                 ],
-                max_completion_tokens: 2000,
             },
             {
                 headers: {
                     Authorization: `Bearer ${OPENAI_API_KEY}`,
                     'Content-Type': 'application/json',
                 },
-                timeout: 30000,
             }
         );
 
@@ -133,7 +125,7 @@ async function extractTextWithOpenAI(imageUrl) {
         const extractedText = response.data?.choices?.[0]?.message?.content?.trim() || '';
         logger.info(`OpenAI OCR extracted: "${extractedText}"`);
         
-        if (extractedText === '[NO TEXT VISIBLE]') {
+           if (extractedText === 'NONE') {
              return { text: '', confidence: 0 };
         }
         
