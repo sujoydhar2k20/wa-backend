@@ -9,6 +9,13 @@ const { logger } = require('../utils/logger');
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OCR_CLOUDINARY_TRANSFORMATION = 'c_fill_pad,g_auto,w_400,h_500,f_webp,e_sharpen:200,b_auto';
 
+function normalizeToBuffer(input) {
+    if (Buffer.isBuffer(input)) return input;
+    if (input instanceof ArrayBuffer) return Buffer.from(input);
+    if (ArrayBuffer.isView(input)) return Buffer.from(input.buffer, input.byteOffset, input.byteLength);
+    return null;
+}
+
 /**
  * OCR works much better on high-contrast, denoised images.
  * Preprocess before passing to Tesseract.
@@ -42,12 +49,16 @@ async function compressImageForAI(buffer) {
  * Returns the public URL.
  */
 async function uploadToCloudinaryForOCR(buffer) {
+    const normalizedBuffer = normalizeToBuffer(buffer);
+    if (!normalizedBuffer || normalizedBuffer.length === 0) {
+        throw new Error('OCR upload failed: invalid or empty image buffer');
+    }
+
     return new Promise((resolve, reject) => {
         const uploadStream = cloudinary.uploader.upload_stream(
             {
                 folder: 'ocr-temp',
                 resource_type: 'image',
-                transformation: OCR_CLOUDINARY_TRANSFORMATION,
             },
             async (error, result) => {
                 if (error) {
@@ -85,7 +96,7 @@ async function uploadToCloudinaryForOCR(buffer) {
                 }
             }
         );
-        streamifier.createReadStream(buffer).pipe(uploadStream);
+        streamifier.createReadStream(normalizedBuffer).pipe(uploadStream);
     });
 }
 
