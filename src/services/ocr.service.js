@@ -7,6 +7,7 @@ const Media = require('../models/Media');
 const { logger } = require('../utils/logger');
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const OCR_CLOUDINARY_TRANSFORMATION = 'c_fill_pad,g_auto,w_400,h_500,f_webp,e_sharpen:200,b_auto';
 
 /**
  * OCR works much better on high-contrast, denoised images.
@@ -44,13 +45,20 @@ async function uploadToCloudinaryForOCR(buffer) {
     return new Promise((resolve, reject) => {
         const uploadStream = cloudinary.uploader.upload_stream(
             {
-                folder: 'ocr-temp'
+                folder: 'ocr-temp',
+                resource_type: 'image',
+                transformation: OCR_CLOUDINARY_TRANSFORMATION,
             },
             async (error, result) => {
                 if (error) {
                     logger.error('Cloudinary OCR upload failed', error);
                     return reject(error);
                 }
+
+                const transformedUrl = cloudinary.url(result.public_id, {
+                    secure: true,
+                    transformation: OCR_CLOUDINARY_TRANSFORMATION,
+                });
 
                 try {
                     // Set expiry to 7 days from now
@@ -59,7 +67,7 @@ async function uploadToCloudinaryForOCR(buffer) {
 
                     // Save to Media model for tracking and auto-deletion
                     await Media.create({
-                        url: result.secure_url,
+                        url: transformedUrl,
                         mediaId: result.public_id, // Store Cloudinary public_id for cleanup
                         type: 'image',
                         mimeType: 'image/webp',
@@ -68,12 +76,12 @@ async function uploadToCloudinaryForOCR(buffer) {
                         expiresAt: expiresAt
                     });
 
-                    logger.info(`OCR image uploaded to Cloudinary: ${result.secure_url}`);
-                    resolve(result.secure_url);
+                    logger.info(`OCR image uploaded to Cloudinary: ${transformedUrl}`);
+                    resolve(transformedUrl);
                 } catch (dbError) {
                     logger.error('Failed to save OCR media metadata', dbError);
                     // Still resolve with the URL since upload succeeded
-                    resolve(result.secure_url);
+                    resolve(transformedUrl);
                 }
             }
         );
