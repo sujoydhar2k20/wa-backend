@@ -1,9 +1,6 @@
 const Tesseract = require('tesseract.js');
 const sharp = require('sharp');
 const axios = require('axios');
-const cloudinary = require('../config/cloudinary');
-const streamifier = require('streamifier');
-const Media = require('../models/Media');
 const { logger } = require('../utils/logger');
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
@@ -36,62 +33,19 @@ async function compressImageForAI(buffer) {
 }
 
 /**
- * Upload an image buffer to Cloudinary with OCR-specific transformations.
- * Saves metadata to Media model with a 7-day expiry.
- * Returns the public URL.
- */
-async function uploadToCloudinaryForOCR(buffer) {
-    return new Promise((resolve, reject) => {
-        const uploadStream = cloudinary.uploader.upload_stream(
-            {
-                folder: 'ocr-temp'
-            },
-            async (error, result) => {
-                if (error) {
-                    logger.error('Cloudinary OCR upload failed', error);
-                    return reject(error);
-                }
-
-                try {
-                    // Set expiry to 7 days from now
-                    const expiresAt = new Date();
-                    expiresAt.setDate(expiresAt.getDate() + 7);
-
-                    // Save to Media model for tracking and auto-deletion
-                    await Media.create({
-                        url: result.secure_url,
-                        mediaId: result.public_id, // Store Cloudinary public_id for cleanup
-                        type: 'image',
-                        mimeType: 'image/webp',
-                        fileName: `ocr_${Date.now()}.webp`,
-                        fileSize: result.bytes,
-                        expiresAt: expiresAt
-                    });
-
-                    logger.info(`OCR image uploaded to Cloudinary: ${result.secure_url}`);
-                    resolve(result.secure_url);
-                } catch (dbError) {
-                    logger.error('Failed to save OCR media metadata', dbError);
-                    // Still resolve with the URL since upload succeeded
-                    resolve(result.secure_url);
-                }
-            }
-        );
-        streamifier.createReadStream(buffer).pipe(uploadStream);
-    });
-}
-
-/**
  * Use OpenAI GPT-5 Nano (vision) to extract text/product codes from an image.
- * Sends the VPS URL so the AI fetches a compressed image = fewer tokens.
+ * Sends the image directly as a base64 data URL.
  */
-async function extractTextWithOpenAI(imageUrl) {
+async function extractTextWithOpenAI(imageBuffer, mimeType = 'image/jpeg') {
     if (!OPENAI_API_KEY) {
         logger.error('OPENAI_API_KEY is not set – cannot fall back to AI OCR');
         return { text: '', confidence: 0 };
     }
 
     try {
+        const base64 = imageBuffer.toString('base64');
+        const dataUrl = `data:${mimeType};base64,${base64}`;
+
         const response = await axios.post(
             'https://api.openai.com/v1/chat/completions',
             {
@@ -107,7 +61,7 @@ async function extractTextWithOpenAI(imageUrl) {
                         content: [
                             {
                                 type: 'image_url',
-                                image_url: { url: imageUrl, detail: 'high' },
+                                image_url: { url: dataUrl, detail: 'high' },
                             },
                         ],
                     },
@@ -140,21 +94,16 @@ async function extractTextWithOpenAI(imageUrl) {
  * Main OCR function:
  * 1. Try Tesseract (fast, free, local)
  * 2. If Tesseract fails (no text or low confidence), fall back to OpenAI GPT-5 Nano
- *    - Compress image → upload to VPS → send URL to OpenAI
+ *    - Compress image → send directly to OpenAI
  */
 async function extractTextFromImageBuffer(buffer) {
     try {
         // Compress locally first to limit size (saves tokens)
         const compressedBuffer = await compressImageForAI(buffer);
-        
-        // Upload to Cloudinary (no on-the-fly transformations, bypassing strict restrictions)
-        const imageUrl = await uploadToCloudinaryForOCR(compressedBuffer);
-        logger.info(`Cloudinary-uploaded image for OCR: ${imageUrl}`);
-        
-        logger.info('Sending image URL directly to OpenAI...');
+        logger.info('Sending image directly to OpenAI...');
         
         // Send directly to OpenAI without Tesseract
-        const aiResult = await extractTextWithOpenAI(imageUrl);
+        const aiResult = await extractTextWithOpenAI(compressedBuffer);
         return aiResult;
     } catch (error) {
         logger.error(`Direct OpenAI OCR failed: ${error.message}`);
