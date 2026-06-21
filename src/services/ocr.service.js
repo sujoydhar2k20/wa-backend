@@ -140,15 +140,12 @@ async function extractTextWithOpenAI(imageUrl) {
  * Main OCR function:
  * 1. Try Tesseract (fast, free, local)
  * 2. If Tesseract fails (no text or low confidence), fall back to OpenAI GPT-5 Nano
- *    - Compress image → upload to VPS → send URL to OpenAI
+ *    - Upload original image → send URL to OpenAI
  */
 async function extractTextFromImageBuffer(buffer) {
     try {
-        // Compress locally first to limit size (saves tokens)
-        const compressedBuffer = await compressImageForAI(buffer);
-        
-        // Upload to Cloudinary (no on-the-fly transformations, bypassing strict restrictions)
-        const imageUrl = await uploadToCloudinaryForOCR(compressedBuffer);
+        // Keep the customer image unoptimized on our server before OCR upload.
+        const imageUrl = await uploadToCloudinaryForOCR(buffer);
         logger.info(`Cloudinary-uploaded image for OCR: ${imageUrl}`);
         
         logger.info('Sending image URL directly to OpenAI...');
