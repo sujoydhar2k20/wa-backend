@@ -1,4 +1,5 @@
 const Tesseract = require('tesseract.js');
+const sharp = require('sharp');
 const axios = require('axios');
 const cloudinary = require('../config/cloudinary');
 const streamifier = require('streamifier');
@@ -7,11 +8,31 @@ const { logger } = require('../utils/logger');
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
-function normalizeToBuffer(input) {
-    if (Buffer.isBuffer(input)) return input;
-    if (input instanceof ArrayBuffer) return Buffer.from(input);
-    if (ArrayBuffer.isView(input)) return Buffer.from(input.buffer, input.byteOffset, input.byteLength);
-    return null;
+/**
+ * OCR works much better on high-contrast, denoised images.
+ * Preprocess before passing to Tesseract.
+ */
+async function preprocessImageForOcr(buffer) {
+    return sharp(buffer)
+        .rotate() // auto-orient using EXIF metadata
+        .grayscale()
+        .normalize()
+        .sharpen()
+        .resize({ width: 1600, withoutEnlargement: true })
+        .png()
+        .toBuffer();
+}
+
+/**
+ * Compress the image to a small JPEG for sending to OpenAI (saves credits).
+ * Resizes to max 800px wide and uses 60% JPEG quality.
+ */
+async function compressImageForAI(buffer) {
+    return sharp(buffer)
+        .rotate()
+        .resize({ width: 800, withoutEnlargement: true })
+        .jpeg({ quality: 60 })
+        .toBuffer();
 }
 
 /**
@@ -20,32 +41,16 @@ function normalizeToBuffer(input) {
  * Returns the public URL.
  */
 async function uploadToCloudinaryForOCR(buffer) {
-    const normalizedBuffer = normalizeToBuffer(buffer);
-    if (!normalizedBuffer || normalizedBuffer.length === 0) {
-        throw new Error('OCR upload failed: invalid or empty image buffer');
-    }
-
     return new Promise((resolve, reject) => {
         const uploadStream = cloudinary.uploader.upload_stream(
             {
-                folder: 'ocr-temp',
-                resource_type: 'image',
-                transformation: [
-                    { crop: 'fill_pad', gravity: 'auto', width: 400, height: 500, fetch_format: 'webp' },
-                    { effect: 'sharpen:200' },
-                    { background: 'auto' },
-                ],
+                folder: 'ocr-temp'
             },
             async (error, result) => {
                 if (error) {
                     logger.error('Cloudinary OCR upload failed', error);
                     return reject(error);
                 }
-
-                const transformedUrl = cloudinary.url(result.public_id, {
-                    secure: true,
-                    transformation: 'c_fill_pad,g_auto,w_400,h_500,f_webp,e_sharpen:200,b_auto',
-                });
 
                 try {
                     // Set expiry to 7 days from now
@@ -54,7 +59,7 @@ async function uploadToCloudinaryForOCR(buffer) {
 
                     // Save to Media model for tracking and auto-deletion
                     await Media.create({
-                        url: transformedUrl,
+                        url: result.secure_url,
                         mediaId: result.public_id, // Store Cloudinary public_id for cleanup
                         type: 'image',
                         mimeType: 'image/webp',
@@ -63,16 +68,16 @@ async function uploadToCloudinaryForOCR(buffer) {
                         expiresAt: expiresAt
                     });
 
-                    logger.info(`OCR image uploaded to Cloudinary: ${transformedUrl}`);
-                    resolve(transformedUrl);
+                    logger.info(`OCR image uploaded to Cloudinary: ${result.secure_url}`);
+                    resolve(result.secure_url);
                 } catch (dbError) {
                     logger.error('Failed to save OCR media metadata', dbError);
                     // Still resolve with the URL since upload succeeded
-                    resolve(transformedUrl);
+                    resolve(result.secure_url);
                 }
             }
         );
-        streamifier.createReadStream(normalizedBuffer).pipe(uploadStream);
+        streamifier.createReadStream(buffer).pipe(uploadStream);
     });
 }
 
@@ -101,8 +106,12 @@ async function extractTextWithOpenAI(imageUrl) {
                             'Respond only with the code. If no valid code exists, respond with NONE.',
                     },
                     {
-                        role: 'system',
+                        role: 'user',
                         content: [
+                            {
+                                type: 'text',
+                                text: 'What text is visible in this image?',
+                            },
                             {
                                 type: 'image_url',
                                 image_url: { url: imageUrl, detail: 'high' },
@@ -110,12 +119,14 @@ async function extractTextWithOpenAI(imageUrl) {
                         ],
                     },
                 ],
+                max_completion_tokens: 2000,
             },
             {
                 headers: {
                     Authorization: `Bearer ${OPENAI_API_KEY}`,
                     'Content-Type': 'application/json',
                 },
+                timeout: 30000,
             }
         );
 
@@ -142,8 +153,11 @@ async function extractTextWithOpenAI(imageUrl) {
  */
 async function extractTextFromImageBuffer(buffer) {
     try {
-        // Upload original image to Cloudinary and rely on Cloudinary transforms.
-        const imageUrl = await uploadToCloudinaryForOCR(buffer);
+        // Compress locally first to limit size (saves tokens)
+        const compressedBuffer = await compressImageForAI(buffer);
+        
+        // Upload to Cloudinary (no on-the-fly transformations, bypassing strict restrictions)
+        const imageUrl = await uploadToCloudinaryForOCR(compressedBuffer);
         logger.info(`Cloudinary-uploaded image for OCR: ${imageUrl}`);
         
         logger.info('Sending image URL directly to OpenAI...');
