@@ -866,6 +866,19 @@ async function getAllAutoMessages(req, res, next) {
     }
 }
 
+async function deleteAllAutoMessages(req, res, next) {
+    try {
+        const result = await Message.deleteMany({ sentByBot: true });
+        res.json({ 
+            success: true, 
+            message: `Deleted ${result.deletedCount} automated message logs`,
+            deletedCount: result.deletedCount 
+        });
+    } catch (e) {
+        next(e);
+    }
+}
+
 module.exports = {
     list,
     search,
@@ -880,6 +893,7 @@ module.exports = {
     getActivities,
     getAutoMessages,
     getAllAutoMessages,
+    deleteAllAutoMessages,
     stats,
     toggleDnd,
 };
