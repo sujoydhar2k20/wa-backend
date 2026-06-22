@@ -45,14 +45,20 @@ function passesFilters(text, allowlist, blocklist) {
  * Build the full system prompt by appending the category list, filter parameters, and strict JSON format schema to the user's custom prompt.
  */
 function buildSystemPrompt(basePrompt, categories, filterParameters = []) {
-    let categoryText = '\n\nAllowed Main Category and Sub Category:\n\n';
-    categories.forEach((cat, idx) => {
-        categoryText += `${idx + 1}. Main Category: ${cat.name}\n`;
-        if (cat.subcategories && cat.subcategories.length > 0) {
-            categoryText += `   Sub Category: ${cat.subcategories.map(s => s.name).join(', ')}\n`;
-        }
-        categoryText += '\n';
-    });
+    // Check if basePrompt already contains category information to avoid duplication
+    const hasCategories = basePrompt.includes('Allowed Main Category and Sub Category');
+    
+    let categoryText = '';
+    if (!hasCategories) {
+        categoryText = '\n\nAllowed Main Category and Sub Category:\n\n';
+        categories.forEach((cat, idx) => {
+            categoryText += `${idx + 1}. Main Category: ${cat.name}\n`;
+            if (cat.subcategories && cat.subcategories.length > 0) {
+                categoryText += `   Sub Category: ${cat.subcategories.map(s => s.name).join(', ')}\n`;
+            }
+            categoryText += '\n';
+        });
+    }
 
     const allowedFilterKeys = filterParameters.map(param => 
         param.replace(/^[&?]/, '').replace(/=$/, '')
