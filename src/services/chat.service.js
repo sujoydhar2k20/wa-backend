@@ -44,7 +44,7 @@ async function checkAndCloseExpiredChats() {
 
 async function checkAndTransferNewChats() {
     try {
-        const thresholdMinutes = 2; // threshold in minutes
+        const thresholdMinutes = 10 * 60; // 10 hours
         const threshold = new Date();
         threshold.setMinutes(threshold.getMinutes() - thresholdMinutes);
 
@@ -166,7 +166,7 @@ async function checkAndTransferNewChats() {
 
 async function checkAndTransferInactiveChats() {
     try {
-        const thresholdMinutes = 60;
+        const thresholdMinutes = 12 * 60; // 12 hours
         const threshold = new Date();
         threshold.setMinutes(threshold.getMinutes() - thresholdMinutes);
 
