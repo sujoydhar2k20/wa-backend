@@ -4,8 +4,27 @@ const { logger } = require('../utils/logger');
 let io;
 
 function initSocket(server) {
+  // Configure CORS properly for credentials
+  const allowedOrigins = (process.env.CORS_ORIGIN || 'http://localhost:3000')
+    .split(',')
+    .map(origin => origin.trim());
+
   io = new Server(server, {
-    cors: { origin: process.env.CORS_ORIGIN || '*', credentials: true },
+    cors: {
+      origin: (origin, callback) => {
+        // Allow requests with no origin (like mobile apps or curl requests)
+        if (!origin) return callback(null, true);
+        
+        if (allowedOrigins.includes(origin) || allowedOrigins.includes('*')) {
+          callback(null, true);
+        } else {
+          callback(new Error('Not allowed by CORS'));
+        }
+      },
+      credentials: true,
+      methods: ['GET', 'POST'],
+      allowedHeaders: ['Content-Type', 'Authorization'],
+    },
     path: '/socket.io',
   });
 
