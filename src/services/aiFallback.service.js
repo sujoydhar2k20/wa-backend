@@ -147,43 +147,60 @@ function buildCategoryLinks(aiResponse, categories, settings) {
             normalized[key.toLowerCase().replace(/[\s_-]+/g, '')] = value;
         }
 
-        const mainCatName = normalized.maincategory || normalized.category || '';
-        const subCatName = normalized.subcategory || '';
+        let mainCatNames = normalized.maincategory || normalized.category || '';
+        let subCatNames = normalized.subcategory || '';
         const filters = {};
 
-        // Extract filters dynamically
+        // Convert single values to arrays for uniform processing
+        if (!Array.isArray(mainCatNames)) {
+            mainCatNames = mainCatNames ? [mainCatNames] : [];
+        }
+        if (!Array.isArray(subCatNames)) {
+            subCatNames = subCatNames ? [subCatNames] : [];
+        }
+
+        // Extract filters dynamically (skip arrays in filters)
         for (const key of Object.keys(normalized)) {
             const matchedKey = allowedFilterKeys.find(k => k.toLowerCase() === key.toLowerCase());
-            if (matchedKey && normalized[key] != null && normalized[key] !== '' && normalized[key] !== 'null' && normalized[key] !== null) {
+            if (matchedKey && !Array.isArray(normalized[key]) && normalized[key] != null && normalized[key] !== '' && normalized[key] !== 'null' && normalized[key] !== null) {
                 filters[matchedKey] = normalized[key];
             }
         }
 
-        // Find matching category
-        const matchedCat = categories.find(c =>
-            c.name.toLowerCase() === mainCatName.toLowerCase()
-        );
+        // Process each main category
+        for (const mainCatName of mainCatNames) {
+            if (!mainCatName) continue;
 
-        if (!matchedCat) continue;
-
-        // If subcategory is specified, find it
-        if (subCatName) {
-            const matchedSub = matchedCat.subcategories.find(s =>
-                s.name.toLowerCase() === subCatName.toLowerCase()
+            // Find matching category
+            const matchedCat = categories.find(c =>
+                c.name.toLowerCase() === String(mainCatName).toLowerCase()
             );
 
-            if (matchedSub) {
-                const url = appendFilters(matchedSub.link, filters);
-                results.push({ category: matchedCat.name, subcategory: matchedSub.name, url });
+            if (!matchedCat) continue;
+
+            // Process each subcategory, or use main category if no subcategories specified
+            if (subCatNames.length > 0) {
+                for (const subCatName of subCatNames) {
+                    if (!subCatName) continue;
+
+                    const matchedSub = matchedCat.subcategories.find(s =>
+                        s.name.toLowerCase() === String(subCatName).toLowerCase()
+                    );
+
+                    if (matchedSub) {
+                        const url = appendFilters(matchedSub.link, filters);
+                        results.push({ category: matchedCat.name, subcategory: matchedSub.name, url });
+                    } else {
+                        // Sub not found, use main category link
+                        const url = appendFilters(matchedCat.link, filters);
+                        results.push({ category: matchedCat.name, subcategory: subCatName, url });
+                    }
+                }
             } else {
-                // Sub not found, use main category link
+                // No specific subcategory, use the main category link
                 const url = appendFilters(matchedCat.link, filters);
-                results.push({ category: matchedCat.name, subcategory: subCatName, url });
+                results.push({ category: matchedCat.name, subcategory: null, url });
             }
-        } else {
-            // No specific subcategory, use the main category link
-            const url = appendFilters(matchedCat.link, filters);
-            results.push({ category: matchedCat.name, subcategory: null, url });
         }
     }
 
