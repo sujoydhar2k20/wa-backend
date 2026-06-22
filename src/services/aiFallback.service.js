@@ -11,13 +11,35 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 function passesFilters(text, allowlist, blocklist) {
     const lowerText = text.toLowerCase();
 
+    const escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const splitKeywords = (value) => String(value || '')
+        .split(/[,;\n]+/)
+        .map(k => k.trim().toLowerCase())
+        .filter(Boolean);
+
+    const hasKeywordMatch = (sourceText, keyword) => {
+        const escaped = escapeRegExp(keyword);
+        const isAsciiKeyword = /^[\x00-\x7F]+$/.test(keyword);
+
+        // \b is ASCII-centric in JS regex; use Unicode-aware boundaries for non-ASCII scripts.
+        const pattern = isAsciiKeyword
+            ? `\\b${escaped}\\b`
+            : `(^|[^\\p{L}\\p{N}_])${escaped}([^\\p{L}\\p{N}_]|$)`;
+
+        try {
+            const regex = new RegExp(pattern, isAsciiKeyword ? 'i' : 'iu');
+            return regex.test(sourceText);
+        } catch (error) {
+            // Fallback for environments without Unicode property escapes.
+            return sourceText.includes(keyword);
+        }
+    };
+
     // Allowlist check: at least one keyword must match
     if (allowlist && allowlist.trim()) {
-        const allowedKeywords = allowlist.split(',').map(k => k.trim().toLowerCase()).filter(Boolean);
+        const allowedKeywords = splitKeywords(allowlist);
         const hasAllowedKeyword = allowedKeywords.some(keyword => {
-            // Word-boundary matching (case-insensitive)
-            const regex = new RegExp(`\\b${keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
-            return regex.test(lowerText);
+            return hasKeywordMatch(lowerText, keyword);
         });
         if (!hasAllowedKeyword) {
             logger.info(`AI Fallback: Message blocked by allowlist (no keyword match)`);
@@ -27,10 +49,9 @@ function passesFilters(text, allowlist, blocklist) {
 
     // Blocklist check: if any blocked keyword matches, reject
     if (blocklist && blocklist.trim()) {
-        const blockedKeywords = blocklist.split(',').map(k => k.trim().toLowerCase()).filter(Boolean);
+        const blockedKeywords = splitKeywords(blocklist);
         const hasBlockedKeyword = blockedKeywords.some(keyword => {
-            const regex = new RegExp(`\\b${keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
-            return regex.test(lowerText);
+            return hasKeywordMatch(lowerText, keyword);
         });
         if (hasBlockedKeyword) {
             logger.info(`AI Fallback: Message blocked by blocklist`);
