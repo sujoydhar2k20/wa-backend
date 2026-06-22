@@ -194,25 +194,40 @@ function buildCategoryLinks(aiResponse, categories, settings) {
  * Append filter params to a base URL.
  */
 function appendFilters(baseUrl, filters) {
-    if (!filters || Object.keys(filters).length === 0) return baseUrl;
-
     try {
         const url = new URL(baseUrl);
-        for (const [key, value] of Object.entries(filters)) {
-            if (value != null && value !== '' && value !== 'null') {
-                url.searchParams.set(key, String(value));
+        
+        // Append all provided filters
+        if (filters && Object.keys(filters).length > 0) {
+            for (const [key, value] of Object.entries(filters)) {
+                if (value != null && value !== '' && value !== 'null') {
+                    url.searchParams.set(key, String(value));
+                }
             }
         }
+        
+        // Always append sortBy=price_desc
+        url.searchParams.set('sortBy', 'price_desc');
+        
         return url.toString();
     } catch (e) {
         // Fallback for non-absolute URLs
         let urlStr = baseUrl;
-        for (const [key, value] of Object.entries(filters)) {
-            if (value != null && value !== '' && value !== 'null') {
-                const separator = urlStr.includes('?') ? '&' : '?';
-                urlStr += `${separator}${key}=${encodeURIComponent(String(value))}`;
+        
+        // Append all provided filters
+        if (filters && Object.keys(filters).length > 0) {
+            for (const [key, value] of Object.entries(filters)) {
+                if (value != null && value !== '' && value !== 'null') {
+                    const separator = urlStr.includes('?') ? '&' : '?';
+                    urlStr += `${separator}${key}=${encodeURIComponent(String(value))}`;
+                }
             }
         }
+        
+        // Always append sortBy=price_desc
+        const separator = urlStr.includes('?') ? '&' : '?';
+        urlStr += `${separator}sortBy=price_desc`;
+        
         return urlStr;
     }
 }
