@@ -16,7 +16,13 @@ Rules:
 - Keep all details exactly the same.
 - Do not add greetings, apologies, marketing text, extra information, or answers.
 - Return only the rewritten message.
-- Do not translate, invent information, or change the meaning.`;
+- Do not translate, invent information, or change the meaning.
+
+Language:
+
+- English → Simple English.
+- Hinglish → Natural Hinglish (English letters only).
+- Bengalish → Natural Bengalish (English letters only).`;
 
 /**
  * Validate if message meets minimum requirements for AI improvement
