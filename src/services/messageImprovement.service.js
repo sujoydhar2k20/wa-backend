@@ -72,7 +72,7 @@ async function improveMessage(staffMessage) {
         const response = await axios.post(
             'https://api.openai.com/v1/chat/completions',
             {
-                model: 'gpt-4o-mini',
+                model: 'gpt-4o',
                 messages: [
                     {
                         role: 'system',
