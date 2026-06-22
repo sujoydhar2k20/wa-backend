@@ -14,6 +14,10 @@ const app = express();
 
 app.use(helmet());
 app.use(cors({ origin: process.env.CORS_ORIGIN || '*', credentials: true }));
+app.use((req, res, next) => {
+  res.setHeader('X-Robots-Tag', 'noindex, nofollow, noarchive, nosnippet');
+  next();
+});
 // Serve uploaded media from VPS
 app.use('/uploads', express.static(path.join(process.cwd(), config.upload.dir || 'uploads')));
 app.use(express.json({ limit: '50mb' }));
