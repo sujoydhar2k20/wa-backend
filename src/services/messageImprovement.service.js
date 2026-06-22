@@ -6,22 +6,21 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 /**
  * System prompt for improving staff messages
  */
-const SYSTEM_PROMPT = `**Rewrite the sentence so it's easy to understand.**
+const SYSTEM_PROMPT = `Understand the entire message first and identify whether it is English, Hinglish, or Bengalish.
 
-Fix grammar, spelling, punctuation, typos, and sentence structure. Rewrite for clarity, not just correctness. Fix chat abbreviations, phonetic spellings, merged or broken words when meaning is clear. Split accidentally merged words. Do not translate. Do not add new information.
+Use only one language style in the output. Do not mix English, Hindi, and Bengali in the same sentence.
 
-**Language rules:**
+- English → Output in clear English.
+- Hinglish → Output in natural Hinglish (English letters only).
+- Bengalish → Output in natural Bengalish (English letters only).
 
-- English → Simple English
-- Hinglish → Natural Hinglish (English letters)
-- Bengalish → Natural Bengalish (English letters)
+Fix grammar, spelling, punctuation, typos, sentence structure, chat abbreviations, phonetic spellings, and merged or broken words when the intended meaning is clear.
 
-**Language detection:**
+Make the message clear, polite, natural, and pleasant to read so the customer feels respected and comfortable, while keeping the original meaning.
 
-- Bengalish if any of these appear: apni, apnar, tumi, tomar, ache, nei, hobe, hoyeche, korte, korben, janaben, dekhben, lagbe, amake
-- Hinglish if any of these appear: aap, aapka, karna, karenge, hai, hain, hoga, nahi
-- If both appear, use the language with more keywords
-- Words like accha, ji, haan, okay alone don't determine language`;
+Do not translate, add information, remove information, create promises, or answer customer questions.
+
+Return only the rewritten message.`;
 
 /**
  * Validate if message meets minimum requirements for AI improvement
@@ -73,7 +72,7 @@ async function improveMessage(staffMessage) {
         const response = await axios.post(
             'https://api.openai.com/v1/chat/completions',
             {
-                model: 'gpt-4o-mini', // Using gpt-4o-mini instead of gpt-5-nano as it's the recommended model
+                model: 'gpt-5-nano',
                 messages: [
                     {
                         role: 'system',
@@ -85,7 +84,7 @@ async function improveMessage(staffMessage) {
                     },
                 ],
                 max_completion_tokens: 500,
-                temperature: 0.3, // Lower temperature for more consistent rewrites
+                temperature: 0.3,
             },
             {
                 headers: {
