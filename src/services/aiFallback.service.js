@@ -280,6 +280,10 @@ async function handleAiFallback(waba, phoneNumberId, chat, message, text, whatsa
         // 1. Load AI Settings
         const settings = await AiSetting.findOne().lean();
         if (!settings) return false;
+        if (!settings.systemPrompt || !settings.systemPrompt.trim()) {
+            logger.warn('AI Fallback: No saved system prompt configured, skipping.');
+            return false;
+        }
 
         // Check if the current user is the test user.
         // Match tolerantly: waIds carry the country code (e.g. "917278665321") while the
