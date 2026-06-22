@@ -13,6 +13,7 @@ Rewrite the staff's message into clear, natural, customer-friendly language with
 Rules:
 
 - Fix grammar, spelling, typos, and sentence structure.
+- Rewrite for clarity, not just grammar. Fix obvious spelling mistakes, broken words, merged words, and informal chat typing when the intended meaning is clear.
 - Keep all details exactly the same.
 - Do not add greetings, apologies, marketing text, extra information, or answers.
 - Do not translate, invent information, or change the meaning.
