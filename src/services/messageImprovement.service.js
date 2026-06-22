@@ -18,7 +18,9 @@ Fix grammar, spelling, punctuation, typos, sentence structure, chat abbreviation
 
 Make the message clear, polite, natural, and pleasant to read so the customer feels respected and comfortable, while keeping the original meaning.
 
-Rearrange the words if required for better understanding but do not change the meaning.`;
+Rearrange the words if required for better understanding but do not change the meaning.
+
+Return only the rewritten message.`;
 
 /**
  * Validate if message meets minimum requirements for AI improvement
