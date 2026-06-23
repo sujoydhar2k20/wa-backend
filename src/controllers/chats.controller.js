@@ -1,5 +1,6 @@
 const { Chat, Message, ChatActivity, ProductReplyLog, BotExecution, BotFlow } = require('../models');
 const { getIO } = require('../websocket/socket.server');
+const { logger } = require('../utils/logger');
 
 async function list(req, res, next) {
     try {
@@ -590,6 +591,20 @@ async function getMessages(req, res, next) {
                 }),
             Message.countDocuments(filter),
         ]);
+        
+        // DEBUG: Log messages with quoted content
+        const messagesWithQuoted = messages.filter(m => m.quotedMessage);
+        if (messagesWithQuoted.length > 0) {
+            logger.info(`[DEBUG] getMessages returning ${messagesWithQuoted.length} messages with quotedMessage:`, {
+                messagesWithQuoted: messagesWithQuoted.map(m => ({
+                    _id: m._id,
+                    type: m.type,
+                    quotedMessage: m.quotedMessage,
+                    replyToMessageId: m.replyToMessageId
+                }))
+            });
+        }
+        
         res.json({ data: messages.reverse(), total, page: parseInt(page, 10), limit: finalLimit });
     } catch (e) {
         next(e);

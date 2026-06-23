@@ -82,6 +82,15 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
         return;
     }
 
+    // DEBUG: Log full message structure to see what WhatsApp is sending
+    logger.info(`[WEBHOOK DEBUG] Incoming message structure:`, {
+        messageId: msg.id,
+        type: msg.type,
+        hasContext: !!msg.context,
+        context: msg.context,
+        fullMsg: JSON.stringify(msg, null, 2)
+    });
+
     const waId = msg.from; // Sender's phone number
     
     // Check if the number is globally blocked in AI settings
@@ -234,8 +243,23 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
     // WhatsApp provides the parent wa message ID in context.message_id.
     // We also capture the quoted message preview details for display in the UI.
     const repliedWaMessageId = msg.context?.message_id;
+    logger.info(`[WEBHOOK DEBUG] Quoted message check:`, {
+        repliedWaMessageId,
+        hasQuotedMessage: !!repliedWaMessageId
+    });
+    
     if (repliedWaMessageId) {
+        logger.info(`[WEBHOOK DEBUG] Looking up parent message with messageId: ${repliedWaMessageId}`);
         const parentMessage = await Message.findOne({ messageId: repliedWaMessageId }).select('_id text type caption waId sentBy');
+        
+        logger.info(`[WEBHOOK DEBUG] Parent message lookup result:`, {
+            found: !!parentMessage,
+            parentMessageId: parentMessage?._id,
+            parentText: parentMessage?.text,
+            parentType: parentMessage?.type,
+            parentWaId: parentMessage?.waId
+        });
+        
         if (parentMessage?._id) {
             messageData.replyToMessageId = parentMessage._id;
             
@@ -261,6 +285,11 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
                 caption: parentMessage.caption || null,
                 mediaUrl: parentMessage.mediaUrl || null,
             };
+            
+            logger.info(`[WEBHOOK DEBUG] QuotedMessage built:`, {
+                quotedMessage: messageData.quotedMessage,
+                messageDataReplyToId: messageData.replyToMessageId
+            });
         }
     }
 
@@ -353,7 +382,22 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
 
     let message;
     try {
+        logger.info(`[WEBHOOK DEBUG] About to save message with data:`, {
+            hasQuotedMessage: !!messageData.quotedMessage,
+            quotedMessage: messageData.quotedMessage,
+            replyToMessageId: messageData.replyToMessageId,
+            messageType: messageData.type,
+            messageText: messageData.text
+        });
+        
         message = await Message.create(messageData);
+        
+        logger.info(`[WEBHOOK DEBUG] Message saved successfully:`, {
+            messageId: message._id,
+            hasQuotedMessage: !!message.quotedMessage,
+            quotedMessage: message.quotedMessage,
+            replyToMessageId: message.replyToMessageId
+        });
     } catch (createErr) {
         // E11000 = duplicate key error: two simultaneous webhook retries raced past
         // the findOne check above. The first insert won — just bail out silently.

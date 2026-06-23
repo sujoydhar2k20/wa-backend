@@ -52,6 +52,36 @@ const limiter = rateLimit({
 app.use('/api', limiter);
 app.use(requestLogger);
 
+// DIAGNOSTIC ENDPOINT: Check quoted messages in database (remove in production)
+app.get('/api/diagnostic/quoted-messages', async (req, res) => {
+    try {
+        const { Message } = require('./models');
+        const messages = await Message.find({ quotedMessage: { $exists: true, $ne: null } })
+            .limit(20)
+            .sort({ createdAt: -1 })
+            .select('_id messageId type text quotedMessage replyToMessageId createdAt');
+        
+        const result = messages.map(m => ({
+            _id: m._id,
+            messageId: m.messageId,
+            type: m.type,
+            text: m.text?.substring(0, 50),
+            quotedMessage: m.quotedMessage,
+            replyToMessageId: m.replyToMessageId,
+            createdAt: m.createdAt
+        }));
+        
+        res.json({ 
+            success: true, 
+            count: result.length, 
+            messages: result,
+            total: await Message.countDocuments({ quotedMessage: { $exists: true, $ne: null } })
+        });
+    } catch (e) {
+        res.status(500).json({ success: false, error: e.message });
+    }
+});
+
 app.use('/api', routes);
 
 app.use((req, res) => res.status(404).json({ success: false, message: 'Not found' }));
