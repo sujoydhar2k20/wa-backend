@@ -156,7 +156,6 @@ async function sendTypingAction(wabaId, phoneNumberId, to, action = 'typing_on')
     messaging_product: 'whatsapp',
     recipient_type: 'individual',
     to: to.replace(/\D/g, ''),
-    type: null,
     action: {
       type: action,
     },
