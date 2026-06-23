@@ -505,6 +505,13 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
         }
     } else if (msg.type === 'image') {
         const ocrText = message?.metadata?.ocr?.text || '';
+        logger.info(`[DEBUG] Image handling - message metadata:`, {
+            hasMetadata: !!message?.metadata,
+            metadataKeys: message?.metadata ? Object.keys(message.metadata) : [],
+            hasOcr: !!message?.metadata?.ocr,
+            ocrText: ocrText,
+            fullMetadata: message?.metadata
+        });
         if (ocrText) {
             // Send typing indicator for image processing
             try {
