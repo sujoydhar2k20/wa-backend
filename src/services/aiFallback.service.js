@@ -376,23 +376,55 @@ async function handleAiFallback(waba, phoneNumberId, chat, message, text, whatsa
             return false;
         }
 
-        // 6. Build prompt and call OpenAI
+        // 6. Send typing indicator (only for image OCR, not for regular text fallback)
+        const isImageOcr = message?.metadata?.ocr?.text && text === message.metadata.ocr.text;
+        if (isImageOcr) {
+            try {
+                await whatsappService.sendTypingAction(waba._id, phoneNumberId, chat.waId, 'typing_on');
+                logger.info(`AI Fallback: Typing indicator sent for image processing`);
+            } catch (typingErr) {
+                logger.warn(`AI Fallback: Failed to send typing indicator: ${typingErr.message}`);
+                // Continue processing even if typing indicator fails
+            }
+        }
+
+        // 7. Build prompt and call OpenAI
         const filterParameters = settings.filterParameters || ['&purity=', '&size=', '&priceMax=', '&weightMax='];
         const systemPrompt = buildSystemPrompt(settings.systemPrompt, categories, filterParameters);
         const openaiResult = await callOpenAI(systemPrompt, text);
 
         if (!openaiResult || !openaiResult.parsed) {
             logger.warn('AI Fallback: No valid response from OpenAI');
+            
+            // Stop typing indicator if it was started
+            if (isImageOcr) {
+                try {
+                    await whatsappService.sendTypingAction(waba._id, phoneNumberId, chat.waId, 'typing_off');
+                } catch (typingErr) {
+                    logger.warn(`AI Fallback: Failed to stop typing indicator: ${typingErr.message}`);
+                }
+            }
+            
             return false;
         }
 
         const { parsed: aiResponse, usage } = openaiResult;
 
-        // 7. Match to category links
+        // 8. Match to category links
         const links = buildCategoryLinks(aiResponse, categories, settings);
 
         if (!links.length) {
             logger.info('AI Fallback: No category match found in AI response');
+            
+            // Stop typing indicator if it was started
+            if (isImageOcr) {
+                try {
+                    await whatsappService.sendTypingAction(waba._id, phoneNumberId, chat.waId, 'typing_off');
+                } catch (typingErr) {
+                    logger.warn(`AI Fallback: Failed to stop typing indicator: ${typingErr.message}`);
+                }
+            }
+            
             // Log as success call but no match
             await Message.create({
                 chatId: chat._id,
@@ -411,7 +443,7 @@ async function handleAiFallback(waba, phoneNumberId, chat, message, text, whatsa
             return false;
         }
 
-        // 8. Build and send reply
+        // 9. Build and send reply
         const replyText = buildReplyMessage(links, aiResponse, settings);
         
         logger.info(`AI Fallback: Sending reply with ${links.length} link(s) to ${chat.waId}`);
@@ -424,7 +456,16 @@ async function handleAiFallback(waba, phoneNumberId, chat, message, text, whatsa
             message.messageId // reply to the original message
         );
 
-        // 9. Save outbound message to DB
+        // Stop typing indicator after sending the message
+        if (isImageOcr) {
+            try {
+                await whatsappService.sendTypingAction(waba._id, phoneNumberId, chat.waId, 'typing_off');
+            } catch (typingErr) {
+                logger.warn(`AI Fallback: Failed to stop typing indicator: ${typingErr.message}`);
+            }
+        }
+
+        // 10. Save outbound message to DB
         const msgId = waResult?.messages?.[0]?.id;
         const outboundMsg = await Message.create({
             chatId: chat._id,
@@ -464,6 +505,14 @@ async function handleAiFallback(waba, phoneNumberId, chat, message, text, whatsa
 
     } catch (error) {
         logger.error(`AI Fallback error: ${error.message}`);
+        
+        // Stop typing indicator on error
+        try {
+            await whatsappService.sendTypingAction(waba._id, phoneNumberId, chat.waId, 'typing_off');
+        } catch (typingErr) {
+            logger.warn(`AI Fallback: Failed to stop typing indicator on error: ${typingErr.message}`);
+        }
+        
         return false;
     }
 }

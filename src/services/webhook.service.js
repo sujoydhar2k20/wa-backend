@@ -508,6 +508,10 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
         if (ocrText) {
             handleProductCodeReply(waba, phoneNumberId, chat, message, ocrText, 'image_ocr')
             .catch(e => logger.error('Product code auto-reply error:', e.message));
+            
+            // For image with OCR text, trigger AI fallback with typing indicator
+            aiFallbackService.handleAiFallback(waba, phoneNumberId, chat, message, ocrText, whatsappService)
+                .catch(e => logger.error('AI Fallback error for image OCR:', e.message));
         }
     }
     // Bot flow execution (fire-and-forget)
