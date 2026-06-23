@@ -916,10 +916,14 @@ async function handleProductCodeReply(waba, phoneNumberId, chat, message, text, 
     const searchCode = String(product.code || '');
     const searchParam = encodeURIComponent(searchCode).replace(/%2F/g, '/');
 
+    // Prefer explicit net weight fields when available (some imports store gross/net separately)
+    const displayWeightVal = product.netWeight ?? (product.metadata && product.metadata.netWeight) ?? product.weight;
+    const weightLine = displayWeightVal != null ? `⚖️ Weight: ${displayWeightVal}gm` : null;
+
     const lines = [
         CATEGORY_HEADER[product.category] || `📦 Product Details`,
         `📋 Code: ${product.code}`,
-        product.weight != null ? `⚖️ Weight: ${product.weight}g` : null,
+        weightLine,
         displayPrice != null ? `💵 Approx: ₹${displayPrice.toLocaleString()}` : null,
         ``,
         `🛒 Buy Now: https://biswakarmagold.com/products?search=${searchParam}`,
