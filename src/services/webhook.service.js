@@ -250,14 +250,16 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
     
     if (repliedWaMessageId) {
         logger.info(`[WEBHOOK DEBUG] Looking up parent message with messageId: ${repliedWaMessageId}`);
-        const parentMessage = await Message.findOne({ messageId: repliedWaMessageId }).select('_id text type caption waId sentBy');
+        const parentMessage = await Message.findOne({ messageId: repliedWaMessageId }).select('_id text type caption waId sentBy mediaUrl fileName');
         
         logger.info(`[WEBHOOK DEBUG] Parent message lookup result:`, {
             found: !!parentMessage,
             parentMessageId: parentMessage?._id,
             parentText: parentMessage?.text,
             parentType: parentMessage?.type,
-            parentWaId: parentMessage?.waId
+            parentWaId: parentMessage?.waId,
+            parentCaption: parentMessage?.caption,
+            parentMediaUrl: parentMessage?.mediaUrl
         });
         
         if (parentMessage?._id) {
@@ -275,15 +277,20 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
             }
             
             // Build the quoted message preview data
-            // Store the actual message text/content, not the formatted display version
+            // For text messages: use text
+            // For media messages: use caption as the main text display
+            // Store raw content, frontend handles formatting
+            const previewText = parentMessage.text || parentMessage.caption || '';
+            
             messageData.quotedMessage = {
                 messageId: repliedWaMessageId,
-                text: parentMessage.text || parentMessage.caption || '', // Raw text/caption
+                text: previewText,
                 type: parentMessage.type,
                 waId: parentMessage.waId,
                 senderName: senderName,
                 caption: parentMessage.caption || null,
                 mediaUrl: parentMessage.mediaUrl || null,
+                fileName: parentMessage.fileName || null,
             };
             
             logger.info(`[WEBHOOK DEBUG] QuotedMessage built:`, {
