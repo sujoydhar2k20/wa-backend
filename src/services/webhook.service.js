@@ -240,9 +240,9 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
     };
 
     // Preserve reply threading for inbound customer replies.
-    // WhatsApp provides the parent wa message ID in context.message_id.
+    // WhatsApp provides the parent wa message ID in context.id (NOT context.message_id).
     // We also capture the quoted message preview details for display in the UI.
-    const repliedWaMessageId = msg.context?.message_id;
+    const repliedWaMessageId = msg.context?.id;
     logger.info(`[WEBHOOK DEBUG] Quoted message check:`, {
         repliedWaMessageId,
         hasQuotedMessage: !!repliedWaMessageId
