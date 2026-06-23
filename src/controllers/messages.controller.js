@@ -1,4 +1,4 @@
-const { Message, Chat } = require('../models');
+const { Message, Chat, Contact } = require('../models');
 const whatsappService = require('../services/whatsapp.service');
 const { logger } = require('../utils/logger');
 const { execFile } = require('child_process');
@@ -310,6 +310,60 @@ async function send(req, res, next) {
             messageText = bodyComp?.text || `[template message] ${templateName}`;
         }
 
+        // Build quotedMessage for outbound replies - same as webhook does for inbound
+        let quotedMessage = null;
+        if (replyToMessageId) {
+            const parentMsg = await Message.findById(replyToMessageId).populate('sentBy', 'name');
+            if (parentMsg) {
+                let displayText = '';
+                switch (parentMsg.type) {
+                    case 'text':
+                        displayText = parentMsg.text || '';
+                        break;
+                    case 'image':
+                        displayText = '📷 Photo';
+                        break;
+                    case 'video':
+                        displayText = '🎥 Video';
+                        break;
+                    case 'audio':
+                        displayText = '🎙️ Voice Message';
+                        break;
+                    case 'document':
+                        displayText = `📄 ${parentMsg.fileName || 'Document'}`;
+                        break;
+                    case 'location':
+                        displayText = '📍 Location';
+                        break;
+                    case 'sticker':
+                        displayText = '🖼️ Sticker';
+                        break;
+                    default:
+                        displayText = parentMsg.text || `${parentMsg.type} message`;
+                }
+
+                // Determine sender name for quoted message
+                let senderName = '';
+                if (parentMsg.sentBy) {
+                    senderName = typeof parentMsg.sentBy === 'object' ? parentMsg.sentBy.name : 'Staff';
+                } else {
+                    // Customer-sent message - use their profile name or number
+                    const contact = await Contact.findOne({ waId: parentMsg.waId }).select('name nameOnWhatsApp').lean();
+                    senderName = contact?.name || contact?.nameOnWhatsApp || parentMsg.waId;
+                }
+
+                quotedMessage = {
+                    messageId: parentMsg.messageId,
+                    text: parentMsg.text || '',
+                    type: parentMsg.type,
+                    waId: parentMsg.waId,
+                    senderName: senderName,
+                    caption: parentMsg.caption || null,
+                    mediaUrl: parentMsg.mediaUrl || null,
+                };
+            }
+        }
+
         const message = await Message.create({
             chatId,
             wabaId: chat.wabaId,
@@ -324,6 +378,7 @@ async function send(req, res, next) {
             status: 'sent',
             sentBy: req.user._id,
             replyToMessageId: replyToMessageId || undefined,
+            quotedMessage: quotedMessage || undefined,
             metadata: type === 'template' && req._templateData ? {
                 templateName: req._templateData.templateName,
                 templateLanguage: req._templateData.language,

@@ -251,40 +251,15 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
             }
             
             // Build the quoted message preview data
-            let quotedText = '';
-            switch (parentMessage.type) {
-                case 'text':
-                    quotedText = parentMessage.text || '';
-                    break;
-                case 'image':
-                    quotedText = parentMessage.caption || '📷 Photo';
-                    break;
-                case 'video':
-                    quotedText = parentMessage.caption || '🎥 Video';
-                    break;
-                case 'audio':
-                    quotedText = '🎙️ Voice Message';
-                    break;
-                case 'document':
-                    quotedText = `📄 ${parentMessage.caption || 'Document'}`;
-                    break;
-                case 'location':
-                    quotedText = '📍 Location';
-                    break;
-                case 'sticker':
-                    quotedText = '🖼️ Sticker';
-                    break;
-                default:
-                    quotedText = parentMessage.text || `${parentMessage.type} message`;
-            }
-            
+            // Store the actual message text/content, not the formatted display version
             messageData.quotedMessage = {
                 messageId: repliedWaMessageId,
-                text: quotedText,
+                text: parentMessage.text || parentMessage.caption || '', // Raw text/caption
                 type: parentMessage.type,
                 waId: parentMessage.waId,
                 senderName: senderName,
                 caption: parentMessage.caption || null,
+                mediaUrl: parentMessage.mediaUrl || null,
             };
         }
     }
