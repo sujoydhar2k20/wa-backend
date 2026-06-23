@@ -148,20 +148,6 @@ async function reactToMessage(wabaId, phoneNumberId, to, messageId, emoji) {
   });
 }
 
-async function sendTypingAction(wabaId, phoneNumberId, to, action = 'typing_on') {
-  // action can be 'typing_on' or 'typing_off'
-  // Send typing indicator without blocking/opted-out check since it's a status action, not a message
-  const path = `/${phoneNumberId}/messages`;
-  return request(wabaId, 'POST', path, {
-    messaging_product: 'whatsapp',
-    recipient_type: 'individual',
-    to: to.replace(/\D/g, ''),
-    action: {
-      type: action,
-    },
-  });
-}
-
 async function downloadMedia(wabaId, mediaId) {
   const data = await request(wabaId, 'GET', `/${mediaId}`);
   const url = data.url;
@@ -400,7 +386,6 @@ module.exports = {
   sendMediaMessage,
   sendTemplateMessage,
   sendInteractiveMessage,
-  sendTypingAction,
   markMessageAsRead,
   reactToMessage,
   downloadMedia,

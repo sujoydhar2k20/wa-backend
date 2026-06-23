@@ -506,21 +506,8 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
     } else if (msg.type === 'image') {
         const ocrText = message?.metadata?.ocr?.text || '';
         if (ocrText) {
-            // Send typing indicator for image processing
-            try {
-                await whatsappService.sendTypingAction(waba._id, phoneNumberId, chat.waId, 'typing_on');
-                logger.info(`Typing indicator sent for image OCR processing`);
-            } catch (typingErr) {
-                logger.warn(`Failed to send typing indicator for image: ${typingErr.message}`);
-            }
-            
-            // Try product code lookup first
             handleProductCodeReply(waba, phoneNumberId, chat, message, ocrText, 'image_ocr')
             .catch(e => logger.error('Product code auto-reply error:', e.message));
-            
-            // Also try AI fallback for additional matches
-            aiFallbackService.handleAiFallback(waba, phoneNumberId, chat, message, ocrText, whatsappService)
-                .catch(e => logger.error('AI Fallback error for image OCR:', e.message));
         }
     }
     // Bot flow execution (fire-and-forget)
@@ -905,15 +892,6 @@ async function handleProductCodeReply(waba, phoneNumberId, chat, message, text, 
 
     if (!product) {
         // No match → silent, no reply
-        // If this was image OCR, stop typing indicator
-        if (source === 'image_ocr') {
-            try {
-                await whatsappService.sendTypingAction(waba._id, phoneNumberId, chat.waId, 'typing_off');
-                logger.info(`Typing indicator stopped (no product match for image OCR)`);
-            } catch (typingErr) {
-                logger.warn(`Failed to stop typing indicator: ${typingErr.message}`);
-            }
-        }
         return;
     }
 
@@ -951,16 +929,6 @@ async function handleProductCodeReply(waba, phoneNumberId, chat, message, text, 
     let replyError = null;
 
     try {
-        // Stop typing indicator before sending the actual response message (for image OCR)
-        if (source === 'image_ocr') {
-            try {
-                await whatsappService.sendTypingAction(waba._id, phoneNumberId, chat.waId, 'typing_off');
-                logger.info(`Typing indicator stopped before sending product reply`);
-            } catch (typingErr) {
-                logger.warn(`Failed to stop typing indicator: ${typingErr.message}`);
-            }
-        }
-
         const waResult = await whatsappService.sendTextMessage(
             waba._id,
             phoneNumberId,

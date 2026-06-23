@@ -388,12 +388,11 @@ async function handleAiFallback(waba, phoneNumberId, chat, message, text, whatsa
 
         const { parsed: aiResponse, usage } = openaiResult;
 
-        // 8. Match to category links
+        // 7. Match to category links
         const links = buildCategoryLinks(aiResponse, categories, settings);
 
         if (!links.length) {
             logger.info('AI Fallback: No category match found in AI response');
-            
             // Log as success call but no match
             await Message.create({
                 chatId: chat._id,
@@ -412,7 +411,7 @@ async function handleAiFallback(waba, phoneNumberId, chat, message, text, whatsa
             return false;
         }
 
-        // 9. Build and send reply
+        // 8. Build and send reply
         const replyText = buildReplyMessage(links, aiResponse, settings);
         
         logger.info(`AI Fallback: Sending reply with ${links.length} link(s) to ${chat.waId}`);
@@ -425,7 +424,7 @@ async function handleAiFallback(waba, phoneNumberId, chat, message, text, whatsa
             message.messageId // reply to the original message
         );
 
-        // 10. Save outbound message to DB
+        // 9. Save outbound message to DB
         const msgId = waResult?.messages?.[0]?.id;
         const outboundMsg = await Message.create({
             chatId: chat._id,
