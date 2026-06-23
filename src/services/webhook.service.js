@@ -232,11 +232,60 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
 
     // Preserve reply threading for inbound customer replies.
     // WhatsApp provides the parent wa message ID in context.message_id.
+    // We also capture the quoted message preview details for display in the UI.
     const repliedWaMessageId = msg.context?.message_id;
     if (repliedWaMessageId) {
-        const parentMessage = await Message.findOne({ messageId: repliedWaMessageId }).select('_id');
+        const parentMessage = await Message.findOne({ messageId: repliedWaMessageId }).select('_id text type caption waId sentBy');
         if (parentMessage?._id) {
             messageData.replyToMessageId = parentMessage._id;
+            
+            // Extract sender name from the parent message
+            let senderName = '';
+            if (parentMessage.sentBy) {
+                // Staff-sent message: populate sentBy to get the name
+                const parentWithSender = await Message.findById(parentMessage._id).populate('sentBy', 'name');
+                senderName = parentWithSender.sentBy?.name || 'Staff';
+            } else {
+                // Customer-sent message
+                senderName = profileName || waId;
+            }
+            
+            // Build the quoted message preview data
+            let quotedText = '';
+            switch (parentMessage.type) {
+                case 'text':
+                    quotedText = parentMessage.text || '';
+                    break;
+                case 'image':
+                    quotedText = parentMessage.caption || '📷 Photo';
+                    break;
+                case 'video':
+                    quotedText = parentMessage.caption || '🎥 Video';
+                    break;
+                case 'audio':
+                    quotedText = '🎙️ Voice Message';
+                    break;
+                case 'document':
+                    quotedText = `📄 ${parentMessage.caption || 'Document'}`;
+                    break;
+                case 'location':
+                    quotedText = '📍 Location';
+                    break;
+                case 'sticker':
+                    quotedText = '🖼️ Sticker';
+                    break;
+                default:
+                    quotedText = parentMessage.text || `${parentMessage.type} message`;
+            }
+            
+            messageData.quotedMessage = {
+                messageId: repliedWaMessageId,
+                text: quotedText,
+                type: parentMessage.type,
+                waId: parentMessage.waId,
+                senderName: senderName,
+                caption: parentMessage.caption || null,
+            };
         }
     }
 

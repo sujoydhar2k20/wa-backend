@@ -334,8 +334,16 @@ async function send(req, res, next) {
         // Update chat last message timestamp
         await Chat.findByIdAndUpdate(chatId, { lastMessageAt: new Date(), lastStaffMessageAt: new Date() });
 
-        // Populate sentBy so the response includes sender name for the chat UI
+        // Populate sentBy and replyToMessageId so the response includes sender name and reply details for the chat UI
         await message.populate('sentBy', 'name phone');
+        await message.populate({
+            path: 'replyToMessageId',
+            select: '_id text type mediaUrl caption waId sentBy',
+            populate: {
+                path: 'sentBy',
+                select: 'name'
+            }
+        });
 
         // Emit socket event globally so frontend updates instantly for other clients
         const { getIO } = require('../websocket/socket.server');
@@ -363,7 +371,15 @@ async function search(req, res, next) {
                 .sort({ createdAt: -1 })
                 .skip(skip)
                 .limit(parseInt(limit, 10))
-                .populate('sentBy', 'name phone'),
+                .populate('sentBy', 'name phone')
+                .populate({
+                    path: 'replyToMessageId',
+                    select: '_id text type mediaUrl caption waId sentBy',
+                    populate: {
+                        path: 'sentBy',
+                        select: 'name'
+                    }
+                }),
             Message.countDocuments(filter),
         ]);
         res.json({ data: messages, total, page: parseInt(page, 10), limit: parseInt(limit, 10) });

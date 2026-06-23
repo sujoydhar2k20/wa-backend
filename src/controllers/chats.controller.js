@@ -579,7 +579,15 @@ async function getMessages(req, res, next) {
                 .sort({ createdAt: -1 })
                 .skip(finalSkip)
                 .limit(finalLimit)
-                .populate('sentBy', 'name phone'),
+                .populate('sentBy', 'name phone')
+                .populate({
+                    path: 'replyToMessageId',
+                    select: '_id text type mediaUrl caption waId sentBy',
+                    populate: {
+                        path: 'sentBy',
+                        select: 'name'
+                    }
+                }),
             Message.countDocuments(filter),
         ]);
         res.json({ data: messages.reverse(), total, page: parseInt(page, 10), limit: finalLimit });

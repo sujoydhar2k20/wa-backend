@@ -12,6 +12,16 @@ const reactionSchema = new mongoose.Schema({
   emoji: String,
 }, { _id: false });
 
+const quotedMessageSchema = new mongoose.Schema({
+  messageId: String,          // WhatsApp message ID of the quoted message
+  text: String,               // Preview text of the quoted message
+  type: String,               // Message type (text, image, video, audio, document, etc)
+  waId: String,               // Sender's phone number
+  senderName: String,         // Display name of the sender
+  caption: String,            // Caption if it's a media message
+  mediaUrl: String,           // Media URL for preview (image/video thumbnails)
+}, { _id: false });
+
 const messageSchema = new mongoose.Schema(
   {
     chatId: { type: mongoose.Schema.Types.ObjectId, ref: 'Chat', required: true, index: true },
@@ -41,6 +51,7 @@ const messageSchema = new mongoose.Schema(
     sentByBot: { type: Boolean, default: false },
     metadata: { type: mongoose.Schema.Types.Mixed },
     replyToMessageId: { type: mongoose.Schema.Types.ObjectId, ref: 'Message' },
+    quotedMessage: quotedMessageSchema,
   },
   { timestamps: true }
 );
