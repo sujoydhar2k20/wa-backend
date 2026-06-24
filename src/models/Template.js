@@ -6,6 +6,8 @@ const templateComponentSchema = new mongoose.Schema({
   format: { type: String, default: 'TEXT' }, // TEXT, IMAGE, VIDEO, DOCUMENT
   buttons: [mongoose.Schema.Types.Mixed],
   example: mongoose.Schema.Types.Mixed,
+  imageUrl: String, // For HEADER IMAGE: stores the image URL from Meta or custom upload
+  imageMediaId: String, // For HEADER IMAGE: Media ID when uploaded to Meta
 }, { _id: false });
 
 const templateSchema = new mongoose.Schema(

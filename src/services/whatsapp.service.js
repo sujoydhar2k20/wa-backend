@@ -296,6 +296,24 @@ async function syncTemplates(wabaId) {
       else if (typeof t.language === 'object' && t.language.code) lang = t.language.code;
       else lang = String(t.language);
     }
+    
+    // Process components to extract image URLs
+    const processedComponents = (t.components || []).map(comp => {
+      const processed = {
+        ...comp,
+        format: comp.format || 'TEXT',
+      };
+      
+      // Extract image URL from component example if it's an IMAGE header
+      if ((comp.type || '').toUpperCase() === 'HEADER' && (comp.format || '').toUpperCase() === 'IMAGE') {
+        if (comp.example && comp.example.header_handle && Array.isArray(comp.example.header_handle)) {
+          processed.imageUrl = comp.example.header_handle[0]; // Store the image URL
+        }
+      }
+      
+      return processed;
+    });
+    
     await Template.findOneAndUpdate(
       { wabaId, name: t.name, language: lang },
       {
@@ -305,7 +323,7 @@ async function syncTemplates(wabaId) {
         language: lang,
         category: t.category,
         status: t.status,
-        components: t.components,
+        components: processedComponents,
         metaData: t,
       },
       { upsert: true, new: true }
