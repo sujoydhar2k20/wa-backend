@@ -134,16 +134,22 @@ async function sendTemplateMessage(wabaId, phoneNumberId, to, templateName, lang
             parameters: mobileComp.parameters,
           });
         }
-        // For IMAGE headers with custom upload: send the custom image media ID
-        else if (format === 'IMAGE' && dbComp.imageMediaId) {
-          finalComponents.push({
-            type: 'header',
-            image: {
-              id: dbComp.imageMediaId,
-            },
-          });
+        // For IMAGE headers: prefer custom uploaded media ID, else send image link if we have a pre-approved URL.
+        else if (format === 'IMAGE') {
+          if (dbComp.imageMediaId) {
+            finalComponents.push({
+              type: 'header',
+              image: { id: dbComp.imageMediaId },
+            });
+          } else if (dbComp.imageUrl) {
+            // Send image link — this ensures Meta receives an IMAGE header (avoids UNKNOWN)
+            finalComponents.push({
+              type: 'header',
+              image: { link: dbComp.imageUrl },
+            });
+          }
+          // If neither imageMediaId nor imageUrl exist, skip the header (Meta will use template definition)
         }
-        // For IMAGE/VIDEO/DOCUMENT with pre-approved media: don't send, Meta uses template definition
       } else if (compType === 'body') {
         // Include body if mobile app sent parameters for it
         if (mobileComp && mobileComp.parameters) {
