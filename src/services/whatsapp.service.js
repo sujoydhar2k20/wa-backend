@@ -127,18 +127,23 @@ async function sendTemplateMessage(wabaId, phoneNumberId, to, templateName, lang
       const mobileComp = mobileCompsByType[compType];
       
       if (compType === 'header') {
-        // ALWAYS include header with format field to tell Meta what type it is
-        const headerObj = {
-          type: 'header',
-          format: format, // IMAGE, VIDEO, DOCUMENT, or TEXT
-        };
-        
-        // If it's TEXT format and has parameters, add them
+        // For TEXT headers: send with parameters if provided
         if (format === 'TEXT' && mobileComp && mobileComp.parameters) {
-          headerObj.parameters = mobileComp.parameters;
+          finalComponents.push({
+            type: 'header',
+            parameters: mobileComp.parameters,
+          });
         }
-        
-        finalComponents.push(headerObj);
+        // For IMAGE headers with custom upload: send the custom image media ID
+        else if (format === 'IMAGE' && dbComp.imageMediaId) {
+          finalComponents.push({
+            type: 'header',
+            image: {
+              id: dbComp.imageMediaId,
+            },
+          });
+        }
+        // For IMAGE/VIDEO/DOCUMENT with pre-approved media: don't send, Meta uses template definition
       } else if (compType === 'body') {
         // Include body if mobile app sent parameters for it
         if (mobileComp && mobileComp.parameters) {

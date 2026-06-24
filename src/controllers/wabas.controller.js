@@ -363,6 +363,69 @@ async function getQuota(req, res, next) {
     }
 }
 
+async function uploadTemplateHeaderImage(req, res, next) {
+    try {
+        const { wabaId: wabaIdParam, templateName } = req.params;
+        const { Waba, Template } = require('../models');
+        const { logger } = require('../utils/logger');
+
+        // Validate input
+        if (!wabaIdParam || !templateName || !req.file) {
+            return res.status(400).json({ 
+                success: false, 
+                message: 'wabaId, templateName, and image file are required' 
+            });
+        }
+
+        // Get WABA to access phoneNumberId
+        const waba = await Waba.findById(wabaIdParam);
+        if (!waba) {
+            return res.status(404).json({ success: false, message: 'WABA not found' });
+        }
+
+        // Get template from database
+        const template = await Template.findOne({ wabaId: wabaIdParam, name: templateName });
+        if (!template) {
+            return res.status(404).json({ success: false, message: 'Template not found' });
+        }
+
+        // Upload image to Meta
+        const whatsappService = require('../services/whatsapp.service');
+        const phoneNumberId = waba.phoneNumbers?.[0]?.phoneNumberId;
+        if (!phoneNumberId) {
+            return res.status(400).json({ success: false, message: 'No phone number configured' });
+        }
+
+        const mediaId = await whatsappService.uploadMedia(wabaIdParam, phoneNumberId, req.file.buffer, req.file.mimetype);
+        console.log(`[DEBUG] Uploaded custom header image for template ${templateName}, mediaId: ${mediaId}`);
+
+        // Update template with custom image mediaId
+        const headerComponent = template.components?.find(c => (c.type || '').toUpperCase() === 'HEADER');
+        if (headerComponent) {
+            headerComponent.imageMediaId = mediaId;
+            // Optionally clear the pre-approved imageUrl since we're using custom
+            // headerComponent.imageUrl = null; // Uncomment if you want to replace
+        }
+        await template.save();
+
+        res.json({
+            success: true,
+            message: 'Custom header image uploaded successfully',
+            mediaId,
+            template
+        });
+    } catch (e) {
+        console.error('[ERROR] Failed to upload template header image:', e.message);
+        if (e.response?.data?.error) {
+            return res.status(400).json({
+                success: false,
+                message: 'Failed to upload image to Meta: ' + (e.response.data.error.message || e.message),
+            });
+        }
+        next(e);
+    }
+}
+
 module.exports = {
     list,
     create,
@@ -375,4 +438,5 @@ module.exports = {
     embeddedSignup,
     createTemplate,
     getQuota,
+    uploadTemplateHeaderImage,
 };
