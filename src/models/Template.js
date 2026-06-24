@@ -3,6 +3,7 @@ const mongoose = require('mongoose');
 const templateComponentSchema = new mongoose.Schema({
   type: String,
   text: String,
+  format: { type: String, default: 'TEXT' }, // TEXT, IMAGE, VIDEO, DOCUMENT
   buttons: [mongoose.Schema.Types.Mixed],
   example: mongoose.Schema.Types.Mixed,
 }, { _id: false });

@@ -196,7 +196,9 @@ async function send(req, res, next) {
                 // Build resolved components with variables injected for display
                 const resolvedComponents = (templateDoc.components || []).map(comp => {
                     const c = comp.toObject ? comp.toObject() : { ...comp };
-                    if (c.text && (c.type === 'BODY' || c.type === 'HEADER')) {
+                    // Only replace variables in TEXT format components (not IMAGE, VIDEO, DOCUMENT)
+                    const format = c.format || 'TEXT';
+                    if (c.text && format === 'TEXT' && (c.type === 'BODY' || c.type === 'HEADER')) {
                         // Find matching component variables from the request
                         const compType = c.type.toLowerCase();
                         const vars = (components || []).find(v => v.type === compType);
