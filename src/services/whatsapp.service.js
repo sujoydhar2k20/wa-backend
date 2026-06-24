@@ -188,16 +188,30 @@ async function uploadMedia(wabaId, phoneNumberId, fileBuffer, mimeType) {
 async function syncTemplates(wabaId) {
   const waba = await getWaba(wabaId);
   const wabaMetaId = waba.wabaId;
-  const data = await request(wabaId, 'GET', `/${wabaMetaId}/message_templates`);
-  const templates = data.data || [];
-  for (const t of templates) {
+
+  // Fetch all pages of templates from the Graph API (Graph may paginate results)
+  let allTemplates = [];
+  let path = `/${wabaMetaId}/message_templates`;
+  let cursor = null;
+  do {
+    const queryPath = cursor ? `${path}?after=${encodeURIComponent(cursor)}` : path;
+    const data = await request(wabaId, 'GET', queryPath);
+    const templates = data.data || [];
+    allTemplates = allTemplates.concat(templates);
+
+    cursor = data.paging && data.paging.cursors && data.paging.cursors.after ? data.paging.cursors.after : null;
+  } while (cursor);
+
+  for (const t of allTemplates) {
+    // Normalize language: Graph may return language codes like 'en_US' — store as-is
+    const lang = t.language || (t.language && t.language.code) || 'en';
     await Template.findOneAndUpdate(
-      { wabaId, name: t.name, language: t.language },
+      { wabaId, name: t.name, language: lang },
       {
         wabaId,
         templateId: t.id,
         name: t.name,
-        language: t.language,
+        language: lang,
         category: t.category,
         status: t.status,
         components: t.components,
@@ -206,8 +220,8 @@ async function syncTemplates(wabaId) {
       { upsert: true, new: true }
     );
   }
-  logger.info(`Synced ${templates.length} templates for WABA ${wabaId}`);
-  return templates;
+  logger.info(`Synced ${allTemplates.length} templates for WABA ${wabaId}`);
+  return allTemplates;
 }
 
 async function createTemplate(wabaId, name, category, language, components) {
