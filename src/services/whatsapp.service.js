@@ -102,31 +102,75 @@ async function sendTemplateMessage(wabaId, phoneNumberId, to, templateName, lang
   await checkContactBlockedOrOptedOut(to);
   const path = `/${phoneNumberId}/messages`;
   
-  // Get template from DB to know which components should be sent
+  // Get template from DB to understand component structure
   const Template = require('../models/Template');
   const templateDoc = await Template.findOne({ wabaId, name: templateName, language });
   
-  let filteredComponents = components;
+  let finalComponents = [];
+  
   if (templateDoc && templateDoc.components) {
-    // Build a map of component types to their formats from the DB template
-    const componentFormats = {};
-    (templateDoc.components || []).forEach(comp => {
-      const key = (comp.type || '').toLowerCase();
-      componentFormats[key] = (comp.format || 'TEXT').toUpperCase();
+    // Build map of mobile components for easy lookup
+    const mobileCompsByType = {};
+    (components || []).forEach(comp => {
+      mobileCompsByType[comp.type?.toLowerCase()] = comp;
     });
     
-    // Filter components: only include if format is TEXT or component is BUTTONS/BODY/FOOTER
-    filteredComponents = (components || []).filter(comp => {
-      const compType = (comp.type || '').toLowerCase();
-      const dbFormat = componentFormats[compType] || 'TEXT';
+    // Process each component type from template
+    (templateDoc.components || []).forEach(dbComp => {
+      const compType = (dbComp.type || '').toLowerCase();
+      const format = (dbComp.format || 'TEXT').toUpperCase();
+      const mobileComp = mobileCompsByType[compType];
       
-      // Skip non-TEXT format components (IMAGE, VIDEO, DOCUMENT)
-      if (dbFormat !== 'TEXT') {
-        console.log(`[DEBUG] Filtering out ${compType} component with ${dbFormat} format`);
-        return false;
+      if (compType === 'header') {
+        // For headers:
+        // - If format is TEXT and has parameters, include them
+        // - If format is IMAGE/VIDEO/DOCUMENT, DON'T send to API (Meta uses template's pre-approved media)
+        if (format === 'TEXT' && mobileComp && mobileComp.parameters) {
+          finalComponents.push({
+            type: 'header',
+            parameters: mobileComp.parameters,
+          });
+        }
+        // Skip IMAGE/VIDEO/DOCUMENT headers - they're in template definition
+      } else if (compType === 'body') {
+        // Include body if mobile app sent parameters for it
+        if (mobileComp && mobileComp.parameters) {
+          finalComponents.push({
+            type: 'body',
+            parameters: mobileComp.parameters,
+          });
+        }
+      } else if (compType === 'footer') {
+        // Include footer if mobile app sent parameters for it
+        if (mobileComp && mobileComp.parameters) {
+          finalComponents.push({
+            type: 'footer',
+            parameters: mobileComp.parameters,
+          });
+        }
+      } else if (compType === 'buttons') {
+        // Include button if mobile app sent it
+        if (mobileComp && mobileComp.sub_type && mobileComp.index !== undefined && mobileComp.parameters) {
+          finalComponents.push({
+            type: 'button',
+            sub_type: mobileComp.sub_type,
+            index: mobileComp.index,
+            parameters: mobileComp.parameters,
+          });
+        }
       }
-      return true;
     });
+    
+    console.log(`[DEBUG] Template ${templateName} has components:`, 
+      (templateDoc.components || []).map(c => `${c.type}(${c.format})`).join(', '));
+    console.log(`[DEBUG] Mobile app sent:`, 
+      (components || []).map(c => `${c.type}`).join(', '));
+    console.log(`[DEBUG] Reconstructed for Meta API:`, 
+      finalComponents.map(c => `${c.type}${c.parameters ? `(${c.parameters.length} params)` : ''}`).join(', '));
+  } else {
+    // Fallback: use components as-is if template not found
+    console.log(`[DEBUG] Template not found, using components from mobile app as-is`);
+    finalComponents = components;
   }
   
   const body = {
@@ -137,11 +181,11 @@ async function sendTemplateMessage(wabaId, phoneNumberId, to, templateName, lang
     template: { 
       name: templateName, 
       language: { code: language }, 
-      components: filteredComponents.length ? filteredComponents : undefined 
+      components: finalComponents.length ? finalComponents : undefined 
     },
   };
   
-  console.log(`[DEBUG] Sending template "${templateName}" to ${to} with components:`, JSON.stringify(filteredComponents, null, 2));
+  console.log(`[DEBUG] Final API request body:`, JSON.stringify(body, null, 2));
   
   return request(wabaId, 'POST', path, body);
 }
