@@ -127,16 +127,18 @@ async function sendTemplateMessage(wabaId, phoneNumberId, to, templateName, lang
       const mobileComp = mobileCompsByType[compType];
       
       if (compType === 'header') {
-        // For headers:
-        // - If format is TEXT and has parameters, include them
-        // - If format is IMAGE/VIDEO/DOCUMENT, DON'T send to API (Meta uses template's pre-approved media)
+        // ALWAYS include header with format field to tell Meta what type it is
+        const headerObj = {
+          type: 'header',
+          format: format, // IMAGE, VIDEO, DOCUMENT, or TEXT
+        };
+        
+        // If it's TEXT format and has parameters, add them
         if (format === 'TEXT' && mobileComp && mobileComp.parameters) {
-          finalComponents.push({
-            type: 'header',
-            parameters: mobileComp.parameters,
-          });
+          headerObj.parameters = mobileComp.parameters;
         }
-        // Skip IMAGE/VIDEO/DOCUMENT headers - they're in template definition
+        
+        finalComponents.push(headerObj);
       } else if (compType === 'body') {
         // Include body if mobile app sent parameters for it
         if (mobileComp && mobileComp.parameters) {
@@ -170,9 +172,8 @@ async function sendTemplateMessage(wabaId, phoneNumberId, to, templateName, lang
       (templateDoc.components || []).map(c => `${c.type}(${c.format})`).join(', '));
     console.log(`[DEBUG] Mobile app sent:`, 
       (components || []).map(c => `${c.type}`).join(', '));
-    console.log(`[DEBUG] Component mapping:`, JSON.stringify(mobileCompsByType, null, 2));
     console.log(`[DEBUG] Reconstructed for Meta API:`, 
-      finalComponents.map(c => `${c.type}${c.parameters ? `(${c.parameters.length} params)` : ''}`).join(', '));
+      finalComponents.map(c => `${c.type}(${c.format || 'default'})${c.parameters ? `[${c.parameters.length}p]` : ''}`).join(', '));
   } else {
     // Fallback: use components as-is if template not found
     console.log(`[DEBUG] Template not found, using components from mobile app as-is`);
