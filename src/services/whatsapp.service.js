@@ -196,8 +196,23 @@ async function sendTemplateMessage(wabaId, phoneNumberId, to, templateName, lang
       components: finalComponents.length ? finalComponents : undefined 
     },
   };
-  
-  console.log(`[DEBUG] Final API request body:`, JSON.stringify(body, null, 2));
+  // Sanitize components: Meta API rejects unexpected keys like `format`.
+  const sanitizeComponents = (comps) => {
+    if (!Array.isArray(comps)) return comps;
+    return comps.map(c => {
+      // shallow clone and remove 'format' if present
+      const copy = Object.assign({}, c);
+      if (copy.hasOwnProperty('format')) delete copy.format;
+      // also ensure nested arrays (e.g., parameters) are left intact
+      return copy;
+    });
+  };
+
+  if (body.template && body.template.components) {
+    body.template.components = sanitizeComponents(body.template.components);
+  }
+
+  console.log(`[DEBUG] Final API request body (sanitized):`, JSON.stringify(body, null, 2));
   
   return request(wabaId, 'POST', path, body);
 }
