@@ -167,7 +167,11 @@ async function sendTemplateMessage(wabaId, phoneNumberId, to, templateName, lang
             parameters: mobileComp.parameters,
           });
         }
-        // For media headers, Meta expects the media object inside parameters.
+        // For media headers, only send an explicit media parameter when we have
+        // a real uploaded media ID. Pre-approved template image URLs from Meta
+        // are preview/example assets and often return 403 when Meta re-fetches
+        // them for delivery, so in that case we omit the header and let Meta use
+        // the media bound to the template definition itself.
         else if (format === 'IMAGE') {
           if (dbComp.imageMediaId) {
             finalComponents.push({
@@ -177,12 +181,7 @@ async function sendTemplateMessage(wabaId, phoneNumberId, to, templateName, lang
               ],
             });
           } else if (dbComp.imageUrl) {
-            finalComponents.push({
-              type: 'header',
-              parameters: [
-                buildHeaderMediaParameter('image', { link: dbComp.imageUrl }),
-              ],
-            });
+            console.log(`[DEBUG] Using template-defined pre-approved image for ${templateName}; skipping preview image URL`);
           }
           // If neither imageMediaId nor imageUrl exist, we cannot provide a valid media header.
         }
