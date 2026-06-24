@@ -98,6 +98,42 @@ async function sendMediaMessage(wabaId, phoneNumberId, to, type, urlOrId, captio
   return request(wabaId, 'POST', path, body);
 }
 
+async function ensureTemplateHeaderImageMediaId(wabaId, phoneNumberId, templateDoc, headerComponent) {
+  if (headerComponent.imageMediaId) return headerComponent.imageMediaId;
+  if (!headerComponent.imageUrl) return null;
+
+  logger.info(`Caching template header image as Meta media for ${templateDoc.name}`);
+
+  let response;
+  try {
+    response = await axios.get(headerComponent.imageUrl, {
+      responseType: 'arraybuffer',
+      timeout: 30000,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (compatible; WhatsApp-Template-Cache/1.0)',
+      },
+      maxRedirects: 5,
+    });
+  } catch (error) {
+    logger.error(`Failed to download template header image for ${templateDoc.name}: ${error.message}`);
+    throw new Error('Template image is not usable for delivery. Upload a custom header image and try again.');
+  }
+
+  const imageBuffer = Buffer.from(response.data);
+  if (!imageBuffer.length) {
+    throw new Error('Template image download returned empty data. Upload a custom header image and try again.');
+  }
+
+  const mimeType = (response.headers['content-type'] || 'image/jpeg').split(';')[0].trim();
+  const mediaId = await uploadMedia(wabaId, phoneNumberId, imageBuffer, mimeType);
+
+  headerComponent.imageMediaId = mediaId;
+  await templateDoc.save();
+
+  logger.info(`Cached template header image media for ${templateDoc.name}: ${mediaId}`);
+  return mediaId;
+}
+
 async function sendTemplateMessage(wabaId, phoneNumberId, to, templateName, language = 'en', components = []) {
   await checkContactBlockedOrOptedOut(to);
   const path = `/${phoneNumberId}/messages`;
@@ -154,7 +190,7 @@ async function sendTemplateMessage(wabaId, phoneNumberId, to, templateName, lang
     });
     
     // Process each component type from template
-    (templateDoc.components || []).forEach(dbComp => {
+    for (const dbComp of (templateDoc.components || [])) {
       const compType = (dbComp.type || '').toLowerCase();
       const format = (dbComp.format || 'TEXT').toUpperCase();
       const mobileComp = mobileCompsByType[compType];
@@ -167,21 +203,27 @@ async function sendTemplateMessage(wabaId, phoneNumberId, to, templateName, lang
             parameters: mobileComp.parameters,
           });
         }
-        // For media headers, only send an explicit media parameter when we have
-        // a real uploaded media ID. Pre-approved template image URLs from Meta
-        // are preview/example assets and often return 403 when Meta re-fetches
-        // them for delivery, so in that case we omit the header and let Meta use
-        // the media bound to the template definition itself.
+        // For media headers Meta still expects the header component, but example
+        // preview URLs from synced templates are not stable delivery assets.
+        // Convert the synced preview image into a real uploaded Meta media ID
+        // once, cache it on the template, and send the cached ID afterward.
         else if (format === 'IMAGE') {
-          if (dbComp.imageMediaId) {
+          const mediaId = await ensureTemplateHeaderImageMediaId(
+            wabaId,
+            phoneNumberId,
+            templateDoc,
+            dbComp,
+          );
+
+          if (mediaId) {
             finalComponents.push({
               type: 'header',
               parameters: [
-                buildHeaderMediaParameter('image', { id: dbComp.imageMediaId }),
+                buildHeaderMediaParameter('image', { id: mediaId }),
               ],
             });
-          } else if (dbComp.imageUrl) {
-            console.log(`[DEBUG] Using template-defined pre-approved image for ${templateName}; skipping preview image URL`);
+          } else {
+            console.log(`[DEBUG] Template ${templateName} has IMAGE header without cached media; Meta may reject if no upload is available`);
           }
           // If neither imageMediaId nor imageUrl exist, we cannot provide a valid media header.
         }
@@ -212,7 +254,7 @@ async function sendTemplateMessage(wabaId, phoneNumberId, to, templateName, lang
           });
         }
       }
-    });
+    }
     
     console.log(`[DEBUG] Template ${templateName} has components:`, 
       (templateDoc.components || []).map(c => `${c.type}(${c.format})`).join(', '));
