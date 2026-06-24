@@ -89,7 +89,6 @@ async function improveMessage(staffMessage) {
                     Authorization: `Bearer ${OPENAI_API_KEY}`,
                     'Content-Type': 'application/json',
                 },
-                timeout: 10000, // 10 second timeout
             }
         );
 
@@ -109,15 +108,20 @@ async function improveMessage(staffMessage) {
             improved: improvedMessage,
         };
     } catch (error) {
+        const respData = error.response?.data;
         logger.error('Message Improvement Error:', {
             message: error.message,
             code: error.code,
+            status: error.response?.status,
+            response: respData,
             originalText: staffMessage.substring(0, 100),
         });
 
+        const providerMessage = respData?.error?.message || respData?.message;
+
         return {
             success: false,
-            error: error.message || 'Failed to improve message',
+            error: providerMessage || error.message || 'Failed to improve message',
             original: staffMessage,
         };
     }
