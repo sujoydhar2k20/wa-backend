@@ -38,8 +38,8 @@ function validateMessageForImprovement(text) {
         return { valid: false, reason: 'Message too short (< 15 characters)' };
     }
 
-    if (wordCount < 3) {
-        return { valid: false, reason: 'Message too short (< 3 words)' };
+    if (wordCount < 4) {
+        return { valid: false, reason: 'Message too short (< 4 words)' };
     }
 
     return { valid: true };
@@ -72,7 +72,7 @@ async function improveMessage(staffMessage) {
         const response = await axios.post(
             'https://api.openai.com/v1/chat/completions',
             {
-                model: 'gpt-4o',
+                model: 'gpt-5-nano',
                 messages: [
                     {
                         role: 'system',
@@ -83,8 +83,6 @@ async function improveMessage(staffMessage) {
                         content: staffMessage,
                     },
                 ],
-                max_completion_tokens: 500,
-                temperature: 0.3,
             },
             {
                 headers: {
