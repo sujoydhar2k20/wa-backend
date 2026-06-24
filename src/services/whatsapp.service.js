@@ -101,10 +101,43 @@ async function sendMediaMessage(wabaId, phoneNumberId, to, type, urlOrId, captio
 async function sendTemplateMessage(wabaId, phoneNumberId, to, templateName, language = 'en', components = []) {
   await checkContactBlockedOrOptedOut(to);
   const path = `/${phoneNumberId}/messages`;
+
+  const buildHeaderMediaParameter = (type, media) => ({
+    type,
+    [type.toLowerCase()]: media,
+  });
+  const normalizeTemplateComponentsForMeta = (comps) => {
+    if (!Array.isArray(comps)) return comps;
+    return comps.map(component => {
+      const copy = { ...component };
+      if (Object.prototype.hasOwnProperty.call(copy, 'format')) delete copy.format;
+
+      if ((copy.type || '').toLowerCase() === 'header' && !copy.parameters) {
+        if (copy.image) {
+          copy.parameters = [buildHeaderMediaParameter('image', copy.image)];
+          delete copy.image;
+        } else if (copy.video) {
+          copy.parameters = [buildHeaderMediaParameter('video', copy.video)];
+          delete copy.video;
+        } else if (copy.document) {
+          copy.parameters = [buildHeaderMediaParameter('document', copy.document)];
+          delete copy.document;
+        }
+      }
+
+      return copy;
+    });
+  };
   
   // Get template from DB to understand component structure
   const Template = require('../models/Template');
-  const templateDoc = await Template.findOne({ wabaId, name: templateName, language });
+  let templateDoc = await Template.findOne({ wabaId, name: templateName, language });
+  if (!templateDoc) {
+    templateDoc = await Template.findOne({ wabaId, name: templateName }).sort({ updatedAt: -1 });
+    if (templateDoc) {
+      console.log(`[DEBUG] Template language fallback matched ${templateName}: requested=${language}, stored=${templateDoc.language}`);
+    }
+  }
   
   let finalComponents = [];
   
@@ -134,21 +167,24 @@ async function sendTemplateMessage(wabaId, phoneNumberId, to, templateName, lang
             parameters: mobileComp.parameters,
           });
         }
-        // For IMAGE headers: prefer custom uploaded media ID, else send image link if we have a pre-approved URL.
+        // For media headers, Meta expects the media object inside parameters.
         else if (format === 'IMAGE') {
           if (dbComp.imageMediaId) {
             finalComponents.push({
               type: 'header',
-              image: { id: dbComp.imageMediaId },
+              parameters: [
+                buildHeaderMediaParameter('image', { id: dbComp.imageMediaId }),
+              ],
             });
           } else if (dbComp.imageUrl) {
-            // Send image link — this ensures Meta receives an IMAGE header (avoids UNKNOWN)
             finalComponents.push({
               type: 'header',
-              image: { link: dbComp.imageUrl },
+              parameters: [
+                buildHeaderMediaParameter('image', { link: dbComp.imageUrl }),
+              ],
             });
           }
-          // If neither imageMediaId nor imageUrl exist, skip the header (Meta will use template definition)
+          // If neither imageMediaId nor imageUrl exist, we cannot provide a valid media header.
         }
       } else if (compType === 'body') {
         // Include body if mobile app sent parameters for it
@@ -186,9 +222,9 @@ async function sendTemplateMessage(wabaId, phoneNumberId, to, templateName, lang
     console.log(`[DEBUG] Reconstructed for Meta API:`, 
       finalComponents.map(c => `${c.type}(${c.format || 'default'})${c.parameters ? `[${c.parameters.length}p]` : ''}`).join(', '));
   } else {
-    // Fallback: use components as-is if template not found
-    console.log(`[DEBUG] Template not found, using components from mobile app as-is`);
-    finalComponents = components;
+    // Fallback: normalize any stale client payload before sending to Meta.
+    console.log(`[DEBUG] Template not found, normalizing client components as-is`);
+    finalComponents = normalizeTemplateComponentsForMeta(components);
   }
   
   const body = {
@@ -202,20 +238,8 @@ async function sendTemplateMessage(wabaId, phoneNumberId, to, templateName, lang
       components: finalComponents.length ? finalComponents : undefined 
     },
   };
-  // Sanitize components: Meta API rejects unexpected keys like `format`.
-  const sanitizeComponents = (comps) => {
-    if (!Array.isArray(comps)) return comps;
-    return comps.map(c => {
-      // shallow clone and remove 'format' if present
-      const copy = Object.assign({}, c);
-      if (copy.hasOwnProperty('format')) delete copy.format;
-      // also ensure nested arrays (e.g., parameters) are left intact
-      return copy;
-    });
-  };
-
   if (body.template && body.template.components) {
-    body.template.components = sanitizeComponents(body.template.components);
+    body.template.components = normalizeTemplateComponentsForMeta(body.template.components);
   }
 
   console.log(`[DEBUG] Final API request body (sanitized):`, JSON.stringify(body, null, 2));
