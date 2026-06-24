@@ -101,13 +101,48 @@ async function sendMediaMessage(wabaId, phoneNumberId, to, type, urlOrId, captio
 async function sendTemplateMessage(wabaId, phoneNumberId, to, templateName, language = 'en', components = []) {
   await checkContactBlockedOrOptedOut(to);
   const path = `/${phoneNumberId}/messages`;
+  
+  // Get template from DB to know which components should be sent
+  const Template = require('../models/Template');
+  const templateDoc = await Template.findOne({ wabaId, name: templateName, language });
+  
+  let filteredComponents = components;
+  if (templateDoc && templateDoc.components) {
+    // Build a map of component types to their formats from the DB template
+    const componentFormats = {};
+    (templateDoc.components || []).forEach(comp => {
+      const key = (comp.type || '').toLowerCase();
+      componentFormats[key] = (comp.format || 'TEXT').toUpperCase();
+    });
+    
+    // Filter components: only include if format is TEXT or component is BUTTONS/BODY/FOOTER
+    filteredComponents = (components || []).filter(comp => {
+      const compType = (comp.type || '').toLowerCase();
+      const dbFormat = componentFormats[compType] || 'TEXT';
+      
+      // Skip non-TEXT format components (IMAGE, VIDEO, DOCUMENT)
+      if (dbFormat !== 'TEXT') {
+        console.log(`[DEBUG] Filtering out ${compType} component with ${dbFormat} format`);
+        return false;
+      }
+      return true;
+    });
+  }
+  
   const body = {
     messaging_product: 'whatsapp',
     recipient_type: 'individual',
     to: to.replace(/\D/g, ''),
     type: 'template',
-    template: { name: templateName, language: { code: language }, components: components.length ? components : undefined },
+    template: { 
+      name: templateName, 
+      language: { code: language }, 
+      components: filteredComponents.length ? filteredComponents : undefined 
+    },
   };
+  
+  console.log(`[DEBUG] Sending template "${templateName}" to ${to} with components:`, JSON.stringify(filteredComponents, null, 2));
+  
   return request(wabaId, 'POST', path, body);
 }
 

@@ -189,10 +189,14 @@ async function send(req, res, next) {
         } else if (type === 'template') {
             if (!templateName) return res.status(400).json({ success: false, message: 'templateName is required for template messages' });
 
+            console.log(`[DEBUG] Template message received - template: ${templateName}, language: ${language}, components from mobile:`, JSON.stringify(components || [], null, 2));
+
             // Look up the template from DB to store its components for chat preview
             const Template = require('../models/Template');
             const templateDoc = await Template.findOne({ wabaId: chat.wabaId, name: templateName, language: language || 'en' });
             if (templateDoc) {
+                console.log(`[DEBUG] Template found in DB with ${templateDoc.components?.length || 0} components:`, JSON.stringify(templateDoc.components || [], null, 2));
+                
                 // Build resolved components with variables injected for display
                 const resolvedComponents = (templateDoc.components || []).map(comp => {
                     const c = comp.toObject ? comp.toObject() : { ...comp };
