@@ -203,8 +203,13 @@ async function syncTemplates(wabaId) {
   } while (cursor);
 
   for (const t of allTemplates) {
-    // Normalize language: Graph may return language codes like 'en_US' — store as-is
-    const lang = t.language || (t.language && t.language.code) || 'en';
+    // Normalize language: ensure we store a string (Graph may return an object)
+    let lang = 'en';
+    if (t.language) {
+      if (typeof t.language === 'string') lang = t.language;
+      else if (typeof t.language === 'object' && t.language.code) lang = t.language.code;
+      else lang = String(t.language);
+    }
     await Template.findOneAndUpdate(
       { wabaId, name: t.name, language: lang },
       {
