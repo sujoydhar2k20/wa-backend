@@ -761,7 +761,16 @@ async function getAutoMessages(req, res, next) {
                 // Enrich with product log data
                 const pLog = productLogByMsgId[msg.replyToMessageId?.toString()];
                 if (pLog?.productId) {
-                    result.productInfo = pLog.productId;
+                    // If product is silver, remove weight before sending to clients
+                    try {
+                        const prod = { ...pLog.productId };
+                        if (prod.category && prod.category.toString().toLowerCase() === 'silver') {
+                            delete prod.weight;
+                        }
+                        result.productInfo = prod;
+                    } catch (e) {
+                        result.productInfo = pLog.productId;
+                    }
                 }
             } else {
                 // This is a bot flow message - find which flow triggered it
@@ -864,7 +873,16 @@ async function getAllAutoMessages(req, res, next) {
 
                 const pLog = productLogByMsgId[msg.replyToMessageId?.toString()];
                 if (pLog?.productId) {
-                    result.productInfo = pLog.productId;
+                    // If product is silver, remove weight before sending to clients
+                    try {
+                        const prod = { ...pLog.productId };
+                        if (prod.category && prod.category.toString().toLowerCase() === 'silver') {
+                            delete prod.weight;
+                        }
+                        result.productInfo = prod;
+                    } catch (e) {
+                        result.productInfo = pLog.productId;
+                    }
                 }
             } else {
                 const msgTime = new Date(msg.createdAt).getTime();

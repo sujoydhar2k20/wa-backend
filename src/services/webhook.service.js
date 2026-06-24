@@ -918,7 +918,9 @@ async function handleProductCodeReply(waba, phoneNumberId, chat, message, text, 
 
     // Prefer explicit net weight fields when available (some imports store gross/net separately)
     const displayWeightVal = product.netWeight ?? (product.metadata && product.metadata.netWeight) ?? product.weight;
-    const weightLine = displayWeightVal != null ? `⚖️ Weight: ${displayWeightVal}gm` : null;
+    // Do not include weight line for silver products
+    const isSilver = (product.category || '').toString().toLowerCase() === 'silver';
+    const weightLine = (!isSilver && displayWeightVal != null) ? `⚖️ Weight: ${displayWeightVal}gm` : null;
 
     const lines = [
         CATEGORY_HEADER[product.category] || `📦 Product Details`,
