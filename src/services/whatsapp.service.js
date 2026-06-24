@@ -109,10 +109,15 @@ async function sendTemplateMessage(wabaId, phoneNumberId, to, templateName, lang
   let finalComponents = [];
   
   if (templateDoc && templateDoc.components) {
-    // Build map of mobile components for easy lookup
+    // Build map of mobile components for easy lookup (handle both singular and plural)
     const mobileCompsByType = {};
     (components || []).forEach(comp => {
-      mobileCompsByType[comp.type?.toLowerCase()] = comp;
+      const typeKey = (comp.type || '').toLowerCase();
+      mobileCompsByType[typeKey] = comp;
+      // Also store with 's' suffix for plural variants (button -> buttons)
+      if (typeKey === 'button') {
+        mobileCompsByType['buttons'] = comp;
+      }
     });
     
     // Process each component type from template
@@ -149,12 +154,12 @@ async function sendTemplateMessage(wabaId, phoneNumberId, to, templateName, lang
           });
         }
       } else if (compType === 'buttons') {
-        // Include button if mobile app sent it
+        // Include button if mobile app sent it (handle both 'button' and 'buttons' types)
         if (mobileComp && mobileComp.sub_type && mobileComp.index !== undefined && mobileComp.parameters) {
           finalComponents.push({
             type: 'button',
             sub_type: mobileComp.sub_type,
-            index: mobileComp.index,
+            index: String(mobileComp.index), // Ensure index is a string
             parameters: mobileComp.parameters,
           });
         }
@@ -165,6 +170,7 @@ async function sendTemplateMessage(wabaId, phoneNumberId, to, templateName, lang
       (templateDoc.components || []).map(c => `${c.type}(${c.format})`).join(', '));
     console.log(`[DEBUG] Mobile app sent:`, 
       (components || []).map(c => `${c.type}`).join(', '));
+    console.log(`[DEBUG] Component mapping:`, JSON.stringify(mobileCompsByType, null, 2));
     console.log(`[DEBUG] Reconstructed for Meta API:`, 
       finalComponents.map(c => `${c.type}${c.parameters ? `(${c.parameters.length} params)` : ''}`).join(', '));
   } else {
