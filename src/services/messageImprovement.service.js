@@ -38,8 +38,8 @@ function validateMessageForImprovement(text) {
         return { valid: false, reason: 'Message too short (< 15 characters)' };
     }
 
-    if (wordCount < 4) {
-        return { valid: false, reason: 'Message too short (< 4 words)' };
+    if (wordCount < 3) {
+        return { valid: false, reason: 'Message too short (< 3 words)' };
     }
 
     return { valid: true };
@@ -72,7 +72,7 @@ async function improveMessage(staffMessage) {
         const response = await axios.post(
             'https://api.openai.com/v1/chat/completions',
             {
-                model: 'gpt-5-nano',
+                model: 'gpt-4o',
                 messages: [
                     {
                         role: 'system',
@@ -83,12 +83,15 @@ async function improveMessage(staffMessage) {
                         content: staffMessage,
                     },
                 ],
+                max_completion_tokens: 500,
+                temperature: 0.3,
             },
             {
                 headers: {
                     Authorization: `Bearer ${OPENAI_API_KEY}`,
                     'Content-Type': 'application/json',
                 },
+                timeout: 10000, // 10 second timeout
             }
         );
 
@@ -108,20 +111,15 @@ async function improveMessage(staffMessage) {
             improved: improvedMessage,
         };
     } catch (error) {
-        const respData = error.response?.data;
         logger.error('Message Improvement Error:', {
             message: error.message,
             code: error.code,
-            status: error.response?.status,
-            response: respData,
             originalText: staffMessage.substring(0, 100),
         });
 
-        const providerMessage = respData?.error?.message || respData?.message;
-
         return {
             success: false,
-            error: providerMessage || error.message || 'Failed to improve message',
+            error: error.message || 'Failed to improve message',
             original: staffMessage,
         };
     }

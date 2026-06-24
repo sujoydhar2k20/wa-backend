@@ -98,6 +98,7 @@ async function callOpenAI(systemPrompt, userMessage) {
                     Authorization: `Bearer ${OPENAI_API_KEY}`,
                     'Content-Type': 'application/json',
                 },
+                timeout: 15000,
             }
         );
 
