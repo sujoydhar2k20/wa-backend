@@ -44,12 +44,37 @@ app.use('/uploads', express.static(path.join(process.cwd(), config.upload.dir ||
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
+// Global rate limiter: 50,000 requests per 15 minutes
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 10000, // Increased from 200 to 10000 to prevent webhook / active staff rate-limiting issues
+  max: 50000, // Global limit: 50,000 req/15 min (~55 req/sec)
   message: { success: false, message: 'Too many requests' },
+  skip: (req) => {
+    // Skip rate limiting for webhook endpoints
+    return req.path === '/api/webhook' || req.path.startsWith('/api/webhook/');
+  },
+  keyGenerator: (req, res) => {
+    // Rate limit per user ID if authenticated, otherwise by IP
+    return req.user?._id?.toString() || req.ip;
+  },
 });
+
+// Per-user rate limiter: 500 requests per 15 minutes per authenticated user
+const perUserLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 500, // Per-user limit: 500 req/15 min (~5.5 req/sec per user)
+  message: { success: false, message: 'Too many requests from this user' },
+  skip: (req) => {
+    // Only apply to authenticated users
+    return !req.user || !req.user._id;
+  },
+  keyGenerator: (req, res) => {
+    return req.user._id.toString();
+  },
+});
+
 app.use('/api', limiter);
+app.use('/api', perUserLimiter);
 app.use(requestLogger);
 
 // DIAGNOSTIC ENDPOINT: Check quoted messages in database (remove in production)
