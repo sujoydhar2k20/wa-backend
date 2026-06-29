@@ -336,7 +336,7 @@ async function checkAndNudgeUnreadChats() {
                 const notifType = isRepeated ? 'repeated_notification' : 'unread_reminder';
                 const title = isRepeated ? 'Repeated Notification' : 'Unread Reminder';
                 const body = isRepeated 
-                    ? `Nudge: Chat with ${profileName} is still unread`
+                    ? `Reminder: Chat with ${profileName} is still unread`
                     : `You have unread messages from ${profileName}`;
 
                 await notificationService.notifyMultipleUsers(userIdsToNotify, {
