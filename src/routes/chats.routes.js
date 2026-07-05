@@ -7,6 +7,7 @@ router.use(authenticate);
 router.get('/', chatsController.list);
 router.get('/stats', chatsController.stats);
 router.get('/search', chatsController.search);
+router.post('/start-with-phone', chatsController.startWithPhone);
 router.get('/all-auto-messages', chatsController.getAllAutoMessages);
 router.delete('/all-auto-messages', chatsController.deleteAllAutoMessages);
 router.get('/:id', chatsController.get);

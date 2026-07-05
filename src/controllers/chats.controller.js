@@ -920,6 +920,107 @@ async function deleteAllAutoMessages(req, res, next) {
     }
 }
 
+async function startWithPhone(req, res, next) {
+    try {
+        const { phoneNumber, wabaId } = req.body;
+        
+        if (!phoneNumber) {
+            return res.status(400).json({ success: false, message: 'Phone number is required' });
+        }
+
+        // Normalize phone number (remove any non-digits except leading +)
+        const normalizedPhone = phoneNumber.replace(/\D/g, '');
+        if (!normalizedPhone || normalizedPhone.length < 10) {
+            return res.status(400).json({ success: false, message: 'Invalid phone number format' });
+        }
+
+        // Use provided wabaId or get the first active WABA
+        let selectedWabaId = wabaId;
+        let selectedPhoneNumberId = null;
+
+        if (!selectedWabaId) {
+            const Waba = require('../models/Waba');
+            const waba = await Waba.findOne({ isActive: true }).lean();
+            if (!waba) {
+                return res.status(400).json({ success: false, message: 'No active WABA found' });
+            }
+            selectedWabaId = waba._id.toString();
+            
+            // Get the first or default phone number from the WABA
+            if (waba.phoneNumbers && waba.phoneNumbers.length > 0) {
+                const defaultPhone = waba.phoneNumbers.find(p => p.isDefault) || waba.phoneNumbers[0];
+                selectedPhoneNumberId = defaultPhone.phoneNumberId;
+            }
+        } else {
+            // Get phone number ID for the specified WABA
+            const Waba = require('../models/Waba');
+            const waba = await Waba.findById(selectedWabaId).lean();
+            if (!waba) {
+                return res.status(400).json({ success: false, message: 'WABA not found' });
+            }
+            if (waba.phoneNumbers && waba.phoneNumbers.length > 0) {
+                const defaultPhone = waba.phoneNumbers.find(p => p.isDefault) || waba.phoneNumbers[0];
+                selectedPhoneNumberId = defaultPhone.phoneNumberId;
+            }
+        }
+
+        if (!selectedPhoneNumberId) {
+            return res.status(400).json({ success: false, message: 'No phone number found for WABA' });
+        }
+
+        // Find or create contact
+        const Contact = require('../models/Contact');
+        let contact = await Contact.findOne({ phoneNumber: normalizedPhone }).lean();
+        
+        if (!contact) {
+            contact = await Contact.create({
+                phoneNumber: normalizedPhone,
+                waId: normalizedPhone, // WhatsApp ID is typically the phone number
+                createdAt: new Date(),
+                updatedAt: new Date()
+            });
+        }
+
+        // Find or create chat
+        let chat = await Chat.findOne({
+            wabaId: selectedWabaId,
+            phoneNumber: normalizedPhone
+        }).populate('contactId', 'name nameOnWhatsApp nickname profilePicture isOptedOut isBlocked')
+          .populate('wabaId', 'businessName phoneNumbers')
+          .populate('assignedTo', 'name phone')
+          .populate('tags', 'name color');
+
+        if (!chat) {
+            chat = await Chat.create({
+                wabaId: selectedWabaId,
+                phoneNumberId: selectedPhoneNumberId,
+                contactId: contact._id,
+                phoneNumber: normalizedPhone,
+                waId: normalizedPhone,
+                status: 'open',
+                isUnread: false,
+                createdAt: new Date(),
+                updatedAt: new Date()
+            });
+
+            // Populate the newly created chat
+            chat = await Chat.findById(chat._id)
+                .populate('contactId', 'name nameOnWhatsApp nickname profilePicture isOptedOut isBlocked')
+                .populate('wabaId', 'businessName phoneNumbers')
+                .populate('assignedTo', 'name phone')
+                .populate('tags', 'name color');
+
+            // Emit socket event for real-time update
+            const io = getIO();
+            io.emit('chat:new', { chat });
+        }
+
+        res.json({ success: true, chat, chatId: chat._id.toString() });
+    } catch (e) {
+        next(e);
+    }
+}
+
 module.exports = {
     list,
     search,
@@ -937,4 +1038,5 @@ module.exports = {
     deleteAllAutoMessages,
     stats,
     toggleDnd,
+    startWithPhone,
 };
