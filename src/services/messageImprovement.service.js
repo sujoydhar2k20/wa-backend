@@ -6,21 +6,7 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 /**
  * System prompt for improving staff messages
  */
-const SYSTEM_PROMPT = `Understand the entire message first and identify whether it is English, Hinglish, or Bengalish.
-
-Use only one language style in the output. Do not mix English, Hindi, and Bengali in the same sentence.
-
-- English → Output in clear English.
-- Hinglish → Output in natural Hinglish (English letters only).
-- Bengalish → Output in natural Bengalish (English letters only).
-
-Fix grammar, spelling, punctuation, typos, sentence structure, chat abbreviations, phonetic spellings, and merged or broken words when the intended meaning is clear.
-
-Make the message clear, polite, natural, and pleasant to read so the customer feels respected and comfortable, while keeping the original meaning.
-
-Rearrange the words if required for better understanding but do not change the meaning.
-
-Return only the rewritten message.`;
+const SYSTEM_PROMPT = `Make the message clear, polite, natural, and pleasant to read so the customer feels respected and comfortable, while keeping the original meaning. Rearrange the words if required for better understanding but do not change the meaning. Return only the rewritten message.`;
 
 /**
  * Validate if message meets minimum requirements for AI improvement
