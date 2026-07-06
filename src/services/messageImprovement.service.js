@@ -2,6 +2,8 @@ const axios = require('axios');
 const { logger } = require('../utils/logger');
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const PRIMARY_OPENAI_MODEL = process.env.OPENAI_MESSAGE_IMPROVEMENT_MODEL || 'gpt-5-nano';
+const FALLBACK_OPENAI_MODEL = process.env.OPENAI_MESSAGE_IMPROVEMENT_FALLBACK_MODEL || 'gpt-4o';
 
 /**
  * System prompt for improving staff messages
@@ -38,11 +40,75 @@ function validateMessageForImprovement(text) {
         return { valid: false, reason: 'Message too short (< 15 characters)' };
     }
 
-    if (wordCount < 3) {
-        return { valid: false, reason: 'Message too short (< 3 words)' };
+    if (wordCount < 4) {
+        return { valid: false, reason: 'Message too short (< 4 words)' };
     }
 
     return { valid: true };
+}
+
+function extractResponseText(responseData) {
+    if (typeof responseData.output_text === 'string' && responseData.output_text.trim()) {
+        return responseData.output_text.trim();
+    }
+
+    const outputItems = Array.isArray(responseData.output) ? responseData.output : [];
+    const textParts = [];
+
+    for (const item of outputItems) {
+        if (!Array.isArray(item.content)) {
+            continue;
+        }
+
+        for (const contentPart of item.content) {
+            if (contentPart.type === 'output_text' && typeof contentPart.text === 'string') {
+                textParts.push(contentPart.text);
+            }
+        }
+    }
+
+    const combinedText = textParts.join('\n').trim();
+    return combinedText || null;
+}
+
+function buildResponsesPayload(model, staffMessage) {
+    return {
+        model,
+        instructions: SYSTEM_PROMPT,
+        input: staffMessage,
+        max_output_tokens: 500,
+        text: {
+            verbosity: 'low',
+        },
+    };
+}
+
+async function requestImprovementFromOpenAI(model, staffMessage) {
+    const response = await axios.post(
+        'https://api.openai.com/v1/responses',
+        buildResponsesPayload(model, staffMessage),
+        {
+            headers: {
+                Authorization: `Bearer ${OPENAI_API_KEY}`,
+                'Content-Type': 'application/json',
+            },
+            timeout: 10000,
+        }
+    );
+
+    return extractResponseText(response.data);
+}
+
+function shouldFallbackToLegacyModel(error) {
+    const statusCode = error?.response?.status;
+    const errorCode = error?.response?.data?.error?.code;
+    const errorMessage = error?.response?.data?.error?.message || error?.message || '';
+
+    if (statusCode !== 400 && statusCode !== 404) {
+        return false;
+    }
+
+    return errorCode === 'model_not_found' || /model|unsupported|not found/i.test(errorMessage);
 }
 
 /**
@@ -69,33 +135,25 @@ async function improveMessage(staffMessage) {
             };
         }
 
-        const response = await axios.post(
-            'https://api.openai.com/v1/chat/completions',
-            {
-                model: 'gpt-4o',
-                messages: [
-                    {
-                        role: 'system',
-                        content: SYSTEM_PROMPT,
-                    },
-                    {
-                        role: 'user',
-                        content: staffMessage,
-                    },
-                ],
-                max_completion_tokens: 500,
-                temperature: 0.3,
-            },
-            {
-                headers: {
-                    Authorization: `Bearer ${OPENAI_API_KEY}`,
-                    'Content-Type': 'application/json',
-                },
-                timeout: 10000, // 10 second timeout
-            }
-        );
+        let improvedMessage;
+        let modelUsed = PRIMARY_OPENAI_MODEL;
 
-        const improvedMessage = response.data.choices[0]?.message?.content?.trim();
+        try {
+            improvedMessage = await requestImprovementFromOpenAI(PRIMARY_OPENAI_MODEL, staffMessage);
+        } catch (error) {
+            if (PRIMARY_OPENAI_MODEL !== FALLBACK_OPENAI_MODEL && shouldFallbackToLegacyModel(error)) {
+                logger.warn('Message Improvement primary model unavailable, falling back', {
+                    primaryModel: PRIMARY_OPENAI_MODEL,
+                    fallbackModel: FALLBACK_OPENAI_MODEL,
+                    status: error?.response?.status,
+                    error: error?.response?.data?.error?.message || error.message,
+                });
+                improvedMessage = await requestImprovementFromOpenAI(FALLBACK_OPENAI_MODEL, staffMessage);
+                modelUsed = FALLBACK_OPENAI_MODEL;
+            } else {
+                throw error;
+            }
+        }
 
         if (!improvedMessage) {
             return {
@@ -109,6 +167,7 @@ async function improveMessage(staffMessage) {
             success: true,
             original: staffMessage,
             improved: improvedMessage,
+            model: modelUsed,
         };
     } catch (error) {
         logger.error('Message Improvement Error:', {
