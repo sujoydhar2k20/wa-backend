@@ -47,46 +47,33 @@ function validateMessageForImprovement(text) {
     return { valid: true };
 }
 
-function extractResponseText(responseData) {
-    if (typeof responseData.output_text === 'string' && responseData.output_text.trim()) {
-        return responseData.output_text.trim();
-    }
-
-    const outputItems = Array.isArray(responseData.output) ? responseData.output : [];
-    const textParts = [];
-
-    for (const item of outputItems) {
-        if (!Array.isArray(item.content)) {
-            continue;
-        }
-
-        for (const contentPart of item.content) {
-            if (contentPart.type === 'output_text' && typeof contentPart.text === 'string') {
-                textParts.push(contentPart.text);
-            }
-        }
-    }
-
-    const combinedText = textParts.join('\n').trim();
-    return combinedText || null;
-}
-
-function buildResponsesPayload(model, staffMessage) {
+function buildChatCompletionsPayload(model, staffMessage) {
     return {
         model,
-        instructions: SYSTEM_PROMPT,
-        input: staffMessage,
-        max_output_tokens: 500,
-        text: {
-            verbosity: 'low',
-        },
+        messages: [
+            {
+                role: 'system',
+                content: SYSTEM_PROMPT,
+            },
+            {
+                role: 'user',
+                content: staffMessage,
+            },
+        ],
+        max_completion_tokens: 500,
+        temperature: 0.3,
     };
 }
 
 async function requestImprovementFromOpenAI(model, staffMessage) {
+    logger.info('Message Improvement: sending request to OpenAI', {
+        model,
+        textLength: staffMessage.length,
+    });
+
     const response = await axios.post(
-        'https://api.openai.com/v1/responses',
-        buildResponsesPayload(model, staffMessage),
+        'https://api.openai.com/v1/chat/completions',
+        buildChatCompletionsPayload(model, staffMessage),
         {
             headers: {
                 Authorization: `Bearer ${OPENAI_API_KEY}`,
@@ -96,7 +83,7 @@ async function requestImprovementFromOpenAI(model, staffMessage) {
         }
     );
 
-    return extractResponseText(response.data);
+    return response.data?.choices?.[0]?.message?.content?.trim() || null;
 }
 
 function shouldFallbackToLegacyModel(error) {
@@ -170,15 +157,18 @@ async function improveMessage(staffMessage) {
             model: modelUsed,
         };
     } catch (error) {
+        const upstreamMessage = error?.response?.data?.error?.message;
         logger.error('Message Improvement Error:', {
-            message: error.message,
+            message: upstreamMessage || error.message,
             code: error.code,
+            status: error?.response?.status,
+            model: PRIMARY_OPENAI_MODEL,
             originalText: staffMessage.substring(0, 100),
         });
 
         return {
             success: false,
-            error: error.message || 'Failed to improve message',
+            error: upstreamMessage || error.message || 'Failed to improve message',
             original: staffMessage,
         };
     }
