@@ -674,9 +674,6 @@ async function sendBulk(req, res, next) {
         if (!Array.isArray(items) || items.length === 0) {
             return res.status(400).json({ success: false, message: 'items array is required and must not be empty' });
         }
-        if (items.length > 30) {
-            return res.status(400).json({ success: false, message: 'Maximum 30 items per bulk send' });
-        }
 
         const chat = await Chat.findById(chatId).populate('contactId');
         if (!chat) return res.status(404).json({ success: false, message: 'Chat not found' });
