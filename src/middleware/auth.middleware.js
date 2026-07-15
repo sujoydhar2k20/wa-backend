@@ -27,4 +27,9 @@ function requireSuperAdmin(req, res, next) {
   next();
 }
 
-module.exports = { authenticate, requireAdmin, requireSuperAdmin };
+function requireAdminOrStaff(req, res, next) {
+  if (!['admin', 'superadmin', 'staff'].includes(req.user?.role)) return res.status(403).json({ success: false, message: 'Forbidden' });
+  next();
+}
+
+module.exports = { authenticate, requireAdmin, requireSuperAdmin, requireAdminOrStaff };
