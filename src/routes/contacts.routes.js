@@ -6,6 +6,7 @@ const upload = require('../middleware/upload.middleware');
 
 router.use(authenticate);
 router.get('/', contactsController.list);
+router.get('/export', contactsController.exportList);
 router.get('/:id', contactsController.get);
 router.put('/:id', contactsController.update);
 router.post('/:id/opt-out', contactsController.optOut);

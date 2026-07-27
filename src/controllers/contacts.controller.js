@@ -3,7 +3,7 @@ const { Contact } = require('../models');
 
 async function list(req, res, next) {
     try {
-        const { page = 1, limit = 20, q, isOptedOut, isBlocked } = req.query;
+        const { page = 1, limit = 20, q, isOptedOut, isBlocked, tag } = req.query;
         const skip = (parseInt(page, 10) - 1) * parseInt(limit, 10);
         const filter = {};
         if (q) filter.$or = [
@@ -12,6 +12,7 @@ async function list(req, res, next) {
         ];
         if (isOptedOut !== undefined) filter.isOptedOut = isOptedOut === 'true';
         if (isBlocked !== undefined) filter.isBlocked = isBlocked === 'true';
+        if (tag) filter.tags = tag;
 
         const [contacts, total] = await Promise.all([
             Contact.find(filter)
@@ -22,6 +23,27 @@ async function list(req, res, next) {
             Contact.countDocuments(filter),
         ]);
         res.json({ data: contacts, total, page: parseInt(page, 10), limit: parseInt(limit, 10) });
+    } catch (e) {
+        next(e);
+    }
+}
+
+async function exportList(req, res, next) {
+    try {
+        const { q, isOptedOut, isBlocked, tag } = req.query;
+        const filter = {};
+        if (q) filter.$or = [
+            { name: { $regex: q, $options: 'i' } },
+            { phoneNumber: { $regex: q, $options: 'i' } },
+        ];
+        if (isOptedOut !== undefined) filter.isOptedOut = isOptedOut === 'true';
+        if (isBlocked !== undefined) filter.isBlocked = isBlocked === 'true';
+        if (tag) filter.tags = tag;
+
+        const contacts = await Contact.find(filter)
+            .sort({ createdAt: -1 })
+            .populate('tags', 'name color');
+        res.json({ data: contacts, total: contacts.length });
     } catch (e) {
         next(e);
     }
@@ -199,4 +221,4 @@ async function bulkDelete(req, res, next) {
     }
 }
 
-module.exports = { list, get, update, optOut, optIn, block, import: importContacts, remove, bulkDelete };
+module.exports = { list, exportList, get, update, optOut, optIn, block, import: importContacts, remove, bulkDelete };
