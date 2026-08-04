@@ -214,6 +214,25 @@ async function send(req, res, next) {
                             c.text = resolvedText;
                         }
                     }
+                    // Resolve dynamic URL placeholders in BUTTONS components
+                    if (c.type === 'BUTTONS' && Array.isArray(c.buttons)) {
+                        c.buttons = c.buttons.map((btn, btnIndex) => {
+                            const b = { ...btn };
+                            if (b.type === 'URL' && typeof b.url === 'string' && b.url.includes('{{')) {
+                                const btnVars = (components || []).find(
+                                    v => v.type === 'button' && String(v.index) === String(btnIndex)
+                                );
+                                if (btnVars && Array.isArray(btnVars.parameters)) {
+                                    let resolvedUrl = b.url;
+                                    btnVars.parameters.forEach((param, idx) => {
+                                        resolvedUrl = resolvedUrl.replace(`{{${idx + 1}}}`, param.text || `{{${idx + 1}}}`);
+                                    });
+                                    b.url = resolvedUrl;
+                                }
+                            }
+                            return b;
+                        });
+                    }
                     return c;
                 });
                 // Store template data in a variable to be saved in metadata below
