@@ -116,8 +116,43 @@ function isMetaMediaMissingError(error) {
   return err.code === 131009 && /media/.test(details) && /(does not exist|expired)/.test(details);
 }
 
+/**
+ * Store a stable copy of a template header image on our own storage so staff can
+ * see it in the chat. Meta's example/CDN URLs are signed and expire, so they can't
+ * be used for display. Best effort: never blocks sending.
+ */
+async function hostTemplateHeaderImage(templateDoc, headerComponent, buffer, mimeType) {
+  try {
+    const { uploadToVPS } = require('../utils/vpsUpload');
+    const url = await uploadToVPS(buffer, {
+      folder: 'template-headers',
+      publicId: `${templateDoc._id}_${Date.now()}`,
+      mimeType,
+    });
+    headerComponent.hostedImageUrl = url;
+    templateDoc.markModified('components');
+    await templateDoc.save();
+    return url;
+  } catch (err) {
+    logger.warn(`Could not host template header image for ${templateDoc.name}: ${err.message}`);
+    return null;
+  }
+}
+
 async function ensureTemplateHeaderImageMediaId(wabaId, phoneNumberId, templateDoc, headerComponent, forceRefresh = false) {
-  if (!forceRefresh && isCachedMediaIdFresh(headerComponent)) return headerComponent.imageMediaId;
+  if (!forceRefresh && isCachedMediaIdFresh(headerComponent)) {
+    // Backfill a hosted display copy for templates cached before hosting existed (best effort).
+    if (!headerComponent.hostedImageUrl && headerComponent.imageUrl) {
+      try {
+        const r = await axios.get(headerComponent.imageUrl, { responseType: 'arraybuffer', timeout: 15000, headers: { 'User-Agent': 'Mozilla/5.0 (compatible; WhatsApp-Template-Cache/1.0)' } });
+        const buf = Buffer.from(r.data);
+        if (buf.length) await hostTemplateHeaderImage(templateDoc, headerComponent, buf, (r.headers['content-type'] || 'image/jpeg').split(';')[0].trim());
+      } catch (err) {
+        logger.warn(`Template ${templateDoc.name}: could not backfill hosted header image: ${err.message}`);
+      }
+    }
+    return headerComponent.imageMediaId;
+  }
   if (!headerComponent.imageUrl) {
     // No source to re-upload from; a stale/expired ID would only make Meta reject the send.
     if (headerComponent.imageMediaId) {
@@ -150,6 +185,8 @@ async function ensureTemplateHeaderImageMediaId(wabaId, phoneNumberId, templateD
 
   const mimeType = (response.headers['content-type'] || 'image/jpeg').split(';')[0].trim();
   const mediaId = await uploadMedia(wabaId, phoneNumberId, imageBuffer, mimeType);
+
+  await hostTemplateHeaderImage(templateDoc, headerComponent, imageBuffer, mimeType);
 
   headerComponent.imageMediaId = mediaId;
   headerComponent.imageMediaIdUploadedAt = new Date();
@@ -457,6 +494,11 @@ async function syncTemplates(wabaId) {
       else lang = String(t.language);
     }
     
+    // Keep locally-managed header image fields (cached Meta media ID, hosted copy) across syncs;
+    // Meta's payload doesn't include them and the update below replaces the components array.
+    const existingTemplate = await Template.findOne({ wabaId, name: t.name, language: lang });
+    const existingHeader = (existingTemplate?.components || []).find(c => (c.type || '').toUpperCase() === 'HEADER');
+
     // Process components to extract image URLs
     const processedComponents = (t.components || []).map(comp => {
       const processed = {
@@ -468,6 +510,13 @@ async function syncTemplates(wabaId) {
       if ((comp.type || '').toUpperCase() === 'HEADER' && (comp.format || '').toUpperCase() === 'IMAGE') {
         if (comp.example && comp.example.header_handle && Array.isArray(comp.example.header_handle)) {
           processed.imageUrl = comp.example.header_handle[0]; // Store the image URL
+        }
+        if (existingHeader) {
+          if (existingHeader.hostedImageUrl) processed.hostedImageUrl = existingHeader.hostedImageUrl;
+          if (existingHeader.imageMediaId) {
+            processed.imageMediaId = existingHeader.imageMediaId;
+            processed.imageMediaIdUploadedAt = existingHeader.imageMediaIdUploadedAt;
+          }
         }
       }
       
@@ -663,6 +712,7 @@ async function getPhoneNumberMessagingLimit(wabaId, phoneNumberId) {
 }
 
 module.exports = {
+  hostTemplateHeaderImage,
   getWaba,
   getAccessToken,
   sendTextMessage,

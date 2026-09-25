@@ -44,6 +44,9 @@ function extensionFromMime(mimeType) {
         'audio/mpeg': '.mp3',
         'audio/mp4': '.mp4',
         'audio/ogg': '.ogg',
+        'audio/opus': '.ogg',
+        'audio/webm': '.webm',
+        'audio/x-m4a': '.m4a',
         'audio/aac': '.aac',
         'audio/amr': '.amr',
         'application/pdf': '.pdf',
@@ -54,7 +57,11 @@ function extensionFromMime(mimeType) {
         'text/plain': '.txt',
         'text/csv': '.csv',
     };
-    return map[mimeType] || '';
+    // Meta sends parameters, e.g. "audio/ogg; codecs=opus" for voice notes.
+    // Strip them so the lookup matches; otherwise the file is saved with no
+    // extension and served as application/octet-stream (iOS Safari refuses to play it).
+    const baseType = String(mimeType || '').split(';')[0].trim().toLowerCase();
+    return map[baseType] || '';
 }
 
 /**

@@ -404,6 +404,8 @@ async function uploadTemplateHeaderImage(req, res, next) {
         if (headerComponent) {
             headerComponent.imageMediaId = mediaId;
             headerComponent.imageMediaIdUploadedAt = new Date();
+            // Keep a stable hosted copy so staff can see the image in chats
+            await whatsappService.hostTemplateHeaderImage(template, headerComponent, req.file.buffer, req.file.mimetype);
             // Optionally clear the pre-approved imageUrl since we're using custom
             // headerComponent.imageUrl = null; // Uncomment if you want to replace
         }

@@ -244,6 +244,24 @@ async function send(req, res, next) {
             }
 
             waResult = await whatsappService.sendTemplateMessage(chat.wabaId, chat.phoneNumberId, chat.waId, templateName, language || 'en', components || []);
+
+            // For IMAGE headers, point the stored preview at our own hosted copy (created/refreshed
+            // during send). Meta's example CDN URLs are signed and expire, so they can't be relied on.
+            if (req._templateData) {
+                try {
+                    const freshTemplate = await Template.findOne({ wabaId: chat.wabaId, name: templateName, language: language || 'en' });
+                    const freshHeader = (freshTemplate?.components || []).find(c => (c.type || '').toUpperCase() === 'HEADER' && (c.format || '').toUpperCase() === 'IMAGE');
+                    if (freshHeader) {
+                        req._templateData.components = req._templateData.components.map(c =>
+                            (c.type || '').toUpperCase() === 'HEADER' && (c.format || '').toUpperCase() === 'IMAGE'
+                                ? { ...c, hostedImageUrl: freshHeader.hostedImageUrl || c.hostedImageUrl, imageUrl: freshHeader.hostedImageUrl || c.imageUrl }
+                                : c
+                        );
+                    }
+                } catch (e) {
+                    logger.warn(`Could not resolve template header image for chat preview: ${e.message}`);
+                }
+            }
         } else if (['image', 'video', 'audio', 'document'].includes(type)) {
             if (!mediaUrl) return res.status(400).json({ success: false, message: 'mediaUrl is required for media messages' });
 

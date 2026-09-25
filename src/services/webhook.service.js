@@ -994,6 +994,37 @@ async function handleProductCodeReply(waba, phoneNumberId, chat, message, text, 
     }).catch(e => logger.error('Failed to save ProductReplyLog:', e.message));
 }
 
+/**
+ * Transcode an audio buffer (OGG/Opus) to AAC in an M4A container using ffmpeg.
+ * Returns null (caller keeps the original buffer) if ffmpeg is missing or fails.
+ */
+async function transcodeAudioToM4a(inputBuffer) {
+    const { spawn } = require('child_process');
+    const fsp = require('fs').promises;
+    const os = require('os');
+    const path = require('path');
+    const base = path.join(os.tmpdir(), `voice_${Date.now()}_${Math.random().toString(36).slice(2)}`);
+    const inPath = `${base}.in`;
+    const outPath = `${base}.m4a`;
+    try {
+        await fsp.writeFile(inPath, inputBuffer);
+        await new Promise((resolve, reject) => {
+            const ff = spawn('ffmpeg', ['-y', '-i', inPath, '-vn', '-c:a', 'aac', '-b:a', '64k', '-movflags', '+faststart', outPath], { stdio: 'ignore' });
+            const timer = setTimeout(() => { ff.kill('SIGKILL'); reject(new Error('ffmpeg timeout')); }, 20000);
+            ff.on('error', (e) => { clearTimeout(timer); reject(e); });
+            ff.on('close', (code) => { clearTimeout(timer); code === 0 ? resolve() : reject(new Error(`ffmpeg exit ${code}`)); });
+        });
+        const out = await fsp.readFile(outPath);
+        return out.length > 0 ? out : null;
+    } catch (err) {
+        logger.warn(`Voice note transcode skipped: ${err.message}`);
+        return null;
+    } finally {
+        fsp.unlink(inPath).catch(() => {});
+        fsp.unlink(outPath).catch(() => {});
+    }
+}
+
 async function processMediaAsync(chat, messageData, type) {
     try {
         const { mediaId, wabaId, mimeType } = messageData;
@@ -1001,7 +1032,18 @@ async function processMediaAsync(chat, messageData, type) {
         if (!waba) return null;
 
         logger.info(`Downloading media ${mediaId} from WhatsApp...`);
-        const buffer = await whatsappService.downloadMedia(waba._id, mediaId);
+        let buffer = await whatsappService.downloadMedia(waba._id, mediaId);
+
+        // WhatsApp voice notes are OGG/Opus, which iOS Safari often cannot play.
+        // Transcode to AAC (.m4a) when ffmpeg is available; otherwise keep the original.
+        let storedMimeType = mimeType;
+        if (type === 'audio' && /ogg|opus/i.test(mimeType || '')) {
+            const converted = await transcodeAudioToM4a(buffer);
+            if (converted) {
+                buffer = converted;
+                storedMimeType = 'audio/mp4';
+            }
+        }
 
         let uploadedUrl = null;
         let metadata = {};
@@ -1011,7 +1053,7 @@ async function processMediaAsync(chat, messageData, type) {
             uploadedUrl = await uploadToVPS(buffer, {
                 folder: 'inbound',
                 publicId: mediaId,
-                mimeType: mimeType,
+                mimeType: storedMimeType,
                 fileName: messageData.fileName,
             });
         } catch (uploadError) {
@@ -1033,7 +1075,7 @@ async function processMediaAsync(chat, messageData, type) {
             mediaId: mediaId,
             url: uploadedUrl,
             type: mediaType,
-            mimeType: mimeType,
+            mimeType: storedMimeType,
             fileName: messageData.fileName,
             fileSize: buffer.length,
             expiresAt: expiresAt

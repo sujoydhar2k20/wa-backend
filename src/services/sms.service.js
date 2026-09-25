@@ -5,6 +5,7 @@ const BHS_USER = process.env.BHASHSMS_USER || '7278665321';
 const BHS_PASS = process.env.BHASHSMS_PASS || 'a485bc9';
 const BHS_SENDER = process.env.BHASHSMS_SENDER || 'BJSBIL';
 
+const OTP_TTL_MS = 30 * 1000; // OTP valid for 30 seconds
 const otpStore = new Map();
 
 function generateOtp() {
@@ -12,7 +13,7 @@ function generateOtp() {
 }
 
 function setOtp(phone, otp) {
-  otpStore.set(phone, { otp, expiresAt: Date.now() + 10 * 60 * 1000 });
+  otpStore.set(phone, { otp, expiresAt: Date.now() + OTP_TTL_MS });
 }
 
 function verifyOtp(phone, otp) {
