@@ -403,6 +403,7 @@ async function uploadTemplateHeaderImage(req, res, next) {
         const headerComponent = template.components?.find(c => (c.type || '').toUpperCase() === 'HEADER');
         if (headerComponent) {
             headerComponent.imageMediaId = mediaId;
+            headerComponent.imageMediaIdUploadedAt = new Date();
             // Optionally clear the pre-approved imageUrl since we're using custom
             // headerComponent.imageUrl = null; // Uncomment if you want to replace
         }

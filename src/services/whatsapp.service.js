@@ -98,9 +98,33 @@ async function sendMediaMessage(wabaId, phoneNumberId, to, type, urlOrId, captio
   return request(wabaId, 'POST', path, body);
 }
 
-async function ensureTemplateHeaderImageMediaId(wabaId, phoneNumberId, templateDoc, headerComponent) {
-  if (headerComponent.imageMediaId) return headerComponent.imageMediaId;
-  if (!headerComponent.imageUrl) return null;
+// Meta keeps uploaded media for 30 days. Re-upload well before that.
+const META_MEDIA_MAX_AGE_MS = 25 * 24 * 60 * 60 * 1000;
+
+function isCachedMediaIdFresh(headerComponent) {
+  if (!headerComponent.imageMediaId) return false;
+  const uploadedAt = headerComponent.imageMediaIdUploadedAt;
+  // Legacy IDs without a timestamp have unknown age -> treat as stale, re-upload once.
+  if (!uploadedAt) return false;
+  return Date.now() - new Date(uploadedAt).getTime() < META_MEDIA_MAX_AGE_MS;
+}
+
+function isMetaMediaMissingError(error) {
+  const err = error?.response?.data?.error;
+  if (!err) return false;
+  const details = `${err.error_data?.details || ''} ${err.message || ''}`.toLowerCase();
+  return err.code === 131009 && /media/.test(details) && /(does not exist|expired)/.test(details);
+}
+
+async function ensureTemplateHeaderImageMediaId(wabaId, phoneNumberId, templateDoc, headerComponent, forceRefresh = false) {
+  if (!forceRefresh && isCachedMediaIdFresh(headerComponent)) return headerComponent.imageMediaId;
+  if (!headerComponent.imageUrl) {
+    // No source to re-upload from; a stale/expired ID would only make Meta reject the send.
+    if (headerComponent.imageMediaId) {
+      logger.warn(`Template ${templateDoc.name}: cached media ID is stale and no imageUrl exists to re-upload. Upload a header image again.`);
+    }
+    return null;
+  }
 
   logger.info(`Caching template header image as Meta media for ${templateDoc.name}`);
 
@@ -128,13 +152,15 @@ async function ensureTemplateHeaderImageMediaId(wabaId, phoneNumberId, templateD
   const mediaId = await uploadMedia(wabaId, phoneNumberId, imageBuffer, mimeType);
 
   headerComponent.imageMediaId = mediaId;
+  headerComponent.imageMediaIdUploadedAt = new Date();
+  templateDoc.markModified('components');
   await templateDoc.save();
 
   logger.info(`Cached template header image media for ${templateDoc.name}: ${mediaId}`);
   return mediaId;
 }
 
-async function sendTemplateMessage(wabaId, phoneNumberId, to, templateName, language = 'en', components = []) {
+async function sendTemplateMessage(wabaId, phoneNumberId, to, templateName, language = 'en', components = [], forceRefreshMedia = false) {
   await checkContactBlockedOrOptedOut(to);
   const path = `/${phoneNumberId}/messages`;
 
@@ -213,6 +239,7 @@ async function sendTemplateMessage(wabaId, phoneNumberId, to, templateName, lang
             phoneNumberId,
             templateDoc,
             dbComp,
+            forceRefreshMedia,
           );
 
           if (mediaId) {
@@ -284,8 +311,17 @@ async function sendTemplateMessage(wabaId, phoneNumberId, to, templateName, lang
   }
 
   console.log(`[DEBUG] Final API request body (sanitized):`, JSON.stringify(body, null, 2));
-  
-  return request(wabaId, 'POST', path, body);
+
+  try {
+    return await request(wabaId, 'POST', path, body);
+  } catch (error) {
+    // Self-heal: cached header media expired/deleted on Meta's side -> re-upload once and retry.
+    if (!forceRefreshMedia && isMetaMediaMissingError(error)) {
+      logger.warn(`Template ${templateName}: Meta reported missing/expired header media. Re-uploading and retrying once.`);
+      return sendTemplateMessage(wabaId, phoneNumberId, to, templateName, language, components, true);
+    }
+    throw error;
+  }
 }
 
 async function sendInteractiveMessage(wabaId, phoneNumberId, to, interactivePayload) {

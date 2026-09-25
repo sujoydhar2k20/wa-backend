@@ -7,7 +7,8 @@ const templateComponentSchema = new mongoose.Schema({
   buttons: [mongoose.Schema.Types.Mixed],
   example: mongoose.Schema.Types.Mixed,
   imageUrl: String, // For HEADER IMAGE: stores the image URL from Meta or custom upload
-  imageMediaId: String, // For HEADER IMAGE: Media ID when uploaded to Meta
+  imageMediaId: String, // For HEADER IMAGE: Media ID when uploaded to Meta (expires after 30 days)
+  imageMediaIdUploadedAt: Date, // When imageMediaId was uploaded; used to refresh before Meta's 30-day expiry
 }, { _id: false });
 
 const templateSchema = new mongoose.Schema(
