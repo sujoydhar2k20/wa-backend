@@ -271,15 +271,48 @@ async function sendTemplateMessage(wabaId, phoneNumberId, to, templateName, lang
           });
         }
       } else if (compType === 'buttons') {
-        // Include button if mobile app sent it (handle both 'button' and 'buttons' types)
-        if (mobileComp && mobileComp.sub_type && mobileComp.index !== undefined && mobileComp.parameters) {
-          finalComponents.push({
-            type: 'button',
-            sub_type: mobileComp.sub_type,
-            index: String(mobileComp.index), // Ensure index is a string
-            parameters: mobileComp.parameters,
-          });
-        }
+        // Build button components from the TEMPLATE definition (source of truth), not just
+        // whatever the client happened to send. A URL button whose url contains {{n}} is
+        // dynamic and Meta REQUIRES a parameter for it (else #131008). Every button is
+        // handled individually, so templates with several buttons work too.
+        const clientButtons = (components || []).filter(c => {
+          const t = (c.type || '').toLowerCase();
+          return t === 'button' || t === 'buttons';
+        });
+        const dbButtons = Array.isArray(dbComp.buttons) ? dbComp.buttons : [];
+
+        dbButtons.forEach((btn, btnIdx) => {
+          const supplied = clientButtons.find(c => String(c.index) === String(btnIdx));
+          const isDynamicUrl =
+            (btn?.type || '').toUpperCase() === 'URL' && /\{\{\d+\}\}/.test(btn?.url || '');
+
+          if (isDynamicUrl) {
+            const params = (supplied?.parameters || [])
+              .filter(p => p && typeof p.text === 'string' && p.text.trim() !== '')
+              .map(p => ({ type: 'text', text: p.text.trim() }));
+            if (!params.length) {
+              const err = new Error(
+                `Template "${templateName}" button "${btn.text || btnIdx + 1}" needs a link value (the part that replaces {{1}} in ${btn.url}). Please fill it in and try again.`
+              );
+              err.statusCode = 400;
+              throw err;
+            }
+            finalComponents.push({
+              type: 'button',
+              sub_type: 'url',
+              index: String(btnIdx),
+              parameters: params,
+            });
+          } else if (supplied && supplied.sub_type && Array.isArray(supplied.parameters) && supplied.parameters.length) {
+            // Non-URL buttons that carry parameters (e.g. copy_code, quick_reply payload)
+            finalComponents.push({
+              type: 'button',
+              sub_type: supplied.sub_type,
+              index: String(btnIdx),
+              parameters: supplied.parameters,
+            });
+          }
+        });
       }
     }
     
