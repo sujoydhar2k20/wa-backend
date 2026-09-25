@@ -2,6 +2,7 @@ const { Chat, Message, ChatActivity, ProductReplyLog, BotExecution, BotFlow } = 
 const { getIO } = require('../websocket/socket.server');
 const { logger } = require('../utils/logger');
 
+const { escapeRegex, phoneSearchTerm } = require('../utils/regex');
 async function list(req, res, next) {
     try {
         const {
@@ -63,11 +64,16 @@ async function search(req, res, next) {
             accessFilter.assignedTo = req.user._id;
         }
 
+        const safeQ = escapeRegex(q);
+        const phoneQ = phoneSearchTerm(q);
+
         // 1. Find contacts matching by name or nickname
         const matchingContacts = await Contact.find(
             { $or: [
-                { name: { $regex: q, $options: 'i' } },
-                { nickname: { $regex: q, $options: 'i' } }
+                { name: { $regex: safeQ, $options: 'i' } },
+                { nickname: { $regex: safeQ, $options: 'i' } },
+                { phoneNumber: { $regex: phoneQ, $options: 'i' } },
+                { waId: { $regex: phoneQ, $options: 'i' } }
             ]},
             { _id: 1, name: 1, nickname: 1 }
         );
@@ -79,7 +85,8 @@ async function search(req, res, next) {
         const namePhoneFilter = {
             ...accessFilter,
             $or: [
-                { phoneNumber: { $regex: q, $options: 'i' } },
+                { phoneNumber: { $regex: phoneQ, $options: 'i' } },
+                { waId: { $regex: phoneQ, $options: 'i' } },
                 ...(contactIds.length > 0 ? [{ contactId: { $in: contactIds } }] : [])
             ]
         };
@@ -103,8 +110,8 @@ async function search(req, res, next) {
             if (chat.contactId) {
                 const n = chat.contactId.nickname || '';
                 const nm = chat.contactId.name || '';
-                if (n && n.match(new RegExp(q, 'i'))) matchSource = 'nickname';
-                else if (nm && nm.match(new RegExp(q, 'i'))) matchSource = 'name';
+                if (n && n.match(new RegExp(safeQ, 'i'))) matchSource = 'nickname';
+                else if (nm && nm.match(new RegExp(safeQ, 'i'))) matchSource = 'name';
             }
             results.push({ ...chat, matchSource });
         }
@@ -113,7 +120,7 @@ async function search(req, res, next) {
         const remaining = parsedLimit - results.length;
         if (remaining > 0) {
             // Find messages whose text matches the query
-            const msgFilter = { text: { $regex: q, $options: 'i' }, type: { $ne: 'system' } };
+            const msgFilter = { text: { $regex: safeQ, $options: 'i' }, type: { $ne: 'system' } };
             const matchingMessages = await Message.aggregate([
                 { $match: msgFilter },
                 { $sort: { createdAt: -1 } },

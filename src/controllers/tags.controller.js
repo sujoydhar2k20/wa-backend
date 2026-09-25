@@ -1,12 +1,13 @@
 const { Tag, Chat, ChatActivity, Message } = require('../models');
 
+const { escapeRegex, phoneSearchTerm } = require('../utils/regex');
 async function list(req, res, next) {
     try {
         const { search, q } = req.query;
         const query = {};
         const searchTerm = search || q;
         if (searchTerm) {
-            query.name = { $regex: searchTerm, $options: 'i' };
+            query.name = { $regex: escapeRegex(searchTerm), $options: 'i' };
         }
         const tags = await Tag.find(query).sort({ name: 1 });
         res.json(tags);

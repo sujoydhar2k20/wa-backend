@@ -6,6 +6,7 @@ const os = require('os');
 const path = require('path');
 const fs = require('fs');
 
+const { escapeRegex, phoneSearchTerm } = require('../utils/regex');
 /**
  * Convert any browser-recorded audio to AAC/M4A for Meta.
  * Uses ffmpeg's built-in AAC encoder — no libopus or libmp3lame required.
@@ -454,7 +455,7 @@ async function search(req, res, next) {
         const { q, chatId, page = 1, limit = 20 } = req.query;
         if (!q) return res.status(400).json({ success: false, message: 'Query param q is required' });
         const skip = (parseInt(page, 10) - 1) * parseInt(limit, 10);
-        const filter = { text: { $regex: q, $options: 'i' } };
+        const filter = { text: { $regex: escapeRegex(q), $options: 'i' } };
         if (chatId) filter.chatId = chatId;
 
         const [messages, total] = await Promise.all([

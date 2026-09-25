@@ -2,6 +2,7 @@ const { Waba, Template } = require('../models');
 const whatsappService = require('../services/whatsapp.service');
 const broadcastService = require('../services/broadcast.service');
 
+const { escapeRegex, phoneSearchTerm } = require('../utils/regex');
 async function list(req, res, next) {
     try {
         const wabas = await Waba.find().sort({ createdAt: -1 });
@@ -143,7 +144,7 @@ async function getAllTemplates(req, res, next) {
 
         if (status) query.status = status;
         if (category) query.category = category;
-        if (search) query.name = { $regex: search, $options: 'i' };
+        if (search) query.name = { $regex: escapeRegex(search), $options: 'i' };
 
         // Populate wabaId to get the businessName and phoneNumbers
         const templates = await Template.find(query)

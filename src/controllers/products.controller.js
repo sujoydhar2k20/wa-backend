@@ -2,6 +2,7 @@ const path = require('path');
 const fs = require('fs');
 const { Product, ProductImport, Rate } = require('../models');
 
+const { escapeRegex, phoneSearchTerm } = require('../utils/regex');
 const GST = 0.03;
 
 function calculatePrice(productData, rate) {
@@ -44,9 +45,9 @@ async function list(req, res, next) {
             }
         }
         if (q) filter.$or = [
-            { name: { $regex: q, $options: 'i' } },
-            { code: { $regex: q, $options: 'i' } },
-            { sku: { $regex: q, $options: 'i' } },
+            { name: { $regex: escapeRegex(q), $options: 'i' } },
+            { code: { $regex: escapeRegex(q), $options: 'i' } },
+            { sku: { $regex: escapeRegex(q), $options: 'i' } },
         ];
 
         const [data, total] = await Promise.all([
@@ -72,7 +73,7 @@ async function searchByCode(req, res, next) {
     try {
         const { code } = req.query;
         if (!code) return res.status(400).json({ success: false, message: 'code query param is required' });
-        const products = await Product.find({ code: { $regex: code, $options: 'i' } }).limit(10).lean();
+        const products = await Product.find({ code: { $regex: escapeRegex(code), $options: 'i' } }).limit(10).lean();
 
         const rate = await Rate.findOne();
         if (rate) {

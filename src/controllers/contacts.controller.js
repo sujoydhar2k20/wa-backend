@@ -1,14 +1,15 @@
 const fs = require('fs');
 const { Contact } = require('../models');
 
+const { escapeRegex, phoneSearchTerm } = require('../utils/regex');
 async function list(req, res, next) {
     try {
         const { page = 1, limit = 20, q, isOptedOut, isBlocked, tag } = req.query;
         const skip = (parseInt(page, 10) - 1) * parseInt(limit, 10);
         const filter = {};
         if (q) filter.$or = [
-            { name: { $regex: q, $options: 'i' } },
-            { phoneNumber: { $regex: q, $options: 'i' } },
+            { name: { $regex: escapeRegex(q), $options: 'i' } },
+            { phoneNumber: { $regex: phoneSearchTerm(q), $options: 'i' } },
         ];
         if (isOptedOut !== undefined) filter.isOptedOut = isOptedOut === 'true';
         if (isBlocked !== undefined) filter.isBlocked = isBlocked === 'true';
@@ -33,8 +34,8 @@ async function exportList(req, res, next) {
         const { q, isOptedOut, isBlocked, tag } = req.query;
         const filter = {};
         if (q) filter.$or = [
-            { name: { $regex: q, $options: 'i' } },
-            { phoneNumber: { $regex: q, $options: 'i' } },
+            { name: { $regex: escapeRegex(q), $options: 'i' } },
+            { phoneNumber: { $regex: phoneSearchTerm(q), $options: 'i' } },
         ];
         if (isOptedOut !== undefined) filter.isOptedOut = isOptedOut === 'true';
         if (isBlocked !== undefined) filter.isBlocked = isBlocked === 'true';

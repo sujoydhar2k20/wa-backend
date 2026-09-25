@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const { BroadcastList, BroadcastListMember, Contact } = require('../models');
 
+const { escapeRegex, phoneSearchTerm } = require('../utils/regex');
 async function list(req, res, next) {
     try {
         const { page = 1, limit = 20, wabaId, search, q } = req.query;
@@ -10,7 +11,7 @@ async function list(req, res, next) {
         if (wabaId) filter.wabaId = wabaId;
         const searchTerm = search || q;
         if (searchTerm) {
-            filter.name = { $regex: searchTerm, $options: 'i' };
+            filter.name = { $regex: escapeRegex(searchTerm), $options: 'i' };
         }
         const [lists, total] = await Promise.all([
             BroadcastList.find(filter).sort({ createdAt: -1 }).skip(skip).limit(parseInt(limit, 10)),
