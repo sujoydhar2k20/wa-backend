@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const wabasController = require('../controllers/wabas.controller');
 const webhookController = require('../controllers/webhook.controller');
+const { verifyMetaSignature } = require('../middleware/metaSignature.middleware');
 const { authenticate, requireAdmin } = require('../middleware/auth.middleware');
 const multer = require('multer');
 
@@ -15,12 +16,14 @@ router.get('/:id', wabasController.get);
 router.put('/:id', requireAdmin, wabasController.update);
 router.delete('/:id', requireAdmin, wabasController.remove);
 router.post('/:id/sync-templates', requireAdmin, wabasController.syncTemplates);
+router.get('/:id/template-sync-status', wabasController.getTemplateSyncStatus);
 router.post('/:id/templates', requireAdmin, wabasController.createTemplate);
 router.get('/:id/templates', wabasController.getTemplates);
 router.post('/:wabaId/templates/:templateName/header-image', requireAdmin, upload.single('image'), wabasController.uploadTemplateHeaderImage);
 router.get('/:id/quota', wabasController.getQuota);
 router.get('/:id/webhook', webhookController.verify);
-router.post('/:id/webhook', webhookController.handle);
+// Legacy per-WABA webhook path: same Meta signature requirement as the main webhook.
+router.post('/:id/webhook', verifyMetaSignature, webhookController.handle);
 router.post('/embedded-signup/register', requireAdmin, wabasController.embeddedSignup);
 
 module.exports = router;

@@ -59,8 +59,19 @@ async function remove(req, res, next) {
 
 async function syncTemplates(req, res, next) {
     try {
-        const templates = await whatsappService.syncTemplates(req.params.id);
-        res.json({ success: true, count: templates.length });
+        const { templates, summary } = await whatsappService.syncTemplatesWithSummary(req.params.id);
+        // `success` and `count` keep the original response shape (used by the mobile app).
+        res.json({ success: true, count: templates.length, lastSyncedAt: new Date().toISOString(), summary });
+    } catch (e) {
+        next(e);
+    }
+}
+
+async function getTemplateSyncStatus(req, res, next) {
+    try {
+        const waba = await Waba.findById(req.params.id).select('templateSync');
+        if (!waba) return res.status(404).json({ success: false, message: 'WABA not found' });
+        res.json({ success: true, templateSync: waba.templateSync || null });
     } catch (e) {
         next(e);
     }
@@ -405,7 +416,7 @@ async function uploadTemplateHeaderImage(req, res, next) {
             headerComponent.imageMediaId = mediaId;
             headerComponent.imageMediaIdUploadedAt = new Date();
             // Keep a stable hosted copy so staff can see the image in chats
-            await whatsappService.hostTemplateHeaderImage(template, headerComponent, req.file.buffer, req.file.mimetype);
+            await whatsappService.hostTemplateHeaderImage(template, headerComponent, req.file.buffer, req.file.mimetype, 'custom');
             // Optionally clear the pre-approved imageUrl since we're using custom
             // headerComponent.imageUrl = null; // Uncomment if you want to replace
         }
@@ -436,6 +447,7 @@ module.exports = {
     update,
     remove,
     syncTemplates,
+    getTemplateSyncStatus,
     getTemplates,
     getAllTemplates,
     embeddedSignup,

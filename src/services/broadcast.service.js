@@ -377,6 +377,7 @@ async function processBroadcastBatch(batchId) {
           ? resolveTemplateTextForContact(templateDoc, perContactComponents)
           : resolvedTemplateText;
 
+        const hostedHeaderUrl = await whatsappService.getTemplateHeaderImageUrl(broadcast.wabaId, template.name, template.language);
         const chatMessage = await Message.create({
           chatId: chat._id,
           wabaId: broadcast.wabaId,
@@ -390,7 +391,8 @@ async function processBroadcastBatch(batchId) {
           metadata: {
             templateName: template.name,
             templateLanguage: template.language,
-            templateComponents: resolvedTemplateComponents || undefined,
+            templateComponents: whatsappService.withHostedHeaderImage(resolvedTemplateComponents, hostedHeaderUrl) || undefined,
+            templateImageUrl: hostedHeaderUrl || undefined,
             broadcastId: broadcast._id.toString(),
           },
         });

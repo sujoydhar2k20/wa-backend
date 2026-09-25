@@ -23,6 +23,14 @@ const wabaSchema = new mongoose.Schema(
     rateLimitTier: { type: String },
     isActive: { type: Boolean, default: true },
     embeddedSignupToken: { type: String },
+    // Result of the last template sync with Meta (shown to staff in the template screens)
+    templateSync: {
+      lastAttemptAt: Date,
+      lastSuccessAt: Date,
+      lastStatus: { type: String, enum: ['success', 'failed', null], default: null },
+      lastError: String,
+      lastSummary: mongoose.Schema.Types.Mixed,
+    },
   },
   { timestamps: true }
 );

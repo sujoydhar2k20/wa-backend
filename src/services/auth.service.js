@@ -13,43 +13,21 @@ function generateTokens(userId) {
   return { accessToken, refreshToken };
 }
 
-function isSuperAdmin(phone) {
-  const sa = config.superAdminPhone?.replace(/\D/g, '');
-  return (sa && sa === phone) || phone === '917278665321';
-}
-
-function isBypassSuperAdmin(phone) {
-  const sa = config.superAdminPhone?.replace(/\D/g, '');
-  return sa && sa === phone;
-}
-
 async function sendOtp(phone) {
   const normalized = phone.replace(/\D/g, '');
   if (!normalized) throw Object.assign(new Error('Invalid phone'), { statusCode: 400 });
 
-  const superAdmin = isSuperAdmin(normalized);
-  if (!superAdmin) {
-    const isIndianNumber = normalized.length === 10 || (normalized.length === 12 && normalized.startsWith('91'));
-    if (!isIndianNumber) {
-      throw Object.assign(new Error('OTP can only be sent to Indian numbers'), { statusCode: 400 });
-    }
-
-    // Only allow existing staff/admins to receive OTPs
-    const userExists = await User.exists({ phone: normalized });
-    if (!userExists) {
-      throw Object.assign(new Error('Account not found. Please ask an administrator to register your number.'), { statusCode: 404 });
-    }
+  // OTP is mandatory for every role. There is no bypass, no environment switch and no
+  // special-cased phone number. Only Indian numbers of registered, active users may receive an OTP.
+  const isIndianNumber = normalized.length === 10 || (normalized.length === 12 && normalized.startsWith('91'));
+  if (!isIndianNumber) {
+    throw Object.assign(new Error('OTP can only be sent to Indian numbers'), { statusCode: 400 });
   }
 
-  // Original super admin bypasses OTP, new super admin (917278665321) requires it
-  if (isBypassSuperAdmin(normalized)) {
-    return { success: true, message: 'OTP bypassed', bypassed: true };
-  }
-
-  // Environment bypass
-  if (!config.sendOtp) {
-    logger.info(`OTP bypassed for ${normalized} due to SEND_OTP env var`);
-    return { success: true, message: 'OTP bypassed', bypassed: true };
+  // Only allow existing staff/admins to receive OTPs
+  const userExists = await User.exists({ phone: normalized });
+  if (!userExists) {
+    throw Object.assign(new Error('Account not found. Please ask an administrator to register your number.'), { statusCode: 404 });
   }
 
   const otp = smsService.generateOtp();
@@ -60,38 +38,21 @@ async function sendOtp(phone) {
 
 async function verifyOtp(phone, otp, deviceType = 'web', deviceId = '') {
   const normalized = phone.replace(/\D/g, '');
-  const superAdmin = isSuperAdmin(normalized);
-
-  if (!superAdmin) {
-    const isIndianNumber = normalized.length === 10 || (normalized.length === 12 && normalized.startsWith('91'));
-    if (!isIndianNumber) {
-      throw Object.assign(new Error('Only Indian numbers are allowed'), { statusCode: 400 });
-    }
+  const isIndianNumber = normalized.length === 10 || (normalized.length === 12 && normalized.startsWith('91'));
+  if (!isIndianNumber) {
+    throw Object.assign(new Error('Only Indian numbers are allowed'), { statusCode: 400 });
   }
 
-  // Super admin and disabled OTP bypasses OTP verification
-  const bypassOTP = isBypassSuperAdmin(normalized) || !config.sendOtp;
-  
-  if (!bypassOTP) {
-    if (!smsService.verifyOtp(normalized, otp)) throw Object.assign(new Error('Invalid or expired OTP'), { statusCode: 400 });
+  // OTP verification is mandatory for every role (no bypass of any kind).
+  if (!smsService.verifyOtp(normalized, otp)) {
+    throw Object.assign(new Error('Invalid or expired OTP'), { statusCode: 400 });
   }
 
-  let user = await User.findOne({ phone: normalized });
+  // Accounts are never created or promoted at login. Users (and their roles) are managed by
+  // administrators or the create-superadmin script.
+  const user = await User.findOne({ phone: normalized });
   if (!user) {
-    if (superAdmin) {
-      user = await User.create({
-        phone: normalized,
-        name: 'Super Admin',
-        role: 'superadmin',
-      });
-    } else {
-      throw Object.assign(new Error('Account not found. Please ask an administrator to register your number.'), { statusCode: 404 });
-    }
-  } else if (superAdmin && user.role !== 'superadmin') {
-    // Ensure existing user is promoted to superadmin
-    user.role = 'superadmin';
-    user.name = user.name || 'Super Admin';
-    await user.save();
+    throw Object.assign(new Error('Account not found. Please ask an administrator to register your number.'), { statusCode: 404 });
   }
 
   if (!user.isActive) throw Object.assign(new Error('Account disabled'), { statusCode: 403 });

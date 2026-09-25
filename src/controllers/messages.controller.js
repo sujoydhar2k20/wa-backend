@@ -245,21 +245,13 @@ async function send(req, res, next) {
 
             waResult = await whatsappService.sendTemplateMessage(chat.wabaId, chat.phoneNumberId, chat.waId, templateName, language || 'en', components || []);
 
-            // For IMAGE headers, point the stored preview at our own hosted copy (created/refreshed
-            // during send). Meta's example CDN URLs are signed and expire, so they can't be relied on.
+            // For IMAGE headers, store our hosted copy (created/refreshed during send) in the message so
+            // web and the Android app can render it. Meta's example CDN URLs are signed and expire.
             if (req._templateData) {
-                try {
-                    const freshTemplate = await Template.findOne({ wabaId: chat.wabaId, name: templateName, language: language || 'en' });
-                    const freshHeader = (freshTemplate?.components || []).find(c => (c.type || '').toUpperCase() === 'HEADER' && (c.format || '').toUpperCase() === 'IMAGE');
-                    if (freshHeader) {
-                        req._templateData.components = req._templateData.components.map(c =>
-                            (c.type || '').toUpperCase() === 'HEADER' && (c.format || '').toUpperCase() === 'IMAGE'
-                                ? { ...c, hostedImageUrl: freshHeader.hostedImageUrl || c.hostedImageUrl, imageUrl: freshHeader.hostedImageUrl || c.imageUrl }
-                                : c
-                        );
-                    }
-                } catch (e) {
-                    logger.warn(`Could not resolve template header image for chat preview: ${e.message}`);
+                const imageUrl = await whatsappService.getTemplateHeaderImageUrl(chat.wabaId, templateName, language || 'en');
+                if (imageUrl) {
+                    req._templateData.components = whatsappService.withHostedHeaderImage(req._templateData.components, imageUrl);
+                    req._templateData.templateImageUrl = imageUrl;
                 }
             }
         } else if (['image', 'video', 'audio', 'document'].includes(type)) {
@@ -426,6 +418,7 @@ async function send(req, res, next) {
                 templateName: req._templateData.templateName,
                 templateLanguage: req._templateData.language,
                 templateComponents: req._templateData.components,
+                templateImageUrl: req._templateData.templateImageUrl || undefined,
             } : undefined,
         });
 

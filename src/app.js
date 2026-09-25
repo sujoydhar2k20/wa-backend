@@ -41,7 +41,15 @@ app.use((req, res, next) => {
 });
 // Serve uploaded media from VPS
 app.use('/uploads', express.static(path.join(process.cwd(), config.upload.dir || 'uploads')));
-app.use(express.json({ limit: '50mb' }));
+app.use(express.json({
+  limit: '50mb',
+  // Keep the exact bytes of webhook bodies: Meta's X-Hub-Signature-256 is computed over the raw
+  // payload, so it cannot be verified from the re-serialised JSON.
+  verify: (req, res, buf) => {
+    const url = req.originalUrl || req.url || '';
+    if (url.includes('/webhook')) req.rawBody = buf;
+  },
+}));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 // Global rate limiter: 50,000 requests per 15 minutes
@@ -76,36 +84,6 @@ const perUserLimiter = rateLimit({
 app.use('/api', limiter);
 app.use('/api', perUserLimiter);
 app.use(requestLogger);
-
-// DIAGNOSTIC ENDPOINT: Check quoted messages in database (remove in production)
-app.get('/api/diagnostic/quoted-messages', async (req, res) => {
-    try {
-        const { Message } = require('./models');
-        const messages = await Message.find({ quotedMessage: { $exists: true, $ne: null } })
-            .limit(20)
-            .sort({ createdAt: -1 })
-            .select('_id messageId type text quotedMessage replyToMessageId createdAt');
-        
-        const result = messages.map(m => ({
-            _id: m._id,
-            messageId: m.messageId,
-            type: m.type,
-            text: m.text?.substring(0, 50),
-            quotedMessage: m.quotedMessage,
-            replyToMessageId: m.replyToMessageId,
-            createdAt: m.createdAt
-        }));
-        
-        res.json({ 
-            success: true, 
-            count: result.length, 
-            messages: result,
-            total: await Message.countDocuments({ quotedMessage: { $exists: true, $ne: null } })
-        });
-    } catch (e) {
-        res.status(500).json({ success: false, error: e.message });
-    }
-});
 
 app.use('/api', routes);
 

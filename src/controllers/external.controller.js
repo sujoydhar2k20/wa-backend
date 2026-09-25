@@ -87,6 +87,9 @@ const sendTemplate = async (req, res) => {
             if (bodyComp?.text) messageText = bodyComp.text;
         }
 
+        const hostedHeaderUrl = await whatsappService.getTemplateHeaderImageUrl(waba._id, templateName, language || 'en');
+        if (hostedHeaderUrl) resolvedComponents = whatsappService.withHostedHeaderImage(resolvedComponents, hostedHeaderUrl);
+
         // Record the outbound message
         const message = await Message.create({
             chatId: chat._id,
@@ -103,6 +106,7 @@ const sendTemplate = async (req, res) => {
                 templateName,
                 templateLanguage: language,
                 templateComponents: resolvedComponents || undefined,
+                templateImageUrl: hostedHeaderUrl || undefined,
                 language,
                 components
             }

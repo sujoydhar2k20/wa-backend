@@ -121,7 +121,7 @@ function isMetaMediaMissingError(error) {
  * see it in the chat. Meta's example/CDN URLs are signed and expire, so they can't
  * be used for display. Best effort: never blocks sending.
  */
-async function hostTemplateHeaderImage(templateDoc, headerComponent, buffer, mimeType) {
+async function hostTemplateHeaderImage(templateDoc, headerComponent, buffer, mimeType, source = 'meta_sample') {
   try {
     const { uploadToVPS } = require('../utils/vpsUpload');
     const url = await uploadToVPS(buffer, {
@@ -130,6 +130,7 @@ async function hostTemplateHeaderImage(templateDoc, headerComponent, buffer, mim
       mimeType,
     });
     headerComponent.hostedImageUrl = url;
+    headerComponent.imageSource = source;
     templateDoc.markModified('components');
     await templateDoc.save();
     return url;
@@ -153,10 +154,14 @@ async function ensureTemplateHeaderImageMediaId(wabaId, phoneNumberId, templateD
     }
     return headerComponent.imageMediaId;
   }
-  if (!headerComponent.imageUrl) {
+  // Re-upload from OUR hosted copy first (it is the staff's custom image when they uploaded one).
+  // Falling back to Meta's sample URL would silently replace a custom image with the sample.
+  const usingHostedSource = !!headerComponent.hostedImageUrl;
+  const sourceUrl = headerComponent.hostedImageUrl || headerComponent.imageUrl;
+  if (!sourceUrl) {
     // No source to re-upload from; a stale/expired ID would only make Meta reject the send.
     if (headerComponent.imageMediaId) {
-      logger.warn(`Template ${templateDoc.name}: cached media ID is stale and no imageUrl exists to re-upload. Upload a header image again.`);
+      logger.warn(`Template ${templateDoc.name}: cached media ID is stale and no image source exists to re-upload. Upload a header image again.`);
     }
     return null;
   }
@@ -165,7 +170,7 @@ async function ensureTemplateHeaderImageMediaId(wabaId, phoneNumberId, templateD
 
   let response;
   try {
-    response = await axios.get(headerComponent.imageUrl, {
+    response = await axios.get(sourceUrl, {
       responseType: 'arraybuffer',
       timeout: 30000,
       headers: {
@@ -186,7 +191,7 @@ async function ensureTemplateHeaderImageMediaId(wabaId, phoneNumberId, templateD
   const mimeType = (response.headers['content-type'] || 'image/jpeg').split(';')[0].trim();
   const mediaId = await uploadMedia(wabaId, phoneNumberId, imageBuffer, mimeType);
 
-  await hostTemplateHeaderImage(templateDoc, headerComponent, imageBuffer, mimeType);
+  if (!usingHostedSource) await hostTemplateHeaderImage(templateDoc, headerComponent, imageBuffer, mimeType, 'meta_sample');
 
   headerComponent.imageMediaId = mediaId;
   headerComponent.imageMediaIdUploadedAt = new Date();
@@ -195,6 +200,46 @@ async function ensureTemplateHeaderImageMediaId(wabaId, phoneNumberId, templateD
 
   logger.info(`Cached template header image media for ${templateDoc.name}: ${mediaId}`);
   return mediaId;
+}
+
+// Short-lived cache so bulk sends (broadcasts) don't query the template for every recipient.
+const headerImageUrlCache = new Map();
+const HEADER_IMAGE_CACHE_MS = 60 * 1000;
+
+/**
+ * Returns the stable, publicly hosted URL of a template's IMAGE header (or null).
+ * This is the single source used to render template images for staff on web AND the Android
+ * app: it is stored on each template message as `metadata.templateImageUrl`, a key the mobile
+ * app already understands. Meta's own example URLs are signed/expiring and are never used.
+ */
+async function getTemplateHeaderImageUrl(wabaId, templateName, language) {
+  const key = `${wabaId}|${templateName}|${language || ''}`;
+  const hit = headerImageUrlCache.get(key);
+  if (hit && Date.now() - hit.at < HEADER_IMAGE_CACHE_MS) return hit.url;
+  let url = null;
+  try {
+    const doc = (await Template.findOne({ wabaId, name: templateName, language: language || 'en' }))
+      || (await Template.findOne({ wabaId, name: templateName }).sort({ updatedAt: -1 }));
+    const header = (doc?.components || []).find(
+      (c) => (c.type || '').toUpperCase() === 'HEADER' && (c.format || '').toUpperCase() === 'IMAGE'
+    );
+    url = header?.hostedImageUrl || null;
+  } catch (err) {
+    logger.warn(`Could not resolve hosted header image for template ${templateName}: ${err.message}`);
+  }
+  // Only cache positive results so a freshly hosted image is picked up immediately.
+  if (url) headerImageUrlCache.set(key, { url, at: Date.now() });
+  return url;
+}
+
+/** Points the IMAGE header in a resolved-components array (for chat previews) at the hosted URL. */
+function withHostedHeaderImage(components, url) {
+  if (!url || !Array.isArray(components)) return components;
+  return components.map((c) =>
+    (c.type || '').toUpperCase() === 'HEADER' && (c.format || '').toUpperCase() === 'IMAGE'
+      ? { ...c, hostedImageUrl: url, imageUrl: url }
+      : c
+  );
 }
 
 async function sendTemplateMessage(wabaId, phoneNumberId, to, templateName, language = 'en', components = [], forceRefreshMedia = false) {
@@ -468,78 +513,158 @@ async function uploadMedia(wabaId, phoneNumberId, fileBuffer, mimeType) {
   return res.data.id;
 }
 
-async function syncTemplates(wabaId) {
-  const waba = await getWaba(wabaId);
-  const wabaMetaId = waba.wabaId;
+// Fields we own locally on a header component. Meta's payload never contains them, so a sync
+// must carry them over from the stored template or they would be wiped.
+const LOCAL_HEADER_FIELDS = ['hostedImageUrl', 'imageMediaId', 'imageMediaIdUploadedAt', 'imageSource'];
 
-  // Fetch all pages of templates from the Graph API (Graph may paginate results)
-  let allTemplates = [];
-  let path = `/${wabaMetaId}/message_templates`;
-  let cursor = null;
-  do {
-    const queryPath = cursor ? `${path}?after=${encodeURIComponent(cursor)}` : path;
-    const data = await request(wabaId, 'GET', queryPath);
-    const templates = data.data || [];
-    allTemplates = allTemplates.concat(templates);
+// Comparable representation of what Meta controls in a template (used only for the change summary).
+function metaContentSignature(components) {
+  return JSON.stringify((components || []).map((c) => ({
+    type: (c.type || '').toUpperCase(),
+    format: (c.format || 'TEXT').toUpperCase(),
+    text: c.text || null,
+    buttons: (c.buttons || []).map((b) => ({ type: b.type, text: b.text, url: b.url, phone_number: b.phone_number })),
+  })));
+}
 
-    cursor = data.paging && data.paging.cursors && data.paging.cursors.after ? data.paging.cursors.after : null;
-  } while (cursor);
+/**
+ * Pulls templates from Meta and upserts them. NON-DESTRUCTIVE:
+ *  - locally managed header image fields (hosted copy, cached media ID, source) are preserved
+ *  - a template is never deleted because Meta stopped returning it (it is only reported)
+ *  - if Meta returns a template with no components, the stored components are kept
+ * Records the outcome on the WABA (templateSync) and returns { templates, summary }.
+ */
+async function syncTemplatesWithSummary(wabaId) {
+  const startedAt = Date.now();
+  const WabaModel = require('../models/Waba');
+  await WabaModel.updateOne({ _id: wabaId }, { $set: { 'templateSync.lastAttemptAt': new Date() } });
 
-  for (const t of allTemplates) {
-    // Normalize language: ensure we store a string (Graph may return an object)
-    let lang = 'en';
-    if (t.language) {
-      if (typeof t.language === 'string') lang = t.language;
-      else if (typeof t.language === 'object' && t.language.code) lang = t.language.code;
-      else lang = String(t.language);
-    }
-    
-    // Keep locally-managed header image fields (cached Meta media ID, hosted copy) across syncs;
-    // Meta's payload doesn't include them and the update below replaces the components array.
-    const existingTemplate = await Template.findOne({ wabaId, name: t.name, language: lang });
-    const existingHeader = (existingTemplate?.components || []).find(c => (c.type || '').toUpperCase() === 'HEADER');
+  try {
+    const waba = await getWaba(wabaId);
+    const wabaMetaId = waba.wabaId;
 
-    // Process components to extract image URLs
-    const processedComponents = (t.components || []).map(comp => {
-      const processed = {
-        ...comp,
-        format: comp.format || 'TEXT',
-      };
-      
-      // Extract image URL from component example if it's an IMAGE header
-      if ((comp.type || '').toUpperCase() === 'HEADER' && (comp.format || '').toUpperCase() === 'IMAGE') {
-        if (comp.example && comp.example.header_handle && Array.isArray(comp.example.header_handle)) {
-          processed.imageUrl = comp.example.header_handle[0]; // Store the image URL
-        }
-        if (existingHeader) {
-          if (existingHeader.hostedImageUrl) processed.hostedImageUrl = existingHeader.hostedImageUrl;
-          if (existingHeader.imageMediaId) {
-            processed.imageMediaId = existingHeader.imageMediaId;
-            processed.imageMediaIdUploadedAt = existingHeader.imageMediaIdUploadedAt;
-          }
-        }
+    // Fetch all pages of templates from the Graph API (Graph may paginate results)
+    let allTemplates = [];
+    const path = `/${wabaMetaId}/message_templates`;
+    let cursor = null;
+    do {
+      const queryPath = cursor ? `${path}?after=${encodeURIComponent(cursor)}` : path;
+      const data = await request(wabaId, 'GET', queryPath);
+      allTemplates = allTemplates.concat(data.data || []);
+      cursor = data.paging && data.paging.cursors && data.paging.cursors.after ? data.paging.cursors.after : null;
+    } while (cursor);
+
+    const existingDocs = await Template.find({ wabaId });
+    const existingByKey = new Map(existingDocs.map((d) => [`${d.name}|${d.language}`, d]));
+    const seenKeys = new Set();
+    const summary = { fetched: allTemplates.length, added: [], updated: [], unchanged: 0, notOnMeta: [], localImagesPreserved: 0 };
+
+    for (const t of allTemplates) {
+      // Normalize language: ensure we store a string (Graph may return an object)
+      let lang = 'en';
+      if (t.language) {
+        if (typeof t.language === 'string') lang = t.language;
+        else if (typeof t.language === 'object' && t.language.code) lang = t.language.code;
+        else lang = String(t.language);
       }
-      
-      return processed;
+      const key = `${t.name}|${lang}`;
+      seenKeys.add(key);
+      const existing = existingByKey.get(key);
+      const existingComps = existing?.components || [];
+
+      let processedComponents;
+      if (!(t.components || []).length && existingComps.length) {
+        // Meta returned nothing for this template: keep what we have rather than wiping it.
+        processedComponents = existingComps.map((c) => (c.toObject ? c.toObject() : { ...c }));
+      } else {
+        processedComponents = (t.components || []).map((comp) => {
+          const processed = { ...comp, format: comp.format || 'TEXT' };
+          const isHeader = (comp.type || '').toUpperCase() === 'HEADER';
+
+          // Extract image URL from component example if it's an IMAGE header
+          if (isHeader && (comp.format || '').toUpperCase() === 'IMAGE') {
+            if (comp.example && Array.isArray(comp.example.header_handle)) {
+              processed.imageUrl = comp.example.header_handle[0];
+            }
+          }
+          // Carry over locally managed fields for this component type
+          const prior = existingComps.find((c) => (c.type || '').toUpperCase() === (comp.type || '').toUpperCase());
+          if (prior && isHeader) {
+            let kept = false;
+            LOCAL_HEADER_FIELDS.forEach((f) => {
+              if (prior[f] !== undefined && prior[f] !== null) { processed[f] = prior[f]; kept = true; }
+            });
+            // Keep our custom/hosted image reference even if Meta no longer supplies a sample URL
+            if (!processed.imageUrl && prior.imageUrl) processed.imageUrl = prior.imageUrl;
+            if (kept && prior.hostedImageUrl) summary.localImagesPreserved++;
+          }
+          return processed;
+        });
+      }
+
+      if (!existing) {
+        summary.added.push(`${t.name} [${lang}]`);
+      } else {
+        const changes = [];
+        if (existing.status !== t.status) changes.push(`status ${existing.status} -> ${t.status}`);
+        if (existing.category !== t.category) changes.push(`category ${existing.category} -> ${t.category}`);
+        if ((t.components || []).length && metaContentSignature(existingComps) !== metaContentSignature(processedComponents)) changes.push('content changed');
+        if (changes.length) summary.updated.push({ name: t.name, language: lang, changes });
+        else summary.unchanged++;
+      }
+
+      await Template.findOneAndUpdate(
+        { wabaId, name: t.name, language: lang },
+        {
+          wabaId,
+          templateId: t.id,
+          name: t.name,
+          language: lang,
+          category: t.category,
+          status: t.status,
+          components: processedComponents,
+          metaData: t,
+        },
+        { upsert: true, new: true }
+      );
+    }
+
+    // Templates we have locally that Meta did not return: report only, never delete.
+    existingDocs.forEach((d) => {
+      if (!seenKeys.has(`${d.name}|${d.language}`)) summary.notOnMeta.push(`${d.name} [${d.language}]`);
     });
-    
-    await Template.findOneAndUpdate(
-      { wabaId, name: t.name, language: lang },
-      {
-        wabaId,
-        templateId: t.id,
-        name: t.name,
-        language: lang,
-        category: t.category,
-        status: t.status,
-        components: processedComponents,
-        metaData: t,
-      },
-      { upsert: true, new: true }
-    );
+
+    const cap = (arr) => arr.slice(0, 50);
+    const stored = {
+      fetched: summary.fetched,
+      addedCount: summary.added.length,
+      updatedCount: summary.updated.length,
+      unchanged: summary.unchanged,
+      notOnMetaCount: summary.notOnMeta.length,
+      localImagesPreserved: summary.localImagesPreserved,
+      added: cap(summary.added),
+      updated: cap(summary.updated),
+      notOnMeta: cap(summary.notOnMeta),
+      durationMs: Date.now() - startedAt,
+    };
+    await WabaModel.updateOne({ _id: wabaId }, {
+      $set: { 'templateSync.lastSuccessAt': new Date(), 'templateSync.lastStatus': 'success', 'templateSync.lastError': null, 'templateSync.lastSummary': stored },
+    });
+    logger.info(`Synced ${allTemplates.length} templates for WABA ${wabaId} (added ${stored.addedCount}, updated ${stored.updatedCount})`);
+    return { templates: allTemplates, summary: stored };
+  } catch (err) {
+    // Failure never touches stored templates; only the status is recorded (last success time is kept).
+    await WabaModel.updateOne({ _id: wabaId }, {
+      $set: { 'templateSync.lastStatus': 'failed', 'templateSync.lastError': String(err.message || err).slice(0, 300) },
+    }).catch(() => {});
+    throw err;
   }
-  logger.info(`Synced ${allTemplates.length} templates for WABA ${wabaId}`);
-  return allTemplates;
+}
+
+// Backwards-compatible wrapper (used by the scheduled job): returns the raw Meta list.
+async function syncTemplates(wabaId) {
+  const { templates } = await syncTemplatesWithSummary(wabaId);
+  return templates;
 }
 
 async function createTemplate(wabaId, name, category, language, components) {
@@ -712,7 +837,10 @@ async function getPhoneNumberMessagingLimit(wabaId, phoneNumberId) {
 }
 
 module.exports = {
+  syncTemplatesWithSummary,
   hostTemplateHeaderImage,
+  getTemplateHeaderImageUrl,
+  withHostedHeaderImage,
   getWaba,
   getAccessToken,
   sendTextMessage,
