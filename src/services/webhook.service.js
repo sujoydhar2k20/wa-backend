@@ -666,9 +666,14 @@ async function handleStatusUpdate(statusObj) {
             }
         } else {
             const { BroadcastMessage, Broadcast, BroadcastListMember } = require('../models');
+            const broadcastUpdatePayload = { status: status };
+            if (status === 'failed') {
+                broadcastUpdatePayload.errorCode = errorCode;
+                broadcastUpdatePayload.errorMessage = errorMessage;
+            }
             const broadcastMessage = await BroadcastMessage.findOneAndUpdate(
                 { messageId },
-                { $set: { status: status } } // 'sent', 'delivered', 'read', 'failed'
+                { $set: broadcastUpdatePayload } // 'sent', 'delivered', 'read', 'failed'
             );
 
             if (broadcastMessage) {
@@ -713,7 +718,8 @@ async function handleStatusUpdate(statusObj) {
                     io.emit('broadcast:message:status', {
                         broadcastId: broadcastMessage.broadcastId,
                         messageId: broadcastMessage._id,
-                        status: status
+                        status: status,
+                        ...(status === 'failed' && { errorCode, errorMessage })
                     });
                 } catch (emitError) {
                     logger.warn('Socket emit failed for broadcast message status:', emitError.message);
