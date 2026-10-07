@@ -620,6 +620,73 @@ async function handleStatusUpdate(statusObj) {
 
         if (message) {
             logger.info(`Successfully updated message ${message._id} to ${status}`);
+            
+            // IMPORTANT: Also update the corresponding BroadcastMessage if this is from a broadcast
+            try {
+                const { BroadcastMessage, Broadcast, BroadcastListMember } = require('../models');
+                const broadcastMessage = await BroadcastMessage.findOne({ messageId });
+                if (broadcastMessage) {
+                    const broadcastUpdatePayload = { status: status };
+                    if (status === 'failed') {
+                        broadcastUpdatePayload.errorCode = errorCode;
+                        broadcastUpdatePayload.errorMessage = errorMessage;
+                    }
+                    await BroadcastMessage.findByIdAndUpdate(
+                        broadcastMessage._id,
+                        { $set: broadcastUpdatePayload }
+                    );
+                    logger.info(`Also updated broadcast message ${broadcastMessage._id} to ${status}`);
+                    
+                    // Update BroadcastListMember status
+                    const broadcast = await Broadcast.findById(broadcastMessage.broadcastId).select('broadcastListId');
+                    if (broadcast) {
+                        await BroadcastListMember.findOneAndUpdate(
+                            { broadcastListId: broadcast.broadcastListId, phoneNumber: broadcastMessage.phoneNumber },
+                            { $set: { status: status } }
+                        );
+                    }
+                    
+                    // Re-aggregate and update stats
+                    if (['delivered', 'read', 'failed', 'sent'].includes(status)) {
+                        const statsObj = await BroadcastMessage.aggregate([
+                            { $match: { broadcastId: broadcastMessage.broadcastId } },
+                            { $group: { _id: "$status", count: { $sum: 1 } } }
+                        ]);
+                        const statsUpdate = {};
+                        statsObj.forEach(s => {
+                            if (['sent', 'delivered', 'read', 'failed'].includes(s._id)) {
+                                statsUpdate[`statistics.${s._id}`] = s.count;
+                            }
+                        });
+
+                        if (Object.keys(statsUpdate).length > 0) {
+                            const updatedBroadcast = await Broadcast.findByIdAndUpdate(broadcastMessage.broadcastId, { $set: statsUpdate }, { new: true });
+                            try {
+                                const io = getIO();
+                                io.emit('broadcast:update', updatedBroadcast);
+                            } catch (emitErr) {
+                                logger.warn('Socket emit failed for broadcast update:', emitErr.message);
+                            }
+                        }
+                    }
+                    
+                    // Emit broadcast message status
+                    try {
+                        const io = getIO();
+                        io.emit('broadcast:message:status', {
+                            broadcastId: broadcastMessage.broadcastId,
+                            messageId: broadcastMessage._id,
+                            status: status,
+                            ...(status === 'failed' && { errorCode, errorMessage })
+                        });
+                    } catch (emitError) {
+                        logger.warn('Socket emit failed for broadcast message status:', emitError.message);
+                    }
+                }
+            } catch (bmErr) {
+                logger.warn('Failed to update broadcast message:', bmErr.message);
+            }
+            
             // Emit socket event for frontend to update checkmarks
             try {
                 const io = getIO();
