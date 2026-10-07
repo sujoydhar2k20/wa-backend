@@ -12,6 +12,7 @@ router.put('/:id', requireAdmin, broadcastListsController.update);
 router.delete('/:id', requireAdmin, broadcastListsController.remove);
 router.post('/:id/import', requireAdmin, upload.single('file'), broadcastListsController.importMembers);
 router.post('/:id/members/add', requireAdmin, broadcastListsController.addMembers);
+router.post('/:id/import-customers', requireAdmin, broadcastListsController.importCustomers);
 router.get('/:id/members', broadcastListsController.getMembers);
 
 module.exports = router;

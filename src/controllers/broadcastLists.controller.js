@@ -301,4 +301,110 @@ async function addMembers(req, res, next) {
     }
 }
 
-module.exports = { list, create, get, update, remove, importMembers, getMembers, addMembers };
+async function importCustomers(req, res, next) {
+    try {
+        const broadcastList = await BroadcastList.findById(req.params.id);
+        if (!broadcastList) return res.status(404).json({ success: false, message: 'Broadcast list not found' });
+
+        // Fetch all contacts from the database
+        const allContacts = await Contact.find({}).select('_id phoneNumber name tags');
+        
+        if (allContacts.length === 0) {
+            const memberCount = await BroadcastListMember.countDocuments({ broadcastListId: broadcastList._id });
+            return res.json({ 
+                success: true, 
+                total: 0,
+                imported: 0,
+                duplicates: 0,
+                failed: 0,
+                memberCount 
+            });
+        }
+
+        // Get existing members in the broadcast list
+        const existingMembers = await BroadcastListMember.find({ broadcastListId: broadcastList._id }).select('phoneNumber');
+        const existingPhoneNumbers = new Set(existingMembers.map(m => m.phoneNumber));
+
+        // Prepare data for import
+        const toImport = new Map(); // phoneNumber -> { name, tags, contactId }
+        let failedCount = 0;
+        let duplicateCount = 0;
+
+        for (const contact of allContacts) {
+            const phoneNumber = contact.phoneNumber;
+            
+            // Skip if phone number is invalid or too short
+            if (!phoneNumber || phoneNumber.length < 7) {
+                failedCount++;
+                continue;
+            }
+
+            // Skip if already exists in the broadcast list
+            if (existingPhoneNumbers.has(phoneNumber)) {
+                duplicateCount++;
+                continue;
+            }
+
+            // Store contact info for bulk import
+            if (!toImport.has(phoneNumber)) {
+                toImport.set(phoneNumber, {
+                    name: contact.name || phoneNumber,
+                    tags: contact.tags || [],
+                    contactId: contact._id
+                });
+            }
+        }
+
+        const phoneNumbers = Array.from(toImport.keys());
+
+        if (phoneNumbers.length === 0) {
+            const memberCount = await BroadcastListMember.countDocuments({ broadcastListId: broadcastList._id });
+            return res.json({ 
+                success: true, 
+                total: allContacts.length,
+                imported: 0,
+                duplicates: duplicateCount,
+                failed: failedCount,
+                memberCount 
+            });
+        }
+
+        // Prepare bulk operations for BroadcastListMember model
+        const memberOps = [];
+        for (const [phoneNumber, contactData] of toImport.entries()) {
+            memberOps.push({
+                updateOne: {
+                    filter: { broadcastListId: broadcastList._id, phoneNumber },
+                    update: {
+                        $set: {
+                            broadcastListId: broadcastList._id,
+                            phoneNumber,
+                            contactId: contactData.contactId,
+                        }
+                    },
+                    upsert: true
+                }
+            });
+        }
+
+        if (memberOps.length > 0) {
+            await BroadcastListMember.bulkWrite(memberOps);
+        }
+
+        const memberCount = await BroadcastListMember.countDocuments({ broadcastListId: broadcastList._id });
+        await BroadcastList.findByIdAndUpdate(broadcastList._id, { memberCount, source: 'import' });
+
+        res.json({ 
+            success: true, 
+            total: allContacts.length,
+            imported: phoneNumbers.length,
+            duplicates: duplicateCount,
+            failed: failedCount,
+            memberCount 
+        });
+    } catch (e) {
+        next(e);
+    }
+}
+
+module.exports = { list, create, get, update, remove, importMembers, getMembers, addMembers, importCustomers };
