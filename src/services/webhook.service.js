@@ -41,33 +41,31 @@ function calculatePrice(product, rate) {
 
 async function processWebhook(entry) {
     try {
-        const changes = entry.changes[0];
-        const value = changes.value;
-
-        // Check if it's a message or a status update
-        if (value.statuses && value.statuses.length > 0) {
-            for (const statusObj of value.statuses) {
-                await handleStatusUpdate(statusObj);
-            }
-        }
-
-        if (!value.messages || !value.messages.length) return;
-        const metadata = value.metadata;
-        const wabaIdMeta = entry.id; // The Meta WABA ID
-        const phoneNumberId = metadata.phone_number_id;
-
-        // Find our WABA in DB
+        const wabaIdMeta = entry.id;
         const waba = await Waba.findOne({ wabaId: wabaIdMeta });
         if (!waba) {
             logger.error(`WABA not found for ID: ${wabaIdMeta}`);
             return;
         }
 
-        const contacts = value.contacts || [];
-        const messages = value.messages;
+        for (const change of entry?.changes || []) {
+            const value = change?.value;
+            if (!value) continue;
 
-        for (const msg of messages) {
-            await handleMessage(waba, phoneNumberId, msg, contacts);
+            if (value.statuses && value.statuses.length > 0) {
+                for (const statusObj of value.statuses) {
+                    await handleStatusUpdate(statusObj);
+                }
+            }
+
+            if (!value.messages || !value.messages.length) continue;
+            const metadata = value.metadata || {};
+            const phoneNumberId = metadata.phone_number_id;
+            const contacts = value.contacts || [];
+
+            for (const msg of value.messages) {
+                await handleMessage(waba, phoneNumberId, msg, contacts);
+            }
         }
     } catch (error) {
         logger.error('Error processing webhook:', error);

@@ -3,21 +3,202 @@ const whatsappService = require('./whatsapp.service');
 const { getIO } = require('../websocket/socket.server');
 const { logger } = require('../utils/logger');
 const config = require('../config');
+const axios = require('axios');
+const jwt = require('jsonwebtoken');
+const { createMetaCalls } = require('./calls/metaCalls');
+const { createBridgeClient } = require('./calls/bridgeClient');
+const { parseCallsChange } = require('./calls/webhookParser');
 
 const BASE_URL = `https://graph.facebook.com/${config.meta.apiVersion}`;
 
+let cachedMetaCalls;
+let cachedBridgeClient;
+
+function getMetaCalls() {
+  if (!cachedMetaCalls) {
+    cachedMetaCalls = createMetaCalls({
+      getToken: whatsappService.getAccessToken,
+      apiVersion: config.meta.apiVersion,
+    });
+  }
+  return cachedMetaCalls;
+}
+
+function getBridgeClient() {
+  if (cachedBridgeClient) return cachedBridgeClient;
+  const baseUrl = process.env.BRIDGE_BASE_URL || process.env.BRIDGE_URL || 'http://127.0.0.1:8090';
+  const secret = process.env.BRIDGE_SECRET;
+  if (!secret || secret.length < 32) {
+    throw new Error('BRIDGE_SECRET must be configured (min 32 chars) to use calling media bridge');
+  }
+  cachedBridgeClient = createBridgeClient({ baseUrl, secret });
+  return cachedBridgeClient;
+}
+
+function getLiveKitConfig() {
+  const livekitUrl = process.env.LIVEKIT_URL;
+  const livekitApiKey = process.env.LIVEKIT_API_KEY;
+  const livekitApiSecret = process.env.LIVEKIT_API_SECRET;
+  if (!livekitUrl || !livekitApiKey || !livekitApiSecret) {
+    throw new Error('LIVEKIT_URL, LIVEKIT_API_KEY and LIVEKIT_API_SECRET are required for web call audio');
+  }
+  return { livekitUrl, livekitApiKey, livekitApiSecret };
+}
+
+function emitCallEvent(name, payload, userId) {
+  try {
+    const io = getIO();
+    if (userId) {
+      io.to(`user:${String(userId)}`).emit(name, payload);
+    } else {
+      io.emit(name, payload);
+    }
+  } catch (e) {
+    logger.warn(`Socket emit failed for ${name}: ${e.message}`);
+  }
+}
+
+function normalizeMetaError(error) {
+  const metaMessage = error?.response?.data?.error?.message;
+  const message = metaMessage || error.message || 'Meta API request failed';
+  const status = error?.response?.status || 500;
+  return { message, status, raw: error?.response?.data || error.message };
+}
+
+async function graphGet(token, path, params = {}) {
+  const res = await axios.get(`${BASE_URL}/${path}`, {
+    headers: { Authorization: `Bearer ${token}` },
+    params,
+    timeout: 20000,
+  });
+  return res.data;
+}
+
+function toMetaDirection(direction) {
+  const v = String(direction || '').toUpperCase();
+  if (v === 'USER_INITIATED') return 'inbound';
+  if (v === 'BUSINESS_INITIATED') return 'outbound';
+  return null;
+}
+
+async function resolveCallLog(callId, callbackData) {
+  let callLog = null;
+  if (callId) callLog = await CallLog.findOne({ callId });
+  if (!callLog && callbackData) {
+    try {
+      const mongoose = require('mongoose');
+      if (mongoose.Types.ObjectId.isValid(callbackData)) {
+        callLog = await CallLog.findById(callbackData);
+      }
+    } catch (_) {}
+  }
+  return callLog;
+}
+
 /**
- * Send a call permission request to the customer.
- * This uses an interactive message asking the customer to allow calls.
- * The customer must approve before the business can place an outbound call.
+ * Check if a WABA number is ready for Cloud API calling.
+ * This is used by the frontend to explain Meta error 2593151 with actionable details.
  */
+async function getCallingReadiness(wabaId, phoneNumberId) {
+  const waba = await Waba.findById(wabaId);
+  if (!waba) throw new Error('WABA not found');
+
+  const token = await whatsappService.getAccessToken(wabaId);
+  const checks = {
+    wabaSubscribedToApp: null,
+    callsFieldSubscribed: null,
+    cloudApiOnly: null,
+    messagingLimitEligible: null,
+    callingEnabled: null,
+    messagingPermission: null,
+  };
+  const blockers = [];
+  const warnings = [];
+  const diagnostics = {};
+
+  let subscribedApps;
+  try {
+    subscribedApps = await graphGet(token, `${waba.wabaId}/subscribed_apps`);
+    const apps = Array.isArray(subscribedApps?.data) ? subscribedApps.data : [];
+    const appMatch = apps.find((a) => {
+      const appId = a?.whatsapp_business_api_data?.id || a?.id;
+      return config.meta.appId ? String(appId) === String(config.meta.appId) : true;
+    });
+
+    checks.wabaSubscribedToApp = !!appMatch;
+    if (!checks.wabaSubscribedToApp) blockers.push('App is not subscribed to this WhatsApp Business Account.');
+
+    const fields = appMatch?.subscribed_fields || [];
+    checks.callsFieldSubscribed = fields.includes('calls');
+    if (!checks.callsFieldSubscribed) blockers.push('Webhook field calls is not subscribed for this app and WABA.');
+
+    diagnostics.subscribedApps = apps.map((a) => ({
+      app: a?.whatsapp_business_api_data?.name || a?.id,
+      appId: a?.whatsapp_business_api_data?.id || a?.id,
+      fields: a?.subscribed_fields || [],
+    }));
+  } catch (error) {
+    const e = normalizeMetaError(error);
+    warnings.push(`Could not verify subscribed apps: ${e.message}`);
+  }
+
+  try {
+    const info = await graphGet(token, `${phoneNumberId}`, {
+      fields: 'platform_type,is_on_biz_app,messaging_limit_tier,status,quality_rating,display_phone_number',
+    });
+    diagnostics.phoneInfo = info;
+    const coexistence = info.is_on_biz_app === true;
+    checks.cloudApiOnly = !coexistence;
+    if (!checks.cloudApiOnly) {
+      blockers.push('This number is in WhatsApp Business App coexistence mode. Calling requires Cloud API-only number.');
+    }
+    const tier = String(info.messaging_limit_tier || '');
+    checks.messagingLimitEligible = !/TIER_(50|250|1K)$/i.test(tier);
+    if (!checks.messagingLimitEligible) blockers.push(`Messaging limit tier ${tier} is below calling requirement.`);
+  } catch (error) {
+    const e = normalizeMetaError(error);
+    warnings.push(`Could not verify phone number status: ${e.message}`);
+  }
+
+  try {
+    const settings = await graphGet(token, `${phoneNumberId}/settings`);
+    const status = settings?.calling?.status || settings?.status || null;
+    checks.callingEnabled = String(status || '').toUpperCase() === 'ENABLED';
+    diagnostics.callingSettings = settings?.calling || settings;
+    if (!checks.callingEnabled) blockers.push('Calling is currently disabled in phone number call settings.');
+  } catch (error) {
+    const e = normalizeMetaError(error);
+    warnings.push(`Could not read calling settings: ${e.message}`);
+  }
+
+  try {
+    await graphGet(token, `${phoneNumberId}`, { fields: 'id' });
+    checks.messagingPermission = true;
+  } catch (error) {
+    const e = normalizeMetaError(error);
+    checks.messagingPermission = false;
+    blockers.push(`Missing app permission to access this number: ${e.message}`);
+  }
+
+  const ready = Object.values(checks).every((v) => v === true);
+  return {
+    ready,
+    checks,
+    blockers,
+    warnings,
+    metaErrorHint: ready
+      ? null
+      : 'Meta error 2593151 usually means your calls webhook is not fully configured or SIP is not configured.',
+    docs: 'https://developers.facebook.com/docs/whatsapp/cloud-api/calling#step-1-prerequisites',
+    diagnostics,
+  };
+}
+
 async function requestCallPermission(wabaId, phoneNumberId, to, userId) {
   const waba = await Waba.findById(wabaId);
   if (!waba) throw new Error('WABA not found');
 
-  // Find or create a CallLog for tracking
   const chat = await Chat.findOne({ wabaId, waId: to });
-
   const callLog = await CallLog.create({
     chatId: chat?._id,
     wabaId,
@@ -29,48 +210,16 @@ async function requestCallPermission(wabaId, phoneNumberId, to, userId) {
     startedAt: new Date(),
   });
 
-  // Send the permission request via the calls endpoint
   try {
-    const token = await whatsappService.getAccessToken(wabaId);
-    const axios = require('axios');
-    const res = await axios.post(
-      `${BASE_URL}/${phoneNumberId}/messages`,
-      {
-        messaging_product: 'whatsapp',
-        recipient_type: 'individual',
-        to: to.replace(/\D/g, ''),
-        type: 'interactive',
-        interactive: {
-          type: 'call_permission_request',
-          body: {
-            text: 'We would like to call you to assist with your inquiry. Please grant permission to receive our call.',
-          },
-          action: {
-            name: 'call_permission_request',
-          },
-        },
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-      }
-    );
-
-    logger.info(`Call permission request sent to ${to}, response: ${JSON.stringify(res.data)}`);
-
-    // Emit socket event
-    try {
-      const io = getIO();
-      io.emit('call:permission_requested', {
-        chatId: chat?._id?.toString(),
-        callLog,
-      });
-    } catch (e) {
-      logger.warn('Socket emit failed for call permission:', e.message);
-    }
-
+    const res = await getMetaCalls().requestPermission(wabaId, phoneNumberId, {
+      to,
+      text: 'We would like to call you to assist with your inquiry. Please grant permission to receive our call.',
+    });
+    logger.info(`Call permission request sent to ${to}, response: ${JSON.stringify(res)}`);
+    emitCallEvent('call:permission_requested', {
+      chatId: chat?._id?.toString(),
+      callLog,
+    });
     return callLog;
   } catch (error) {
     callLog.status = 'failed';
@@ -81,16 +230,11 @@ async function requestCallPermission(wabaId, phoneNumberId, to, userId) {
   }
 }
 
-/**
- * Initiate an outbound call to the customer.
- * Requires prior call permission grant.
- */
 async function initiateCall(wabaId, phoneNumberId, to, userId) {
   const waba = await Waba.findById(wabaId);
   if (!waba) throw new Error('WABA not found');
 
   const chat = await Chat.findOne({ wabaId, waId: to });
-
   const callLog = await CallLog.create({
     chatId: chat?._id,
     wabaId,
@@ -103,44 +247,30 @@ async function initiateCall(wabaId, phoneNumberId, to, userId) {
   });
 
   try {
-    const token = await whatsappService.getAccessToken(wabaId);
-    const axios = require('axios');
-    const res = await axios.post(
-      `${BASE_URL}/${phoneNumberId}/calls`,
-      {
-        messaging_product: 'whatsapp',
-        to: to.replace(/\D/g, ''),
-        type: 'voice',
-        action: 'connect',
-        biz_opaque_callback_data: callLog._id.toString(),
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-      }
-    );
+    const bridge = getBridgeClient();
+    const bridgeSessionId = callLog._id.toString();
+    const sdpOffer = await bridge.outbound(bridgeSessionId);
+    const res = await getMetaCalls().connect(wabaId, phoneNumberId, {
+      to,
+      sdpOffer,
+      bizData: bridgeSessionId,
+    });
 
-    const callId = res.data?.calls?.[0]?.id || res.data?.id;
-    if (callId) {
-      callLog.callId = callId;
-      await callLog.save();
-    }
+    const callId = res?.calls?.[0]?.id || res?.id;
+    if (callId) callLog.callId = callId;
+    callLog.metadata = {
+      ...(callLog.metadata || {}),
+      bridgeSessionId,
+      room: bridge.roomFor(bridgeSessionId),
+      signaling: 'graph-webhook',
+    };
+    await callLog.save();
 
-    logger.info(`Outbound call initiated to ${to}, callId: ${callId}`);
-
-    // Emit socket event
-    try {
-      const io = getIO();
-      io.emit('call:outgoing', {
-        chatId: chat?._id?.toString(),
-        callLog,
-      });
-    } catch (e) {
-      logger.warn('Socket emit failed for outgoing call:', e.message);
-    }
-
+    logger.info(`Outbound call initiated to ${to}, callId: ${callId || 'pending'}`);
+    emitCallEvent('call:outgoing', {
+      chatId: chat?._id?.toString(),
+      callLog,
+    });
     return callLog;
   } catch (error) {
     callLog.status = 'failed';
@@ -151,37 +281,13 @@ async function initiateCall(wabaId, phoneNumberId, to, userId) {
   }
 }
 
-/**
- * Terminate an active call.
- */
 async function terminateCall(wabaId, phoneNumberId, callId) {
   try {
-    const token = await whatsappService.getAccessToken(wabaId);
-    const axios = require('axios');
-    await axios.post(
-      `${BASE_URL}/${phoneNumberId}/calls`,
-      {
-        messaging_product: 'whatsapp',
-        action: 'terminate',
-        call_id: callId,
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-      }
-    );
+    await getMetaCalls().terminate(wabaId, phoneNumberId, { callId });
 
-    // Update call log
     const callLog = await CallLog.findOneAndUpdate(
       { callId },
-      {
-        $set: {
-          status: 'terminated',
-          endedAt: new Date(),
-        },
-      },
+      { $set: { status: 'terminated', endedAt: new Date() } },
       { new: true }
     );
 
@@ -190,19 +296,17 @@ async function terminateCall(wabaId, phoneNumberId, callId) {
       await callLog.save();
     }
 
-    logger.info(`Call ${callId} terminated`);
-
-    // Emit socket event
+    const bridgeSessionId = callLog?.metadata?.bridgeSessionId || callId;
     try {
-      const io = getIO();
-      io.emit('call:terminated', {
-        chatId: callLog?.chatId?.toString(),
-        callLog,
-      });
-    } catch (e) {
-      logger.warn('Socket emit failed for call termination:', e.message);
+      await getBridgeClient().terminate(bridgeSessionId);
+    } catch (bridgeErr) {
+      logger.warn(`Bridge terminate failed for ${bridgeSessionId}: ${bridgeErr.message}`);
     }
 
+    emitCallEvent('call:terminated', {
+      chatId: callLog?.chatId?.toString(),
+      callLog,
+    });
     return callLog;
   } catch (error) {
     logger.error(`Failed to terminate call ${callId}:`, error.response?.data || error.message);
@@ -210,69 +314,44 @@ async function terminateCall(wabaId, phoneNumberId, callId) {
   }
 }
 
-/**
- * Process incoming call webhook events from Meta.
- * The `calls` webhook field delivers events for the full call lifecycle.
- */
 async function processCallWebhook(entry) {
   try {
-    const changes = entry.changes[0];
-    const value = changes.value;
     const wabaIdMeta = entry.id;
-
     const waba = await Waba.findOne({ wabaId: wabaIdMeta });
     if (!waba) {
       logger.warn(`WABA not found for call webhook, ID: ${wabaIdMeta}`);
       return;
     }
 
-    const metadata = value.metadata || {};
-    const phoneNumberId = metadata.phone_number_id;
-    const callsData = value.calls || [];
-
-    for (const call of callsData) {
-      await handleCallEvent(waba, phoneNumberId, call);
+    for (const change of entry?.changes || []) {
+      if (change?.field !== 'calls') continue;
+      const events = parseCallsChange(change);
+      for (const ev of events) {
+        await handleCallEvent(waba, ev.phoneNumberId, ev.raw, ev);
+      }
     }
   } catch (error) {
     logger.error('Error processing call webhook:', error);
   }
 }
 
-/**
- * Handle a single call event from the webhook.
- */
-async function handleCallEvent(waba, phoneNumberId, call) {
+async function handleCallEvent(waba, phoneNumberId, call, parsedEvent = null) {
   const callId = call.id || call.call_id;
-  const from = call.from;           // Customer's number (for inbound)
-  const to = call.to;               // Business number (for inbound) or customer (for outbound)
-  const status = call.status;       // ringing, accepted, rejected, terminated, etc.
-  const direction = call.direction; // inbound or outbound
+  const from = call.from;
+  const to = call.to;
+  const status = call.status;
+  const direction = parsedEvent?.direction || toMetaDirection(call.direction);
   const callbackData = call.biz_opaque_callback_data;
+  const eventType = String(call.event || parsedEvent?.type || '').toLowerCase();
+  const sdp = call.session?.sdp || parsedEvent?.sdp || null;
 
-  logger.info(`Call webhook event: callId=${callId}, status=${status}, direction=${direction}, from=${from}`);
+  logger.info(`Call webhook event: callId=${callId}, event=${eventType || 'status'}, status=${status}, direction=${direction}, from=${from}`);
 
-  // Try to find existing call log by callId or callback data
-  let callLog = null;
-  if (callId) {
-    callLog = await CallLog.findOne({ callId });
-  }
-  if (!callLog && callbackData) {
-    // callbackData might be our internal CallLog _id
-    try {
-      const mongoose = require('mongoose');
-      if (mongoose.Types.ObjectId.isValid(callbackData)) {
-        callLog = await CallLog.findById(callbackData);
-      }
-    } catch (_) {}
-  }
-
+  let callLog = await resolveCallLog(callId, callbackData);
   const customerWaId = direction === 'inbound' ? from : to;
-
-  // Find the associated chat
   const chat = await Chat.findOne({ wabaId: waba._id, waId: customerWaId });
 
   if (!callLog) {
-    // New inbound call
     callLog = await CallLog.create({
       chatId: chat?._id,
       wabaId: waba._id,
@@ -282,17 +361,59 @@ async function handleCallEvent(waba, phoneNumberId, call) {
       direction: direction || 'inbound',
       status: mapMetaStatus(status),
       startedAt: new Date(),
+      metadata: callbackData ? { bridgeSessionId: callbackData } : undefined,
     });
   } else {
-    // Update existing call log
-    if (callId && !callLog.callId) {
-      callLog.callId = callId;
-    }
-    callLog.status = mapMetaStatus(status);
+    if (callId && !callLog.callId) callLog.callId = callId;
+    if (status) callLog.status = mapMetaStatus(status);
   }
 
-  // Update timestamps based on status
-  switch (status?.toLowerCase()) {
+  const bridgeSessionId = callLog?.metadata?.bridgeSessionId || callbackData || callId;
+  const lowerStatus = String(status || '').toLowerCase();
+
+  if (eventType === 'connect' && direction === 'inbound' && sdp) {
+    try {
+      const bridge = getBridgeClient();
+      const answer = await bridge.inbound(bridgeSessionId, sdp);
+      await getMetaCalls().preAccept(waba._id, phoneNumberId, { callId, sdpAnswer: answer });
+      await getMetaCalls().accept(waba._id, phoneNumberId, { callId, sdpAnswer: answer, bizData: bridgeSessionId });
+      callLog.status = 'ringing';
+      callLog.metadata = {
+        ...(callLog.metadata || {}),
+        bridgeSessionId,
+        room: bridge.roomFor(bridgeSessionId),
+        signaling: 'graph-webhook',
+        autoAnsweredByBridge: true,
+      };
+    } catch (err) {
+      callLog.status = 'failed';
+      callLog.metadata = {
+        ...(callLog.metadata || {}),
+        bridgeSessionId,
+        connectError: err.message,
+      };
+      logger.error(`Inbound connect handling failed for ${callId}: ${err.message}`);
+    }
+  }
+
+  if (eventType === 'connect' && direction === 'outbound' && sdp) {
+    try {
+      await getBridgeClient().answer(bridgeSessionId, sdp);
+      callLog.metadata = {
+        ...(callLog.metadata || {}),
+        bridgeSessionId,
+      };
+    } catch (err) {
+      logger.warn(`Outbound SDP answer apply failed for ${bridgeSessionId}: ${err.message}`);
+      callLog.metadata = {
+        ...(callLog.metadata || {}),
+        bridgeSessionId,
+        answerApplyError: err.message,
+      };
+    }
+  }
+
+  switch (lowerStatus) {
     case 'ringing':
       if (!callLog.startedAt) callLog.startedAt = new Date();
       break;
@@ -316,41 +437,37 @@ async function handleCallEvent(waba, phoneNumberId, call) {
       break;
   }
 
-  // Store any extra metadata
+  if (eventType === 'terminate' || ['terminated', 'ended', 'completed', 'rejected', 'missed', 'no_answer'].includes(lowerStatus)) {
+    try {
+      await getBridgeClient().terminate(bridgeSessionId);
+    } catch (err) {
+      logger.warn(`Bridge cleanup failed for ${bridgeSessionId}: ${err.message}`);
+    }
+  }
+
   callLog.metadata = {
     ...(callLog.metadata || {}),
+    bridgeSessionId,
+    lastEventType: eventType || null,
     lastEvent: status,
     rawPayload: call,
   };
 
   await callLog.save();
 
-  // Emit socket events for real-time UI updates
-  try {
-    const io = getIO();
-    const eventData = {
-      chatId: chat?._id?.toString(),
-      callLog: callLog.toObject(),
-    };
-
-    if (status?.toLowerCase() === 'ringing' && (direction === 'inbound' || !direction)) {
-      // Incoming call alert
-      io.emit('call:incoming', eventData);
-    } else if (['terminated', 'ended', 'completed', 'rejected', 'missed', 'no_answer'].includes(status?.toLowerCase())) {
-      io.emit('call:terminated', eventData);
-    } else {
-      io.emit('call:status', eventData);
-    }
-  } catch (e) {
-    logger.warn('Socket emit failed for call event:', e.message);
+  const eventData = {
+    chatId: chat?._id?.toString(),
+    callLog: callLog.toObject(),
+  };
+  if (lowerStatus === 'ringing' && (direction === 'inbound' || !direction)) {
+    emitCallEvent('call:incoming', eventData);
+  } else if (['terminated', 'ended', 'completed', 'rejected', 'missed', 'no_answer'].includes(lowerStatus) || eventType === 'terminate') {
+    emitCallEvent('call:terminated', eventData);
+  } else {
+    emitCallEvent('call:status', eventData);
   }
-
-  logger.info(`Call event processed: callId=${callId}, status=${callLog.status}, duration=${callLog.duration}s`);
 }
 
-/**
- * Map Meta's call status strings to our internal status enum.
- */
 function mapMetaStatus(metaStatus) {
   if (!metaStatus) return 'ringing';
   const map = {
@@ -365,16 +482,107 @@ function mapMetaStatus(metaStatus) {
     no_answer: 'missed',
     failed: 'failed',
   };
-  return map[metaStatus.toLowerCase()] || 'ringing';
+  return map[String(metaStatus).toLowerCase()] || 'ringing';
 }
 
-/**
- * Get call logs for a specific chat.
- */
+async function acceptIncomingCall(callLogId, user) {
+  const callLog = await CallLog.findById(callLogId);
+  if (!callLog) throw new Error('Call log not found');
+  if (callLog.direction !== 'inbound') throw new Error('Only inbound calls can be accepted from staff UI');
+  if (['rejected', 'terminated', 'missed', 'failed'].includes(callLog.status)) {
+    throw new Error(`Cannot accept call in ${callLog.status} state`);
+  }
+
+  callLog.status = 'accepted';
+  callLog.answeredAt = callLog.answeredAt || new Date();
+  callLog.metadata = {
+    ...(callLog.metadata || {}),
+    answeredBy: user?._id?.toString() || null,
+    answeredByName: user?.name || null,
+  };
+  await callLog.save();
+
+  emitCallEvent('call:status', {
+    chatId: callLog.chatId?.toString(),
+    callLog: callLog.toObject(),
+  });
+  return callLog;
+}
+
+async function rejectIncomingCall(callLogId) {
+  const callLog = await CallLog.findById(callLogId);
+  if (!callLog) throw new Error('Call log not found');
+  if (callLog.direction !== 'inbound') throw new Error('Only inbound calls can be rejected from staff UI');
+
+  if (callLog.callId) {
+    try {
+      await getMetaCalls().reject(callLog.wabaId, callLog.phoneNumberId, { callId: callLog.callId });
+    } catch (err) {
+      logger.warn(`Meta reject failed for ${callLog.callId}: ${err.message}`);
+    }
+  }
+  try {
+    const bridgeSessionId = callLog?.metadata?.bridgeSessionId || callLog.callId;
+    if (bridgeSessionId) await getBridgeClient().terminate(bridgeSessionId);
+  } catch (err) {
+    logger.warn(`Bridge reject cleanup failed for ${callLog.callId}: ${err.message}`);
+  }
+
+  callLog.status = 'rejected';
+  callLog.endedAt = new Date();
+  callLog.duration = 0;
+  await callLog.save();
+
+  emitCallEvent('call:terminated', {
+    chatId: callLog.chatId?.toString(),
+    callLog: callLog.toObject(),
+  });
+  return callLog;
+}
+
+async function createMediaSession(callLogId, user) {
+  const callLog = await CallLog.findById(callLogId);
+  if (!callLog) throw new Error('Call log not found');
+
+  const bridgeSessionId = callLog?.metadata?.bridgeSessionId || callLog.callId;
+  if (!bridgeSessionId) {
+    throw new Error('Bridge session is not initialized for this call yet');
+  }
+
+  const { livekitUrl, livekitApiKey, livekitApiSecret } = getLiveKitConfig();
+  const identity = `staff-${String(user?._id || 'unknown')}`;
+  const room = `call-${bridgeSessionId}`;
+  const now = Math.floor(Date.now() / 1000);
+  const token = jwt.sign(
+    {
+      iss: livekitApiKey,
+      sub: identity,
+      nbf: now - 10,
+      exp: now + 60 * 60,
+      video: {
+        roomJoin: true,
+        room,
+        canPublish: true,
+        canSubscribe: true,
+        canPublishData: true,
+      },
+      metadata: JSON.stringify({ callLogId: callLog._id.toString(), userId: String(user?._id || '') }),
+    },
+    livekitApiSecret,
+    { algorithm: 'HS256' }
+  );
+
+  return {
+    room,
+    livekitUrl,
+    token,
+    identity,
+  };
+}
+
 async function getCallLogsByChat(chatId, options = {}) {
   const { page = 1, limit = 50 } = options;
   const skip = (page - 1) * limit;
-
   const [logs, total] = await Promise.all([
     CallLog.find({ chatId })
       .sort({ createdAt: -1 })
@@ -384,17 +592,12 @@ async function getCallLogsByChat(chatId, options = {}) {
       .lean(),
     CallLog.countDocuments({ chatId }),
   ]);
-
   return { logs, total, page, limit };
 }
 
-/**
- * Get all call logs (admin view) with optional filters.
- */
 async function getAllCallLogs(options = {}) {
   const { page = 1, limit = 50, wabaId, direction, status } = options;
   const skip = (page - 1) * limit;
-
   const filter = {};
   if (wabaId) filter.wabaId = wabaId;
   if (direction) filter.direction = direction;
@@ -410,15 +613,18 @@ async function getAllCallLogs(options = {}) {
       .lean(),
     CallLog.countDocuments(filter),
   ]);
-
   return { logs, total, page, limit };
 }
 
 module.exports = {
+  getCallingReadiness,
   requestCallPermission,
   initiateCall,
   terminateCall,
   processCallWebhook,
+  acceptIncomingCall,
+  rejectIncomingCall,
+  createMediaSession,
   getCallLogsByChat,
   getAllCallLogs,
 };

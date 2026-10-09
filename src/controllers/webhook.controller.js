@@ -28,36 +28,45 @@ async function handle(req, res, next) {
         logger.info(`Incoming WhatsApp Webhook: ${JSON.stringify(body).substring(0, 500)}`);
 
         if (body.object) {
-            const changes = body.entry?.[0]?.changes?.[0];
-            const value = changes?.value;
-            const field = changes?.field;
+            const entries = Array.isArray(body.entry) ? body.entry : [];
+            let handledAny = false;
 
-            logger.info(`Webhook field: ${field}, has messages: ${!!(value?.messages?.length)}, has statuses: ${!!(value?.statuses?.length)}, WABA ID: ${body.entry?.[0]?.id}`);
+            for (const entry of entries) {
+                for (const change of entry?.changes || []) {
+                    const value = change?.value;
+                    const field = change?.field;
 
-            if (field === 'message_template_status_update' && value) {
-                logger.info(`Template status update received: ${value.message_template_name} is now ${value.event}`);
-                require('../services/webhook.service').processTemplateStatusWebhook(body.entry[0])
-                    .catch(e => logger.error('Error in template status webhook service:', e));
-                return res.status(200).send('EVENT_RECEIVED');
+                    logger.info(`Webhook field: ${field}, has messages: ${!!(value?.messages?.length)}, has statuses: ${!!(value?.statuses?.length)}, WABA ID: ${entry?.id}`);
+
+                    if (field === 'message_template_status_update' && value) {
+                        handledAny = true;
+                        logger.info(`Template status update received: ${value.message_template_name} is now ${value.event}`);
+                        require('../services/webhook.service').processTemplateStatusWebhook(entry)
+                            .catch(e => logger.error('Error in template status webhook service:', e));
+                        continue;
+                    }
+
+                    if (field === 'calls' && value) {
+                        handledAny = true;
+                        logger.info(`Call webhook received: ${JSON.stringify(value).substring(0, 300)}`);
+                        require('../services/call.service').processCallWebhook(entry)
+                            .catch(e => logger.error('Error in call webhook service:', e));
+                        continue;
+                    }
+
+                    if (value && (
+                        (value.messages && value.messages.length > 0) ||
+                        (value.statuses && value.statuses.length > 0)
+                    )) {
+                        handledAny = true;
+                        require('../services/webhook.service').processWebhook(entry)
+                            .catch(e => logger.error('Error in webhook service:', e));
+                    }
+                }
             }
 
-            // Handle call webhook events
-            if (field === 'calls' && value) {
-                logger.info(`Call webhook received: ${JSON.stringify(value).substring(0, 300)}`);
-                require('../services/call.service').processCallWebhook(body.entry[0])
-                    .catch(e => logger.error('Error in call webhook service:', e));
-                return res.status(200).send('EVENT_RECEIVED');
-            }
-
-            if (value && (
-                (value.messages && value.messages.length > 0) ||
-                (value.statuses && value.statuses.length > 0)
-            )) {
-                // Process the webhook asynchronously
-                require('../services/webhook.service').processWebhook(body.entry[0])
-                    .catch(e => logger.error('Error in webhook service:', e));
-
-                logger.info('Received a valid message/status via webhook');
+            if (handledAny) {
+                logger.info('Received valid webhook entries');
             }
             return res.status(200).send('EVENT_RECEIVED');
         } else {
