@@ -685,7 +685,115 @@ async function getErrorAnalytics(req, res, next) {
     }
 }
 
-module.exports = { list, create, get, getStats, getTodayStats, getStatusCounts, send, test, getMessages, getBatches, bulkDelete, getFailedMessages, retryFailed, getErrorAnalytics };
+/**
+ * ⭐ NEW ENDPOINT: Stop/Cancel a broadcast
+ * Stops ongoing sending, cancels pending batches, and halts scheduled jobs
+ */
+async function stopBroadcast(req, res, next) {
+    try {
+        const broadcastId = req.params.id;
+
+        const broadcast = await Broadcast.findById(broadcastId);
+        if (!broadcast) {
+            return res.status(404).json({ success: false, message: 'Broadcast not found' });
+        }
+
+        // Check if broadcast can be stopped
+        if (!['sending', 'scheduled', 'pending', 'draft'].includes(broadcast.status)) {
+            return res.status(400).json({
+                success: false,
+                message: `Cannot stop broadcast with status "${broadcast.status}". Only active broadcasts can be stopped.`,
+                currentStatus: broadcast.status,
+            });
+        }
+
+        logger.info(`[BROADCAST STOP] Stopping broadcast ${broadcastId} with status "${broadcast.status}"`);
+
+        // Get all pending batches for this broadcast
+        const pendingBatches = await BroadcastBatch.find({
+            broadcastId,
+            status: { $in: ['pending', 'sending'] },
+        });
+
+        logger.info(`[BROADCAST STOP] Found ${pendingBatches.length} pending/sending batches to cancel`);
+
+        // Mark all pending batches as cancelled
+        if (pendingBatches.length > 0) {
+            await BroadcastBatch.updateMany(
+                { broadcastId, status: { $in: ['pending', 'sending'] } },
+                { 
+                    status: 'cancelled',
+                    cancelledAt: new Date(),
+                }
+            );
+            logger.info(`[BROADCAST STOP] Marked ${pendingBatches.length} batches as cancelled`);
+        }
+
+        // Cancel scheduled jobs via Agenda
+        try {
+            const { getAgenda } = require('../jobs/agenda');
+            const agenda = getAgenda();
+            
+            if (agenda) {
+                const jobsToCancel = await agenda.jobs({
+                    'data.batchId': { $in: pendingBatches.map(b => b._id.toString()) }
+                });
+                
+                for (const job of jobsToCancel) {
+                    await job.remove();
+                }
+                
+                if (jobsToCancel.length > 0) {
+                    logger.info(`[BROADCAST STOP] Cancelled ${jobsToCancel.length} scheduled jobs`);
+                }
+            }
+        } catch (agendaErr) {
+            logger.warn('[BROADCAST STOP] Could not cancel agenda jobs:', agendaErr.message);
+            // Continue anyway - broadcast is already marked as stopped
+        }
+
+        // Update broadcast status to stopped
+        const stoppedBroadcast = await Broadcast.findByIdAndUpdate(
+            broadcastId,
+            {
+                status: 'stopped',
+                stoppedAt: new Date(),
+                stoppedBy: req.user._id,
+                'statistics.stoppedBatches': pendingBatches.length,
+            },
+            { new: true }
+        );
+
+        // Emit stop event via WebSocket for real-time UI update
+        const io = getIO();
+        if (io) {
+            io.emit('broadcast:stopped', {
+                broadcastId,
+                status: 'stopped',
+                message: 'Broadcast has been stopped',
+                stoppedAt: new Date(),
+                batchsCancelled: pendingBatches.length,
+            });
+        }
+
+        res.json({
+            success: true,
+            message: `Broadcast stopped successfully. ${pendingBatches.length} batches cancelled.`,
+            broadcast: {
+                _id: stoppedBroadcast._id,
+                name: stoppedBroadcast.name,
+                status: stoppedBroadcast.status,
+                stoppedAt: stoppedBroadcast.stoppedAt,
+                batchesCancelled: pendingBatches.length,
+            },
+        });
+    } catch (e) {
+        logger.error('[BROADCAST STOP] Error stopping broadcast:', e);
+        next(e);
+    }
+}
+
+module.exports = { list, create, get, getStats, getTodayStats, getStatusCounts, send, test, getMessages, getBatches, bulkDelete, getFailedMessages, retryFailed, getErrorAnalytics, stopBroadcast };
 
 
 

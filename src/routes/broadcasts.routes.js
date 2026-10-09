@@ -18,6 +18,7 @@ router.get('/:id/batches', broadcastsController.getBatches);
 router.post('/:id/send', requireAdmin, broadcastsController.send);
 router.post('/:id/test', requireAdmin, broadcastsController.test);
 router.post('/:id/retry-failed', requireAdmin, broadcastsController.retryFailed);
+router.post('/:id/stop', requireAdmin, broadcastsController.stopBroadcast);
 
 module.exports = router;
 
