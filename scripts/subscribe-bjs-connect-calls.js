@@ -4,7 +4,7 @@
  * What this script does:
  * - Verifies app-level webhook fields for whatsapp_business_account include `calls`.
  * - For each target WABA, checks /{WABA_ID}/subscribed_apps for the target app.
- * - If app is missing OR `calls` is not present in subscribed_fields, POSTs /{WABA_ID}/subscribed_apps.
+ * - If app is missing, POSTs /{WABA_ID}/subscribed_apps.
  * - Re-reads /{WABA_ID}/subscribed_apps and prints exact API response slices for verification.
  *
  * Safety guarantees:
@@ -121,10 +121,11 @@ function summarizeSubscribedAppsRows(rows) {
     console.log('before subscribed_apps:', JSON.stringify(beforeSummary));
 
     const appEntryBefore = beforeRows.find((a) => String(a?.whatsapp_business_api_data?.id || a?.id || '') === String(appId));
-    const needsSubscribe = !appEntryBefore || !normalizeFieldNames(appEntryBefore?.subscribed_fields || []).includes('calls');
+    const needsSubscribe = !appEntryBefore;
 
     if (!needsSubscribe) {
-      console.log('OK: app already subscribed with calls field. No POST needed.');
+      console.log('OK: app already present in WABA subscribed_apps. No POST needed.');
+      console.log('Note: subscribed_fields on WABA app entries may be empty and is not used for `calls` validation.');
     } else {
       console.log('Action: POST /subscribed_apps (idempotent subscribe/refresh).');
       try {
@@ -148,13 +149,11 @@ function summarizeSubscribedAppsRows(rows) {
     console.log('after subscribed_apps:', JSON.stringify(afterSummary));
 
     const appEntryAfter = afterRows.find((a) => String(a?.whatsapp_business_api_data?.id || a?.id || '') === String(appId));
-    const hasCallsAfter = normalizeFieldNames(appEntryAfter?.subscribed_fields || []).includes('calls');
     if (!appEntryAfter) {
       console.log('BLOCKER: app is still not subscribed to WABA after POST.');
-    } else if (!hasCallsAfter) {
-      console.log('BLOCKER: app subscribed but calls still absent in subscribed_fields after POST.');
     } else {
-      console.log('OK: WABA now shows app subscribed with calls field.');
+      console.log('OK: WABA now shows app subscribed (membership verified).');
+      console.log('Note: subscribed_fields remains informational at WABA level; `calls` must be validated at app-level subscriptions.');
     }
   }
 

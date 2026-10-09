@@ -3,7 +3,7 @@
  *
  * Checks:
  * 1) App-level webhook subscription fields on whatsapp_business_account object (must include `calls`).
- * 2) WABA-level app subscription via /{wabaId}/subscribed_apps.
+ * 2) WABA-level app subscription via /{wabaId}/subscribed_apps (membership only).
  * 3) Per phone number calling blockers: coexistence mode, low tier, calling settings.
  *
  * Usage:
@@ -42,14 +42,6 @@ function hasCallsFieldOnAppSubscriptions(subscriptionsData) {
     .filter(Boolean)
     .map((s) => String(s));
   return { hasCalls: names.includes('calls'), fields: rawFields, names };
-}
-
-function normalizeSubscribedFieldNames(fields) {
-  if (!Array.isArray(fields)) return [];
-  return fields
-    .map((f) => (typeof f === 'string' ? f : f?.name))
-    .filter(Boolean)
-    .map((s) => String(s));
 }
 
 (async () => {
@@ -121,14 +113,12 @@ function normalizeSubscribedFieldNames(fields) {
       if (!appEntry) {
         console.log('BLOCKER: this app is not subscribed to the WABA.');
       } else {
-        const fields = appEntry?.subscribed_fields || [];
-        const names = normalizeSubscribedFieldNames(fields);
-        console.log('normalized subscribed_fields:', JSON.stringify(names));
-        if (!names.includes('calls')) {
-          console.log('BLOCKER: app is subscribed to WABA but `calls` is missing from subscribed_fields.');
-        } else {
-          console.log('OK: WABA subscription includes calls field.');
-        }
+        // For WABA /subscribed_apps, app presence is the signal. Webhook fields (including `calls`)
+        // are configured at app-level /{app-id}/subscriptions.
+        const rawSubFields = appEntry?.subscribed_fields || [];
+        console.log('WABA app entry found for app_id:', String(appEntry?.whatsapp_business_api_data?.id || appEntry?.id || 'unknown'));
+        console.log('WABA app entry subscribed_fields (informational):', JSON.stringify(rawSubFields));
+        console.log('OK: app is subscribed to WABA (membership verified).');
       }
     }
 
