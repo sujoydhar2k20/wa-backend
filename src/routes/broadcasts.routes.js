@@ -13,6 +13,7 @@ router.get('/:id', broadcastsController.get);
 router.get('/:id/stats', broadcastsController.getStats);
 router.get('/:id/messages', broadcastsController.getMessages);
 router.get('/:id/failed-messages', broadcastsController.getFailedMessages);
+router.get('/:id/error-analytics', broadcastsController.getErrorAnalytics);
 router.get('/:id/batches', broadcastsController.getBatches);
 router.post('/:id/send', requireAdmin, broadcastsController.send);
 router.post('/:id/test', requireAdmin, broadcastsController.test);

@@ -288,20 +288,42 @@ async function processBroadcastBatch(batchId) {
   }
 
   // ========================================
-  // OPTIMIZATION 2 & 3: PARALLEL API CALLS + BULK CREATES
+  // OPTIMIZATION 2 & 3: PARALLEL API CALLS + BULK CREATES + ADAPTIVE BATCHING
   // ========================================
-  const BATCH_SIZE = 10; // Process 10 messages in parallel
+  // ⭐ ADAPTIVE BATCH SIZE: Reduce during throttling
+  let BATCH_SIZE = 10;
+  let BATCH_DELAY_MS = 1000; // Default 1 second delay
+
+  // Check if this broadcast is a retry with throttling history
+  if (broadcast.metadata?.retryOf && broadcast.metadata?.throttledCount > 0) {
+    BATCH_SIZE = 5; // Reduce to 5 for retries after throttling
+    BATCH_DELAY_MS = 3000; // Increase to 3 seconds
+    logger.warn(`[BROADCAST] Throttling detected in retry (${broadcast.metadata.throttledCount} throttled messages). Reducing BATCH_SIZE to ${BATCH_SIZE} with ${BATCH_DELAY_MS}ms delay between batches`);
+  }
+
+  // Check for custom batch size from request options
+  if (broadcast.customBatchSize) {
+    BATCH_SIZE = Math.min(Math.max(broadcast.customBatchSize, 1), 10); // Clamp between 1-10
+    logger.info(`[BROADCAST] Custom BATCH_SIZE applied: ${BATCH_SIZE}`);
+  }
+
   const broadcastMessages = [];
   const failedMessages = [];
   let sentCount = 0;
   let failedCount = 0;
 
-  logger.info(`[OPTIMIZATION] Starting parallel message sending with batch size ${BATCH_SIZE}...`);
+  logger.info(`[OPTIMIZATION] Starting parallel message sending with batch size ${BATCH_SIZE} (delay: ${BATCH_DELAY_MS}ms)...`);
 
   for (let i = 0; i < phonesToSend.length; i += BATCH_SIZE) {
     const batch = phonesToSend.slice(i, i + BATCH_SIZE);
     
-    // Process this batch of 10 in parallel
+    // ⭐ NEW: Add delay between batches if throttling detected and not first batch
+    if (i > 0 && BATCH_DELAY_MS > 1000) {
+      logger.info(`[OPTIMIZATION] Waiting ${BATCH_DELAY_MS}ms before batch ${Math.ceil(i / BATCH_SIZE) + 1}...`);
+      await new Promise(resolve => setTimeout(resolve, BATCH_DELAY_MS));
+    }
+    
+    // Process this batch in parallel
     const batchResults = await Promise.all(
       batch.map(async (phoneNumber) => {
         let contactId = null;
@@ -388,7 +410,7 @@ async function processBroadcastBatch(batchId) {
       }
     }
 
-    logger.info(`[OPTIMIZATION] Progress: ${i + batch.length}/${phonesToSend.length} messages processed`);
+    logger.info(`[OPTIMIZATION] Progress: ${i + batch.length}/${phonesToSend.length} messages processed (batch size: ${BATCH_SIZE}, sent: ${sentCount}, failed: ${failedCount})`);
   }
 
   // ========================================

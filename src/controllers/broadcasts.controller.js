@@ -127,6 +127,9 @@ async function send(req, res, next) {
         // 4. Calculate batches
         const { batches, totalBatches } = broadcastService.calculateBatches(phoneNumbers.length, messagingLimit, sentToday);
 
+        // ⭐ NEW: Extract custom batch size from request (optional)
+        const customBatchSize = req.body.batchSize ? Math.min(Math.max(parseInt(req.body.batchSize), 1), 10) : null;
+
         // 5. Save broadcast metadata
         await Broadcast.findByIdAndUpdate(broadcast._id, {
             status: 'sending',
@@ -138,6 +141,7 @@ async function send(req, res, next) {
             components: req.body.components || [],
             variableMapping: req.body.variableMapping || [],
             nextBatchAt: totalBatches > 1 ? batches[1]?.scheduledAt : null,
+            customBatchSize, // ⭐ NEW: Store custom batch size for adaptive batching
         });
 
         // 6. Create BroadcastBatch documents and schedule jobs
@@ -376,7 +380,42 @@ async function getFailedMessages(req, res, next) {
             BroadcastMessage.countDocuments({ broadcastId, status: 'failed' }),
         ]);
 
-        res.json({ data: failedMessages, total, page: parseInt(page, 10), limit: parseInt(limit, 10) });
+        // ⭐ NEW: Classify errors and generate summary
+        const errorClassifier = require('../services/whatsapp-error-classifier.service');
+        
+        // Group by classification to understand the issue breakdown
+        const grouped = errorClassifier.groupByClassification(failedMessages);
+        const summary = errorClassifier.generateErrorSummary(failedMessages);
+        
+        // Add detailed error info to each message
+        const enrichedMessages = failedMessages.map(msg => ({
+            ...msg.toObject(),
+            classification: msg.errorClassification || errorClassifier.classifyError(msg.errorCode).classification,
+            recommendation: msg.errorRecommendation || errorClassifier.classifyError(msg.errorCode, msg.errorMessage).recommendation,
+            isRetryable: errorClassifier.isRetryable(msg.errorCode),
+            autoRetryable: errorClassifier.isAutoRetryable(msg.errorCode),
+            details: errorClassifier.classifyError(msg.errorCode, msg.errorMessage),
+        }));
+
+        res.json({ 
+            data: enrichedMessages, 
+            total, 
+            page: parseInt(page, 10), 
+            limit: parseInt(limit, 10),
+            // ⭐ NEW: Include summary for dashboard display
+            summary: {
+                total: summary.total,
+                byClassification: summary.byClassification,
+                byErrorCode: summary.byErrorCode,
+                recommendations: summary.recommendations,
+            },
+            groupedByClassification: {
+                retryableTransient: grouped.RETRYABLE_TRANSIENT.length,
+                retryableThrottled: grouped.RETRYABLE_THROTTLED.length,
+                nonRetryable: grouped.NON_RETRYABLE.length,
+                investigate: grouped.INVESTIGATE.length,
+            },
+        });
     } catch (e) {
         next(e);
     }
@@ -392,21 +431,69 @@ async function retryFailed(req, res, next) {
             return res.status(404).json({ success: false, message: 'Broadcast not found' });
         }
 
+        // ⭐ NEW: Get error classification service
+        const errorClassifier = require('../services/whatsapp-error-classifier.service');
+
         // Get failed messages (either all or selected ones)
         let failedQuery = { broadcastId, status: 'failed' };
         if (selectedPhoneNumbers && selectedPhoneNumbers.length > 0) {
             failedQuery.phoneNumber = { $in: selectedPhoneNumbers };
         }
 
-        const failedMessages = await BroadcastMessage.find(failedQuery).select('phoneNumber contactId');
+        const failedMessages = await BroadcastMessage.find(failedQuery).select('phoneNumber contactId errorCode errorClassification retryAttempts maxRetryAttempts');
 
         if (failedMessages.length === 0) {
             return res.status(400).json({ success: false, message: 'No failed messages found to retry' });
         }
 
-        const failedPhoneNumbers = failedMessages.map(m => m.phoneNumber);
+        // ⭐ NEW: Filter messages based on error classification
+        // Only retry messages that are actually retryable
+        const retryableMessages = [];
+        const nonRetryableMessages = [];
+        const throttledMessages = [];
 
-        // Create a new broadcast campaign for the retry
+        for (const msg of failedMessages) {
+            const classification = msg.errorClassification || errorClassifier.classifyError(msg.errorCode).classification;
+            
+            // Check if message can still be retried
+            if (msg.retryAttempts >= msg.maxRetryAttempts && msg.maxRetryAttempts > 0) {
+                nonRetryableMessages.push({ phone: msg.phoneNumber, reason: `Retry limit reached (${msg.retryAttempts}/${msg.maxRetryAttempts})` });
+                continue;
+            }
+
+            if (classification === 'RETRYABLE_TRANSIENT') {
+                retryableMessages.push(msg);
+            } else if (classification === 'RETRYABLE_THROTTLED') {
+                throttledMessages.push(msg);
+            } else {
+                nonRetryableMessages.push({ phone: msg.phoneNumber, reason: `Error ${msg.errorCode} is ${classification}` });
+            }
+        }
+
+        if (retryableMessages.length === 0 && throttledMessages.length === 0) {
+            return res.status(400).json({ 
+                success: false, 
+                message: 'No retryable messages found',
+                details: {
+                    total: failedMessages.length,
+                    nonRetryable: nonRetryableMessages.length,
+                    throttled: throttledMessages.length,
+                    nonRetryableReasons: nonRetryableMessages.slice(0, 5), // Show first 5
+                    recommendation: throttledMessages.length > 0 
+                        ? '⚠️ Some messages are throttled. Reduce sending rate and try again later.'
+                        : 'No messages are eligible for retry. Review error classifications.',
+                }
+            });
+        }
+
+        // ⭐ NEW: Check for throttling and warn
+        if (throttledMessages.length > 0) {
+            logger.warn(`[RETRY] ${throttledMessages.length} messages have RETRYABLE_THROTTLED errors. This may indicate rate limiting or account quality issues.`);
+        }
+
+        const failedPhoneNumbers = retryableMessages.map(m => m.phoneNumber);
+
+        // Create a new broadcast campaign for the retry (only retryable messages)
         const retryBroadcast = new Broadcast({
             name: `${originalBroadcast.name} - Retry #${new Date().getTime()}`,
             wabaId: originalBroadcast.wabaId,
@@ -420,25 +507,28 @@ async function retryFailed(req, res, next) {
                 retryOf: broadcastId,
                 originalBroadcastName: originalBroadcast.name,
                 retryCount: 1,
+                retryableCount: retryableMessages.length,
+                throttledCount: throttledMessages.length,
+                nonRetryableCount: nonRetryableMessages.length,
             },
         });
 
         await retryBroadcast.save();
 
-        // Create a broadcast list for the retry recipients
-        const broadcastListName = `${originalBroadcast.name} - Failed Recipients (${new Date().toLocaleString()})`;
+        // Create a broadcast list for the retry recipients (only retryable)
+        const broadcastListName = `${originalBroadcast.name} - Retryable Recipients (${new Date().toLocaleString()})`;
         const retryList = new BroadcastList({
             name: broadcastListName,
             wabaId: originalBroadcast.wabaId,
-            description: `Failed recipients from broadcast: ${originalBroadcast.name}`,
+            description: `Retryable failed recipients from broadcast: ${originalBroadcast.name}`,
             source: 'manual',
             memberCount: failedPhoneNumbers.length,
         });
 
         await retryList.save();
 
-        // Add failed phone numbers as members to the retry list
-        const listMembers = failedMessages.map(msg => ({
+        // Add retryable phone numbers as members to the retry list
+        const listMembers = retryableMessages.map(msg => ({
             broadcastListId: retryList._id,
             contactId: msg.contactId || undefined,
             phoneNumber: msg.phoneNumber,
@@ -452,20 +542,119 @@ async function retryFailed(req, res, next) {
 
         res.json({
             success: true,
-            message: `Retry campaign created for ${failedPhoneNumbers.length} failed recipients`,
+            message: `Retry campaign created for ${failedPhoneNumbers.length} retryable recipients`,
             retryBroadcast: {
                 _id: retryBroadcast._id,
                 name: retryBroadcast.name,
                 failedCount: failedPhoneNumbers.length,
                 listId: retryList._id,
-            }
+            },
+            // ⭐ NEW: Return detailed breakdown
+            breakdown: {
+                retryableTransient: retryableMessages.length,
+                retryableThrottled: throttledMessages.length,
+                nonRetryable: nonRetryableMessages.length,
+                throttledWarning: throttledMessages.length > 0 
+                    ? `⚠️ WARNING: ${throttledMessages.length} messages failed due to throttling. Consider reducing sending rate.`
+                    : null,
+                recommendations: {
+                    general: 'After retry completes, review remaining failures for further action',
+                    throttled: throttledMessages.length > 0 
+                        ? 'Reduce BATCH_SIZE or increase delays between batches in broadcast.service.js'
+                        : null,
+                }
+            },
         });
     } catch (e) {
         next(e);
     }
 }
 
-module.exports = { list, create, get, getStats, getTodayStats, getStatusCounts, send, test, getMessages, getBatches, bulkDelete, getFailedMessages, retryFailed };
+/**
+ * ⭐ NEW ENDPOINT: Get detailed error analytics for a broadcast
+ * Returns breakdown by error code, classification, and recommendations
+ */
+async function getErrorAnalytics(req, res, next) {
+    try {
+        const broadcastId = req.params.id;
+        
+        const errorClassifier = require('../services/whatsapp-error-classifier.service');
+        
+        // Get all failed messages for this broadcast
+        const failedMessages = await BroadcastMessage.find({ broadcastId, status: 'failed' }).select('errorCode errorMessage errorClassification');
+        
+        if (failedMessages.length === 0) {
+            return res.json({ 
+                success: true,
+                total: 0,
+                message: 'No failed messages found',
+                summary: null,
+            });
+        }
+        
+        // Generate comprehensive error analytics
+        const summary = errorClassifier.generateErrorSummary(failedMessages);
+        const grouped = errorClassifier.groupByClassification(failedMessages);
+        
+        // Get specific recommendations per error code
+        const errorCodeBreakdown = {};
+        for (const [errorCode, count] of Object.entries(summary.byErrorCode)) {
+            const classification = errorClassifier.classifyError(parseInt(errorCode));
+            errorCodeBreakdown[errorCode] = {
+                count,
+                classification: classification.classification,
+                title: classification.title,
+                category: classification.category,
+                description: classification.description,
+                recommendation: classification.recommendation,
+                action: classification.action,
+                severity: classification.severity,
+                preventiveMeasure: classification.preventiveMeasure,
+            };
+        }
+        
+        res.json({
+            success: true,
+            broadcastId,
+            totalFailed: failedMessages.length,
+            summary: {
+                byClassification: summary.byClassification,
+                recommendations: summary.recommendations,
+            },
+            errorCodeBreakdown,
+            actionItems: [
+                summary.byClassification.retryableTransient > 0 ? {
+                    priority: 'HIGH',
+                    action: 'Retry transient failures',
+                    count: summary.byClassification.retryableTransient,
+                    command: 'Use retry button to send again',
+                } : null,
+                summary.byClassification.retryableThrottled > 0 ? {
+                    priority: 'CRITICAL',
+                    action: 'Address throttling issues',
+                    count: summary.byClassification.retryableThrottled,
+                    command: 'Reduce sending rate, check phone quality in WhatsApp Manager',
+                } : null,
+                summary.byClassification.nonRetryable > 0 ? {
+                    priority: 'MEDIUM',
+                    action: 'Clean up invalid recipients',
+                    count: summary.byClassification.nonRetryable,
+                    command: 'Validate phone numbers and remove invalid ones',
+                } : null,
+                summary.byClassification.investigate > 0 ? {
+                    priority: 'MEDIUM',
+                    action: 'Investigate configuration issues',
+                    count: summary.byClassification.investigate,
+                    command: 'Check template, variables, and API configuration',
+                } : null,
+            ].filter(Boolean),
+        });
+    } catch (e) {
+        next(e);
+    }
+}
+
+module.exports = { list, create, get, getStats, getTodayStats, getStatusCounts, send, test, getMessages, getBatches, bulkDelete, getFailedMessages, retryFailed, getErrorAnalytics };
 
 
 
