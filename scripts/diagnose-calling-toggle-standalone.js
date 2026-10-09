@@ -1,5 +1,14 @@
 /**
- * Standalone calling-toggle blocker diagnostic.
+ * Standalone calling eligibility diagnostic (READ-ONLY).
+ *
+ * This script performs 4 read-only GET operations to diagnose calling prerequisites.
+ * NO SETTINGS ARE MODIFIED. All checks are informational only.
+ *
+ * Checks performed:
+ *   1. Phone Number Settings - calling object and restrictions
+ *   2. Access Token Validity - app_id, is_valid, scopes, expiry
+ *   3. WABA Messaging Tier/Limit - check minimum 2000 requirement
+ *   4. Phone Number Status - is_on_biz_app, messaging_limit_tier, platform_type
  *
  * Does NOT require MongoDB. Uses access tokens from environment or CLI arguments.
  *
@@ -48,22 +57,6 @@ async function getWithToken(path, token, params = {}) {
   }
 }
 
-async function postWithToken(path, token, body = {}) {
-  try {
-    const r = await axios.post(`${BASE}${path}`, body, {
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      timeout: 20000,
-    });
-    return { ok: true, data: r.data };
-  } catch (e) {
-    return {
-      ok: false,
-      status: e.response?.status,
-      error: e.response?.data || { message: e.message },
-    };
-  }
-}
-
 function sanitizeTokenForDisplay(token) {
   if (!token || token.length < 20) return 'REDACTED';
   return `${token.substring(0, 10)}...${token.substring(token.length - 4)}`;
@@ -84,7 +77,8 @@ function sanitizeResponse(obj, tokenFieldNames = ['access_token', 'sip_user_pass
 
 (async () => {
   console.log(`\n${'='.repeat(80)}`);
-  console.log('STANDALONE CALLING-TOGGLE BLOCKER DIAGNOSTIC');
+  console.log('CALLING ELIGIBILITY DIAGNOSTIC (READ-ONLY)');
+  console.log('No settings will be modified. All checks are informational only.');
   console.log(`API Version: ${API_VERSION}`);
   console.log(`Base URL: ${BASE}`);
   console.log(`${'='.repeat(80)}\n`);
@@ -212,48 +206,12 @@ function sanitizeResponse(obj, tokenFieldNames = ['access_token', 'sip_user_pass
       console.log(JSON.stringify(sanitizeResponse(numDetail.error), null, 2));
     }
 
-    // 5) Calling-Settings Toggle Attempt
-    console.log('\n--- 5. Calling-Settings Toggle Attempt (READ-ONLY TEST)');
-    console.log('Request: POST /{PHONE_NUMBER_ID}/settings');
-    const toggleBody = {
-      calling: {
-        status: 'ENABLED',
-      },
-    };
-    console.log('Body:', JSON.stringify(toggleBody, null, 2));
-
-    const toggleRes = await postWithToken(`/${config.phoneNumberId}/settings`, token, toggleBody);
-    if (toggleRes.ok) {
-      console.log('\nStatus: ✓ SUCCESS (HTTP 200)');
-      console.log('Response:');
-      console.log(JSON.stringify(sanitizeResponse(toggleRes.data), null, 2));
-      console.log('\n✓ Calling toggle succeeded. No blocker found.');
-    } else {
-      console.log(`\nStatus: ✗ FAILED (HTTP ${toggleRes.status})`);
-      console.log('Exact Graph API error response:');
-      console.log(JSON.stringify(sanitizeResponse(toggleRes.error), null, 2));
-
-      const err = toggleRes.error?.error || {};
-      console.log('\nParsed error details:');
-      console.log(JSON.stringify({
-        code: err.code,
-        subcode: err.subcode,
-        message: err.message,
-        type: err.type,
-        fbtrace_id: err.fbtrace_id,
-        error_data: err.error_data,
-      }, null, 2));
-
-      if (err.code === 2593151 || err.code === '2593151') {
-        console.log('\n❌ ERROR 2593151 CONFIRMED - Calling cannot be enabled due to technical prerequisites.');
-      }
-    }
-
     console.log('\n');
   }
 
   console.log('='.repeat(80));
   console.log('Diagnostic complete.');
+  console.log('SUMMARY: No settings were modified. This diagnostic only read configuration data.');
   console.log('='.repeat(80) + '\n');
 })().catch((e) => {
   console.error('Fatal error:', e.message);
