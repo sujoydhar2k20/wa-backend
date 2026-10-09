@@ -18,6 +18,7 @@ const config = require('../src/config');
 
 const API_VERSION = config.meta.apiVersion || 'v25.0';
 const BASE = `https://graph.facebook.com/${API_VERSION}`;
+const DEFAULT_WABA_IDS = ['1598866321335111', '1002721328785441'];
 
 async function getWithToken(path, token, params = {}) {
   try {
@@ -35,8 +36,20 @@ async function getWithToken(path, token, params = {}) {
 function hasCallsFieldOnAppSubscriptions(subscriptionsData) {
   const list = Array.isArray(subscriptionsData?.data) ? subscriptionsData.data : [];
   const wabaObj = list.find((s) => s.object === 'whatsapp_business_account');
-  const fields = wabaObj?.fields || [];
-  return { hasCalls: fields.includes('calls'), fields };
+  const rawFields = wabaObj?.fields || [];
+  const names = rawFields
+    .map((f) => (typeof f === 'string' ? f : f?.name))
+    .filter(Boolean)
+    .map((s) => String(s));
+  return { hasCalls: names.includes('calls'), fields: rawFields, names };
+}
+
+function normalizeSubscribedFieldNames(fields) {
+  if (!Array.isArray(fields)) return [];
+  return fields
+    .map((f) => (typeof f === 'string' ? f : f?.name))
+    .filter(Boolean)
+    .map((s) => String(s));
 }
 
 (async () => {
@@ -54,8 +67,9 @@ function hasCallsFieldOnAppSubscriptions(subscriptionsData) {
     if (!appSubs.ok) {
       console.log('BLOCKER: cannot read app subscriptions:', JSON.stringify(appSubs.error));
     } else {
-      const { hasCalls, fields } = hasCallsFieldOnAppSubscriptions(appSubs.data);
+      const { hasCalls, fields, names } = hasCallsFieldOnAppSubscriptions(appSubs.data);
       console.log('whatsapp_business_account subscribed fields:', JSON.stringify(fields));
+      console.log('normalized field names:', JSON.stringify(names));
       if (!hasCalls) {
         console.log('BLOCKER: app webhook fields do NOT include `calls`.');
       } else {
@@ -64,7 +78,16 @@ function hasCallsFieldOnAppSubscriptions(subscriptionsData) {
     }
   }
 
-  const wabas = await Waba.find({ isActive: { $ne: false } });
+  const argIds = process.argv.slice(2).filter(Boolean);
+  const targetIds = argIds.length ? argIds : DEFAULT_WABA_IDS;
+
+  let wabas = [];
+  if (targetIds.length) {
+    wabas = await Waba.find({ wabaId: { $in: targetIds } });
+  }
+  if (!wabas.length) {
+    wabas = await Waba.find({ isActive: { $ne: false } });
+  }
   if (!wabas.length) {
     console.log('\nNo active WABAs found in DB.');
     await mongoose.disconnect();
@@ -99,7 +122,9 @@ function hasCallsFieldOnAppSubscriptions(subscriptionsData) {
         console.log('BLOCKER: this app is not subscribed to the WABA.');
       } else {
         const fields = appEntry?.subscribed_fields || [];
-        if (!fields.includes('calls')) {
+        const names = normalizeSubscribedFieldNames(fields);
+        console.log('normalized subscribed_fields:', JSON.stringify(names));
+        if (!names.includes('calls')) {
           console.log('BLOCKER: app is subscribed to WABA but `calls` is missing from subscribed_fields.');
         } else {
           console.log('OK: WABA subscription includes calls field.');
