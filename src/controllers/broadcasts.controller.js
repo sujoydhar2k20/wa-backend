@@ -2,6 +2,7 @@ const { Broadcast, BroadcastList, BroadcastListMember, BroadcastMessage, Broadca
 const whatsappService = require('../services/whatsapp.service');
 const broadcastService = require('../services/broadcast.service');
 const { getIO } = require('../websocket/socket.server');
+const { logger } = require('../utils/logger');
 
 async function list(req, res, next) {
     try {
@@ -453,20 +454,35 @@ async function retryFailed(req, res, next) {
         const throttledMessages = [];
 
         for (const msg of failedMessages) {
-            const classification = msg.errorClassification || errorClassifier.classifyError(msg.errorCode).classification;
-            
-            // Check if message can still be retried
-            if (msg.retryAttempts >= msg.maxRetryAttempts && msg.maxRetryAttempts > 0) {
-                nonRetryableMessages.push({ phone: msg.phoneNumber, reason: `Retry limit reached (${msg.retryAttempts}/${msg.maxRetryAttempts})` });
-                continue;
-            }
+            try {
+                let classification = msg.errorClassification;
+                
+                // If no classification stored, try to classify from error code
+                if (!classification && msg.errorCode) {
+                    const classifyResult = errorClassifier.classifyError(msg.errorCode);
+                    classification = classifyResult?.classification || 'INVESTIGATE';
+                } else if (!classification) {
+                    // Fallback to INVESTIGATE if no error code
+                    classification = 'INVESTIGATE';
+                }
+                
+                // Check if message can still be retried
+                if (msg.retryAttempts >= msg.maxRetryAttempts && msg.maxRetryAttempts > 0) {
+                    nonRetryableMessages.push({ phone: msg.phoneNumber, reason: `Retry limit reached (${msg.retryAttempts}/${msg.maxRetryAttempts})` });
+                    continue;
+                }
 
-            if (classification === 'RETRYABLE_TRANSIENT') {
-                retryableMessages.push(msg);
-            } else if (classification === 'RETRYABLE_THROTTLED') {
-                throttledMessages.push(msg);
-            } else {
-                nonRetryableMessages.push({ phone: msg.phoneNumber, reason: `Error ${msg.errorCode} is ${classification}` });
+                if (classification === 'RETRYABLE_TRANSIENT') {
+                    retryableMessages.push(msg);
+                } else if (classification === 'RETRYABLE_THROTTLED') {
+                    throttledMessages.push(msg);
+                } else {
+                    nonRetryableMessages.push({ phone: msg.phoneNumber, reason: `Error ${msg.errorCode} is ${classification}` });
+                }
+            } catch (classifyErr) {
+                logger.error(`[RETRY] Error classifying message ${msg._id}:`, classifyErr.message);
+                // Default to non-retryable if classification fails
+                nonRetryableMessages.push({ phone: msg.phoneNumber, reason: 'Classification error' });
             }
         }
 
@@ -599,18 +615,33 @@ async function getErrorAnalytics(req, res, next) {
         // Get specific recommendations per error code
         const errorCodeBreakdown = {};
         for (const [errorCode, count] of Object.entries(summary.byErrorCode)) {
-            const classification = errorClassifier.classifyError(parseInt(errorCode));
-            errorCodeBreakdown[errorCode] = {
-                count,
-                classification: classification.classification,
-                title: classification.title,
-                category: classification.category,
-                description: classification.description,
-                recommendation: classification.recommendation,
-                action: classification.action,
-                severity: classification.severity,
-                preventiveMeasure: classification.preventiveMeasure,
-            };
+            try {
+                const classification = errorClassifier.classifyError(parseInt(errorCode));
+                errorCodeBreakdown[errorCode] = {
+                    count,
+                    classification: classification?.classification || 'INVESTIGATE',
+                    title: classification?.title || 'Unknown Error',
+                    category: classification?.category || 'Unknown',
+                    description: classification?.description || 'Error code not recognized',
+                    recommendation: classification?.recommendation || 'Contact support',
+                    action: classification?.action || 'MANUAL_REVIEW',
+                    severity: classification?.severity || 'high',
+                    preventiveMeasure: classification?.preventiveMeasure || 'Review error details',
+                };
+            } catch (classifyErr) {
+                logger.warn(`[ERROR ANALYTICS] Could not classify error code ${errorCode}:`, classifyErr.message);
+                errorCodeBreakdown[errorCode] = {
+                    count,
+                    classification: 'INVESTIGATE',
+                    title: 'Unknown Error',
+                    category: 'Unknown',
+                    description: 'Error code not recognized',
+                    recommendation: 'Contact support',
+                    action: 'MANUAL_REVIEW',
+                    severity: 'high',
+                    preventiveMeasure: 'Review error details',
+                };
+            }
         }
         
         res.json({
