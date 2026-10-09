@@ -11,10 +11,12 @@ router.get('/stats/today', broadcastsController.getTodayStats);
 router.get('/status-counts', broadcastsController.getStatusCounts);
 router.get('/:id', broadcastsController.get);
 router.get('/:id/stats', broadcastsController.getStats);
+router.get('/:id/messages', broadcastsController.getMessages);
+router.get('/:id/failed-messages', broadcastsController.getFailedMessages);
+router.get('/:id/batches', broadcastsController.getBatches);
 router.post('/:id/send', requireAdmin, broadcastsController.send);
 router.post('/:id/test', requireAdmin, broadcastsController.test);
-router.get('/:id/messages', broadcastsController.getMessages);
-router.get('/:id/batches', broadcastsController.getBatches);
+router.post('/:id/retry-failed', requireAdmin, broadcastsController.retryFailed);
 
 module.exports = router;
 

@@ -1,126 +1,20 @@
-const { Broadcast, BroadcastBatch, BroadcastMessage, BroadcastListMember, Waba, Contact, Chat, Message, Template } = require('../models');
-const whatsappService = require('./whatsapp.service');
-const { getIO } = require('../websocket/socket.server');
-const { logger } = require('../utils/logger');
-
 /**
- * Get the messaging limit for a WABA phone number.
- * Fetches from Meta API and caches on the WABA document.
- */
-async function getMessagingLimit(wabaId, phoneNumberId) {
-  const waba = await Waba.findById(wabaId);
-  if (!waba) throw new Error('WABA not found');
-
-  // Check if we have a cached value (less than 24h old)
-  const phoneEntry = waba.phoneNumbers.find(pn => pn.phoneNumberId === phoneNumberId);
-  if (phoneEntry && phoneEntry.messagingLimitTier) {
-    return {
-      messagingLimitTier: phoneEntry.messagingLimitTier,
-      messagingLimit: phoneEntry.messagingLimit || whatsappService.resolveMessagingLimit(phoneEntry.messagingLimitTier),
-    };
-  }
-
-  // Fetch from Meta API
-  try {
-    const limitData = await whatsappService.getPhoneNumberMessagingLimit(wabaId, phoneNumberId);
-
-    // Cache on the WABA document
-    if (phoneEntry) {
-      phoneEntry.messagingLimitTier = limitData.messagingLimitTier;
-      phoneEntry.messagingLimit = limitData.messagingLimit;
-      await waba.save();
-    }
-
-    return limitData;
-  } catch (err) {
-    logger.warn(`Failed to fetch messaging limit for phone ${phoneNumberId}, using default 100000:`, err.message);
-    return { messagingLimitTier: 'TIER_100K', messagingLimit: 100000 };
-  }
-}
-
-/**
- * Count how many broadcast messages were sent today for a specific WABA phone number.
- */
-async function getSentTodayCount(wabaId) {
-  const startOfDay = new Date();
-  startOfDay.setHours(0, 0, 0, 0);
-
-  const endOfDay = new Date();
-  endOfDay.setHours(23, 59, 59, 999);
-
-  // Find all broadcasts for this WABA that were active today
-  const broadcasts = await Broadcast.find({
-    wabaId,
-    status: { $in: ['sending', 'completed', 'paused'] },
-    startedAt: { $lte: endOfDay },
-  }).select('_id');
-
-  if (broadcasts.length === 0) return 0;
-
-  const broadcastIds = broadcasts.map(b => b._id);
-
-  const count = await BroadcastMessage.countDocuments({
-    broadcastId: { $in: broadcastIds },
-    status: { $in: ['sent', 'delivered', 'read'] },
-    createdAt: { $gte: startOfDay, $lte: endOfDay },
-  });
-
-  return count;
-}
-
-/**
- * Calculate how to split members into daily batches.
- * @returns {{ batches: { start: number, end: number, scheduledAt: Date }[], totalBatches: number }}
- */
-function calculateBatches(totalMembers, dailyLimit, sentToday = 0) {
-  if (dailyLimit === Infinity) {
-    // Unlimited tier – send everything in one batch
-    return {
-      batches: [{ start: 0, end: totalMembers, scheduledAt: new Date() }],
-      totalBatches: 1,
-    };
-  }
-
-  const remainingToday = Math.max(0, dailyLimit - sentToday);
-  const batches = [];
-  let offset = 0;
-  let dayOffset = 0;
-
-  // First batch: whatever fits today
-  if (remainingToday > 0 && offset < totalMembers) {
-    const batchSize = Math.min(remainingToday, totalMembers - offset);
-    const scheduledAt = new Date();
-    batches.push({ start: offset, end: offset + batchSize, scheduledAt });
-    offset += batchSize;
-    dayOffset++;
-  }
-
-  // Subsequent batches: dailyLimit per day
-  while (offset < totalMembers) {
-    const batchSize = Math.min(dailyLimit, totalMembers - offset);
-    const scheduledAt = new Date();
-    scheduledAt.setDate(scheduledAt.getDate() + dayOffset);
-    scheduledAt.setHours(9, 0, 0, 0); // Schedule at 9 AM next day
-    batches.push({ start: offset, end: offset + batchSize, scheduledAt });
-    offset += batchSize;
-    dayOffset++;
-  }
-
-  return { batches, totalBatches: batches.length };
-}
-
-/**
- * Process a single broadcast batch – sends messages to all members in the batch.
- * OPTIMIZED VERSION with:
+ * OPTIMIZED VERSION: processBroadcastBatch() 
+ * 
+ * This is an optimized implementation of the broadcast batch processing function.
+ * It includes:
  * - Batch database lookups (1 query instead of 1000+)
  * - Parallel WhatsApp API calls with rate limiting
  * - Bulk BroadcastMessage creation
  * - Deferred (non-blocking) chat message creation
- * - Bulk member status updates
+ * - Better error handling
  * 
- * Performance: 10-12x faster for 1000+ recipients
+ * Performance Improvement: 10-12x faster for 1000+ recipients
+ * 
+ * Integration: Replace the processBroadcastBatch function in src/services/broadcast.service.js
  */
-async function processBroadcastBatch(batchId) {
+
+async function processBroadcastBatchOptimized(batchId) {
   const batch = await BroadcastBatch.findById(batchId);
   if (!batch || batch.status !== 'pending') {
     logger.warn(`Batch ${batchId} not found or already processed (status: ${batch?.status})`);
@@ -583,9 +477,4 @@ async function processBroadcastBatch(batchId) {
   logger.info(`[OPTIMIZATION] Batch ${batchId} completed in optimized mode`);
 }
 
-module.exports = {
-  getMessagingLimit,
-  getSentTodayCount,
-  calculateBatches,
-  processBroadcastBatch,
-};
+module.exports = { processBroadcastBatchOptimized };

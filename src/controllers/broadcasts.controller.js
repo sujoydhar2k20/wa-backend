@@ -361,7 +361,111 @@ async function bulkDelete(req, res, next) {
     }
 }
 
-module.exports = { list, create, get, getStats, getTodayStats, getStatusCounts, send, test, getMessages, getBatches, bulkDelete };
+async function getFailedMessages(req, res, next) {
+    try {
+        const { page = 1, limit = 50 } = req.query;
+        const skip = (parseInt(page, 10) - 1) * parseInt(limit, 10);
+        const broadcastId = req.params.id;
+
+        const [failedMessages, total] = await Promise.all([
+            BroadcastMessage.find({ broadcastId, status: 'failed' })
+                .sort({ createdAt: -1 })
+                .skip(skip)
+                .limit(parseInt(limit, 10))
+                .populate('contactId', 'name nameOnWhatsApp profilePicture'),
+            BroadcastMessage.countDocuments({ broadcastId, status: 'failed' }),
+        ]);
+
+        res.json({ data: failedMessages, total, page: parseInt(page, 10), limit: parseInt(limit, 10) });
+    } catch (e) {
+        next(e);
+    }
+}
+
+async function retryFailed(req, res, next) {
+    try {
+        const { selectedPhoneNumbers = [] } = req.body;
+        const broadcastId = req.params.id;
+
+        const originalBroadcast = await Broadcast.findById(broadcastId).populate('templateId');
+        if (!originalBroadcast) {
+            return res.status(404).json({ success: false, message: 'Broadcast not found' });
+        }
+
+        // Get failed messages (either all or selected ones)
+        let failedQuery = { broadcastId, status: 'failed' };
+        if (selectedPhoneNumbers && selectedPhoneNumbers.length > 0) {
+            failedQuery.phoneNumber = { $in: selectedPhoneNumbers };
+        }
+
+        const failedMessages = await BroadcastMessage.find(failedQuery).select('phoneNumber contactId');
+
+        if (failedMessages.length === 0) {
+            return res.status(400).json({ success: false, message: 'No failed messages found to retry' });
+        }
+
+        const failedPhoneNumbers = failedMessages.map(m => m.phoneNumber);
+
+        // Create a new broadcast campaign for the retry
+        const retryBroadcast = new Broadcast({
+            name: `${originalBroadcast.name} - Retry #${new Date().getTime()}`,
+            wabaId: originalBroadcast.wabaId,
+            phoneNumberId: originalBroadcast.phoneNumberId,
+            templateId: originalBroadcast.templateId._id,
+            status: 'draft',
+            createdBy: req.user._id,
+            components: originalBroadcast.components,
+            variableMapping: originalBroadcast.variableMapping,
+            metadata: {
+                retryOf: broadcastId,
+                originalBroadcastName: originalBroadcast.name,
+                retryCount: 1,
+            },
+        });
+
+        await retryBroadcast.save();
+
+        // Create a broadcast list for the retry recipients
+        const broadcastListName = `${originalBroadcast.name} - Failed Recipients (${new Date().toLocaleString()})`;
+        const retryList = new BroadcastList({
+            name: broadcastListName,
+            wabaId: originalBroadcast.wabaId,
+            description: `Failed recipients from broadcast: ${originalBroadcast.name}`,
+            source: 'retry',
+            memberCount: failedPhoneNumbers.length,
+        });
+
+        await retryList.save();
+
+        // Add failed phone numbers as members to the retry list
+        const listMembers = failedMessages.map(msg => ({
+            broadcastListId: retryList._id,
+            contactId: msg.contactId || undefined,
+            phoneNumber: msg.phoneNumber,
+            status: 'pending',
+        }));
+
+        await BroadcastListMember.insertMany(listMembers);
+
+        // Link the retry list to the retry broadcast
+        await Broadcast.findByIdAndUpdate(retryBroadcast._id, { broadcastListId: retryList._id });
+
+        res.json({
+            success: true,
+            message: `Retry campaign created for ${failedPhoneNumbers.length} failed recipients`,
+            retryBroadcast: {
+                _id: retryBroadcast._id,
+                name: retryBroadcast.name,
+                failedCount: failedPhoneNumbers.length,
+                listId: retryList._id,
+            }
+        });
+    } catch (e) {
+        next(e);
+    }
+}
+
+module.exports = { list, create, get, getStats, getTodayStats, getStatusCounts, send, test, getMessages, getBatches, bulkDelete, getFailedMessages, retryFailed };
 
 
 
