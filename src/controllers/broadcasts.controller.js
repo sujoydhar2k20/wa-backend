@@ -431,7 +431,7 @@ async function retryFailed(req, res, next) {
             name: broadcastListName,
             wabaId: originalBroadcast.wabaId,
             description: `Failed recipients from broadcast: ${originalBroadcast.name}`,
-            source: 'retry',
+            source: 'manual',
             memberCount: failedPhoneNumbers.length,
         });
 
