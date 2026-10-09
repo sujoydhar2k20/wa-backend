@@ -630,29 +630,7 @@ async function handleStatusUpdate(statusObj) {
                     if (status === 'failed') {
                         broadcastUpdatePayload.errorCode = errorCode;
                         broadcastUpdatePayload.errorMessage = errorMessage;
-                        
-                        // ⭐ NEW: Classify error and set retry configuration
-                        const errorClassifier = require('./whatsapp-error-classifier.service');
-                        const errorClassification = errorClassifier.classifyError(errorCode, errorMessage);
-                        const retryConfig = errorClassifier.getRetryConfig(errorCode);
-                        
-                        broadcastUpdatePayload.errorClassification = errorClassification.classification;
-                        broadcastUpdatePayload.errorCategory = errorClassification.category;
-                        broadcastUpdatePayload.errorRecommendation = errorClassification.recommendation;
-                        broadcastUpdatePayload.maxRetryAttempts = retryConfig.maxRetries;
-                        broadcastUpdatePayload.retryAttempts = 0;
-                        
-                        // Schedule next retry if retryable
-                        if (retryConfig.maxRetries > 0 && retryConfig.delayMs.length > 0) {
-                          const nextRetryTime = new Date();
-                          nextRetryTime.setMilliseconds(nextRetryTime.getMilliseconds() + retryConfig.delayMs[0]);
-                          broadcastUpdatePayload.nextRetryAt = nextRetryTime;
-                          logger.info(`[ERROR CLASSIFICATION] Error ${errorCode} (${errorClassification.classification}): Scheduled retry at ${nextRetryTime.toISOString()}`);
-                        } else {
-                          logger.info(`[ERROR CLASSIFICATION] Error ${errorCode} (${errorClassification.classification}): Not retryable`);
-                        }
                     }
-                    
                     await BroadcastMessage.findByIdAndUpdate(
                         broadcastMessage._id,
                         { $set: broadcastUpdatePayload }

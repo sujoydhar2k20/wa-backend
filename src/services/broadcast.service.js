@@ -111,14 +111,6 @@ function calculateBatches(totalMembers, dailyLimit, sentToday = 0) {
 
 /**
  * Process a single broadcast batch – sends messages to all members in the batch.
- * OPTIMIZED VERSION with:
- * - Batch database lookups (1 query instead of 1000+)
- * - Parallel WhatsApp API calls with rate limiting
- * - Bulk BroadcastMessage creation
- * - Deferred (non-blocking) chat message creation
- * - Bulk member status updates
- * 
- * Performance: 10-12x faster for 1000+ recipients
  */
 async function processBroadcastBatch(batchId) {
   const batch = await BroadcastBatch.findById(batchId);
@@ -134,17 +126,20 @@ async function processBroadcastBatch(batchId) {
     return;
   }
 
-  // Check daily limit again before sending
+  // Check daily limit again before sending (in case other broadcasts used up quota)
   const { messagingLimit } = await getMessagingLimit(broadcast.wabaId, broadcast.phoneNumberId);
   const sentToday = await getSentTodayCount(broadcast.wabaId);
   const remainingToday = messagingLimit === Infinity ? Infinity : Math.max(0, messagingLimit - sentToday);
 
   if (remainingToday === 0 && messagingLimit !== Infinity) {
+    // Reschedule to next day
     const nextDay = new Date();
     nextDay.setDate(nextDay.getDate() + 1);
     nextDay.setHours(9, 0, 0, 0);
     await BroadcastBatch.findByIdAndUpdate(batchId, { scheduledAt: nextDay });
     logger.info(`Batch ${batchId} rescheduled to ${nextDay} – daily limit reached`);
+
+    // Schedule the agenda job for the new time
     const { getAgenda } = require('../jobs/agenda');
     const agenda = getAgenda();
     if (agenda) {
@@ -155,6 +150,8 @@ async function processBroadcastBatch(batchId) {
 
   // Mark batch as sending
   await BroadcastBatch.findByIdAndUpdate(batchId, { status: 'sending', startedAt: new Date() });
+
+  // Update broadcast status
   await Broadcast.findByIdAndUpdate(broadcast._id, {
     status: 'sending',
     currentBatch: batch.batchNumber,
@@ -162,82 +159,43 @@ async function processBroadcastBatch(batchId) {
   });
 
   const template = broadcast.templateId;
+  let sentCount = 0;
+  let failedCount = 0;
+
+  // Get the components from the broadcast (stored when the send was initiated)
   const components = broadcast.components || [];
   const variableMapping = broadcast.variableMapping || [];
+
+  // Check if any variable uses dynamic contact fields
   const hasDynamicVars = variableMapping.some(m => m.source === 'contact_field');
 
-  // Prepare template data
-  const templateDoc = await Template.findById(template._id || template).catch(() => null);
-  let resolvedTemplateComponents = null;
-  let resolvedTemplateText = `[Broadcast: ${template.name}]`;
-
-  try {
-    if (templateDoc) {
-      resolvedTemplateComponents = (templateDoc.components || []).map(comp => {
-        const c = comp.toObject ? comp.toObject() : { ...comp };
-        if (c.text && (c.type === 'BODY' || c.type === 'HEADER')) {
-          const compType = c.type.toLowerCase();
-          const vars = (components || []).find(v => v.type === compType);
-          if (vars && vars.parameters) {
-            let resolvedText = c.text;
-            vars.parameters.forEach((param, idx) => {
-              resolvedText = resolvedText.replace(`{{${idx + 1}}}`, param.text || `{{${idx + 1}}}`);
-            });
-            c.text = resolvedText;
-          }
-        }
-        return c;
-      });
-      const bodyComp = resolvedTemplateComponents.find(c => c.type === 'BODY');
-      if (bodyComp?.text) resolvedTemplateText = bodyComp.text;
+  // Warn if template expects variables but components are empty
+  if (components.length === 0 && template.components) {
+    const bodyComp = (template.components || []).find(c => (c.type || c.get?.('type')) === 'BODY');
+    const bodyText = bodyComp?.text || bodyComp?.get?.('text') || '';
+    if (/\{\{\d+\}\}/.test(bodyText)) {
+      logger.warn(`Broadcast ${broadcast._id}: Template "${template.name}" has body variables but components array is empty. Messages will likely fail with parameter mismatch error.`);
     }
-  } catch (tplErr) {
-    logger.warn(`Failed to resolve template components for broadcast ${broadcast._id}: ${tplErr.message}`);
   }
 
-  const phonesToSend = batch.memberPhones.slice(0, messagingLimit === Infinity ? undefined : remainingToday);
-  const phonesDeferred = batch.memberPhones.slice(messagingLimit === Infinity ? batch.memberPhones.length : remainingToday);
-
-  // ========================================
-  // OPTIMIZATION 1: BATCH DATABASE LOOKUPS
-  // ========================================
-  logger.info(`[OPTIMIZATION] Batch fetching contacts for ${phonesToSend.length} recipients...`);
-  
-  const populateFields = hasDynamicVars
-    ? 'isBlocked isOptedOut name nameOnWhatsApp nickname phoneNumber customFields'
-    : 'isBlocked isOptedOut';
-
-  // Fetch all members in one query (instead of 1000 individual queries)
-  const members = broadcast.broadcastListId
-    ? await BroadcastListMember.find({
-        broadcastListId: broadcast.broadcastListId,
-        phoneNumber: { $in: phonesToSend }
-      }).populate('contactId', populateFields)
-    : [];
-
-  // Create lookup map for O(1) access
-  const memberMap = new Map(members.map(m => [m.phoneNumber, m]));
-
-  // Get missing contacts that aren't in the broadcast list
-  const phonesNotInList = phonesToSend.filter(p => !memberMap.has(p));
-  const missingContacts = phonesNotInList.length > 0
-    ? await Contact.find({ phoneNumber: { $in: phonesNotInList } }).select(populateFields)
-    : [];
-
-  const contactMap = new Map(missingContacts.map(c => [c.phoneNumber, c]));
-  logger.info(`[OPTIMIZATION] Loaded ${members.length} members + ${missingContacts.length} contacts in batch`);
-
-  // Helper function to resolve components for a contact
+  /**
+   * Resolve components for a specific contact by replacing dynamic placeholders
+   * with actual contact field values.
+   */
   function resolveComponentsForContact(baseComponents, contactDoc) {
     if (!hasDynamicVars || !contactDoc) return baseComponents;
+
     return baseComponents.map(comp => {
-      const section = comp.type;
+      const section = comp.type; // 'header', 'body', 'button'
       if (section !== 'header' && section !== 'body') return comp;
+
       const sectionMappings = variableMapping.filter(m => m.section === section);
       if (sectionMappings.length === 0) return comp;
+
       const newParams = (comp.parameters || []).map((param, idx) => {
         const mapping = sectionMappings.find(m => m.index === idx);
         if (mapping && mapping.source === 'contact_field' && mapping.field) {
+          // Resolve the field value from the contact document
           let fieldValue = '';
           if (mapping.field === 'phoneNumber') {
             fieldValue = contactDoc.phoneNumber || '';
@@ -248,6 +206,7 @@ async function processBroadcastBatch(batchId) {
           } else if (mapping.field === 'nickname') {
             fieldValue = contactDoc.nickname || contactDoc.name || '';
           } else {
+            // Try custom fields
             fieldValue = contactDoc.customFields?.get?.(mapping.field) 
               || contactDoc.customFields?.[mapping.field] 
               || contactDoc[mapping.field] 
@@ -257,10 +216,14 @@ async function processBroadcastBatch(batchId) {
         }
         return param;
       });
+
       return { ...comp, parameters: newParams };
     });
   }
 
+  /**
+   * Resolve template text for chat preview for a specific contact
+   */
   function resolveTemplateTextForContact(templateDoc, perContactComponents) {
     try {
       let resolvedText = `[Broadcast: ${template.name}]`;
@@ -287,250 +250,204 @@ async function processBroadcastBatch(batchId) {
     }
   }
 
-  // ========================================
-  // OPTIMIZATION 2 & 3: PARALLEL API CALLS + BULK CREATES + ADAPTIVE BATCHING
-  // ========================================
-  // ⭐ ADAPTIVE BATCH SIZE: Reduce during throttling
-  let BATCH_SIZE = 10;
-  let BATCH_DELAY_MS = 1000; // Default 1 second delay
-
-  // Check if this broadcast is a retry with throttling history
-  if (broadcast.metadata?.retryOf && broadcast.metadata?.throttledCount > 0) {
-    BATCH_SIZE = 5; // Reduce to 5 for retries after throttling
-    BATCH_DELAY_MS = 3000; // Increase to 3 seconds
-    logger.warn(`[BROADCAST] Throttling detected in retry (${broadcast.metadata.throttledCount} throttled messages). Reducing BATCH_SIZE to ${BATCH_SIZE} with ${BATCH_DELAY_MS}ms delay between batches`);
-  }
-
-  // Check for custom batch size from request options
-  if (broadcast.customBatchSize) {
-    BATCH_SIZE = Math.min(Math.max(broadcast.customBatchSize, 1), 10); // Clamp between 1-10
-    logger.info(`[BROADCAST] Custom BATCH_SIZE applied: ${BATCH_SIZE}`);
-  }
-
-  const broadcastMessages = [];
-  const failedMessages = [];
-  let sentCount = 0;
-  let failedCount = 0;
-
-  logger.info(`[OPTIMIZATION] Starting parallel message sending with batch size ${BATCH_SIZE} (delay: ${BATCH_DELAY_MS}ms)...`);
-
-  for (let i = 0; i < phonesToSend.length; i += BATCH_SIZE) {
-    const batch = phonesToSend.slice(i, i + BATCH_SIZE);
-    
-    // ⭐ NEW: Add delay between batches if throttling detected and not first batch
-    if (i > 0 && BATCH_DELAY_MS > 1000) {
-      logger.info(`[OPTIMIZATION] Waiting ${BATCH_DELAY_MS}ms before batch ${Math.ceil(i / BATCH_SIZE) + 1}...`);
-      await new Promise(resolve => setTimeout(resolve, BATCH_DELAY_MS));
-    }
-    
-    // Process this batch in parallel
-    const batchResults = await Promise.all(
-      batch.map(async (phoneNumber) => {
-        let contactId = null;
-        let result = { success: false, message: null, error: null };
-
-        try {
-          // Get contact info from pre-loaded maps
-          let member = memberMap.get(phoneNumber);
-          let contact = contactMap.get(phoneNumber);
-
-          let isBlocked = false;
-          let isOptedOut = false;
-          let contactDoc = null;
-
-          if (member && member.contactId) {
-            contactId = member.contactId._id;
-            isBlocked = member.contactId.isBlocked;
-            isOptedOut = member.contactId.isOptedOut;
-            if (hasDynamicVars) contactDoc = member.contactId;
-          } else if (contact) {
-            contactId = contact._id;
-            isBlocked = contact.isBlocked;
-            isOptedOut = contact.isOptedOut;
-            if (hasDynamicVars) contactDoc = contact;
+  // Pre-resolve template components with variables for chat preview (done once, reused for all recipients)
+  // This is used as fallback when there are no dynamic variables
+  let resolvedTemplateComponents = null;
+  let resolvedTemplateText = `[Broadcast: ${template.name}]`;
+  const templateDoc = await Template.findById(template._id || template).catch(() => null);
+  try {
+    if (templateDoc) {
+      resolvedTemplateComponents = (templateDoc.components || []).map(comp => {
+        const c = comp.toObject ? comp.toObject() : { ...comp };
+        if (c.text && (c.type === 'BODY' || c.type === 'HEADER')) {
+          const compType = c.type.toLowerCase();
+          const vars = (components || []).find(v => v.type === compType);
+          if (vars && vars.parameters) {
+            let resolvedText = c.text;
+            vars.parameters.forEach((param, idx) => {
+              resolvedText = resolvedText.replace(`{{${idx + 1}}}`, param.text || `{{${idx + 1}}}`);
+            });
+            c.text = resolvedText;
           }
-
-          if (isBlocked || isOptedOut) {
-            const skipErr = new Error('Contact is blocked or opted-out');
-            skipErr.name = 'SkipContactError';
-            throw skipErr;
-          }
-
-          const perContactComponents = resolveComponentsForContact(components, contactDoc);
-
-          const apiResult = await whatsappService.sendTemplateMessage(
-            broadcast.wabaId,
-            broadcast.phoneNumberId,
-            phoneNumber,
-            template.name,
-            template.language,
-            perContactComponents
-          );
-
-          let messageId = null;
-          if (apiResult && apiResult.messages && apiResult.messages.length > 0) {
-            messageId = apiResult.messages[0].id;
-          }
-
-          result.success = true;
-          result.message = {
-            broadcastId: broadcast._id,
-            contactId,
-            phoneNumber,
-            messageId,
-            status: 'sent',
-          };
-
-          return result;
-        } catch (err) {
-          const isSkipped = err.name === 'SkipContactError';
-          result.error = {
-            broadcastId: broadcast._id,
-            contactId,
-            phoneNumber,
-            status: isSkipped ? 'skipped' : 'failed',
-            errorCode: err.response?.data?.error?.code || (isSkipped ? 403 : 500),
-            errorMessage: err.response?.data?.error?.message || err.message,
-          };
-          return result;
         }
-      })
-    );
+        return c;
+      });
+      const bodyComp = resolvedTemplateComponents.find(c => c.type === 'BODY');
+      if (bodyComp?.text) resolvedTemplateText = bodyComp.text;
+    }
+  } catch (tplErr) {
+    logger.warn(`Failed to resolve template components for broadcast ${broadcast._id}: ${tplErr.message}`);
+  }
 
-    // Process results
-    for (const result of batchResults) {
-      if (result.success) {
-        broadcastMessages.push(result.message);
-        sentCount++;
-      } else {
-        failedMessages.push(result.error);
-        if (result.error.status === 'failed') {
-          failedCount++;
+  // Process each phone number in the batch
+  const phonesToSend = batch.memberPhones.slice(0, messagingLimit === Infinity ? undefined : remainingToday);
+  const phonesDeferred = batch.memberPhones.slice(messagingLimit === Infinity ? batch.memberPhones.length : remainingToday);
+
+  for (const phoneNumber of phonesToSend) {
+    // Declare contactId outside try so it's accessible in catch
+    let contactId = null;
+    try {
+      // Find the member or contact — fetch full doc if we have dynamic vars
+      let isBlocked = false;
+      let isOptedOut = false;
+      let contactDoc = null;
+
+      if (broadcast.broadcastListId) {
+        const populateFields = hasDynamicVars
+          ? 'isBlocked isOptedOut name nameOnWhatsApp nickname phoneNumber customFields'
+          : 'isBlocked isOptedOut';
+        const member = await BroadcastListMember.findOne({
+          broadcastListId: broadcast.broadcastListId,
+          phoneNumber,
+        }).populate('contactId', populateFields);
+
+        if (member && member.contactId) {
+          contactId = member.contactId._id;
+          isBlocked = member.contactId.isBlocked;
+          isOptedOut = member.contactId.isOptedOut;
+          if (hasDynamicVars) contactDoc = member.contactId;
         }
       }
-    }
 
-    logger.info(`[OPTIMIZATION] Progress: ${i + batch.length}/${phonesToSend.length} messages processed (batch size: ${BATCH_SIZE}, sent: ${sentCount}, failed: ${failedCount})`);
-  }
+      // If no member found or no list used, check Contact model directly
+      if (!contactId) {
+        const contact = hasDynamicVars
+          ? await Contact.findOne({ phoneNumber })
+          : await Contact.findOne({ phoneNumber }).select('_id isBlocked isOptedOut');
+        if (contact) {
+          contactId = contact._id;
+          isBlocked = contact.isBlocked;
+          isOptedOut = contact.isOptedOut;
+          if (hasDynamicVars) contactDoc = contact;
+        }
+      }
 
-  // ========================================
-  // OPTIMIZATION 4: BULK CREATE BROADCAST MESSAGES
-  // ========================================
-  logger.info(`[OPTIMIZATION] Bulk creating ${broadcastMessages.length + failedMessages.length} broadcast message records...`);
-  if (broadcastMessages.length > 0) {
-    await BroadcastMessage.insertMany(broadcastMessages, { ordered: false });
-  }
-  if (failedMessages.length > 0) {
-    await BroadcastMessage.insertMany(failedMessages, { ordered: false });
-  }
-  logger.info(`[OPTIMIZATION] Bulk create completed`);
+      if (isBlocked || isOptedOut) {
+        const skipErr = new Error('Contact is blocked or opted-out');
+        skipErr.name = 'SkipContactError';
+        throw skipErr;
+      }
 
-  // ========================================
-  // OPTIMIZATION 5: DEFER CHAT MESSAGE CREATION (Non-blocking)
-  // ========================================
-  logger.info(`[OPTIMIZATION] Deferring chat message creation for ${broadcastMessages.length} recipients...`);
-  
-  // Create chat messages asynchronously without blocking batch completion
-  setImmediate(async () => {
-    try {
-      const hostedHeaderUrl = await whatsappService.getTemplateHeaderImageUrl(
-        broadcast.wabaId, 
-        template.name, 
-        template.language
+      // Resolve per-contact components (dynamic fields replaced with actual values)
+      const perContactComponents = resolveComponentsForContact(components, contactDoc);
+
+      const result = await whatsappService.sendTemplateMessage(
+        broadcast.wabaId,
+        broadcast.phoneNumberId,
+        phoneNumber,
+        template.name,
+        template.language,
+        perContactComponents
       );
 
-      for (const broadcastMsg of broadcastMessages) {
-        try {
-          const waId = broadcastMsg.phoneNumber.replace(/\D/g, '');
-          
-          // Try to find existing chat
-          let chat = await Chat.findOne({ wabaId: broadcast.wabaId, waId });
-          
-          if (!chat) {
-            chat = await Chat.create({
-              wabaId: broadcast.wabaId,
-              phoneNumberId: broadcast.phoneNumberId,
-              phoneNumber: waId,
-              waId,
-              contactId: broadcastMsg.contactId || undefined,
-              status: 'closed',
-              lastMessageAt: new Date(),
-              lastCustomerMessageAt: new Date(0),
-              isUnread: false,
-            });
-          }
+      let messageId = null;
+      if (result && result.messages && result.messages.length > 0) {
+        messageId = result.messages[0].id;
+      }
 
-          // Resolve text for chat
-          const member = memberMap.get(broadcastMsg.phoneNumber);
-          const contact = contactMap.get(broadcastMsg.phoneNumber);
-          const contactDoc = hasDynamicVars ? (member?.contactId || contact) : null;
-          const perContactComponents = resolveComponentsForContact(components, contactDoc);
-          const contactResolvedText = hasDynamicVars
-            ? resolveTemplateTextForContact(templateDoc, perContactComponents)
-            : resolvedTemplateText;
+      await BroadcastMessage.create({
+        broadcastId: broadcast._id,
+        contactId,
+        phoneNumber,
+        messageId,
+        status: 'sent',
+      });
 
-          await Message.create({
-            chatId: chat._id,
+      // Also create a Message in the individual chat so it appears in chat history
+      try {
+        const waId = phoneNumber.replace(/\D/g, '');
+        let chat = await Chat.findOne({ wabaId: broadcast.wabaId, waId });
+        if (!chat) {
+          // Create a new chat for this contact if one doesn't exist
+          chat = await Chat.create({
             wabaId: broadcast.wabaId,
             phoneNumberId: broadcast.phoneNumberId,
-            messageId: broadcastMsg.messageId,
+            phoneNumber: waId,
             waId,
-            direction: 'outbound',
-            type: 'template',
-            text: contactResolvedText,
-            status: 'sent',
-            metadata: {
-              templateName: template.name,
-              templateLanguage: template.language,
-              templateComponents: whatsappService.withHostedHeaderImage(resolvedTemplateComponents, hostedHeaderUrl) || undefined,
-              templateImageUrl: hostedHeaderUrl || undefined,
-              broadcastId: broadcast._id.toString(),
-            },
+            contactId: contactId || undefined,
+            status: 'closed',
+            lastMessageAt: new Date(),
+            lastCustomerMessageAt: new Date(0),
+            isUnread: false,
           });
-
-          await Chat.findByIdAndUpdate(chat._id, { lastMessageAt: new Date(), lastStaffMessageAt: new Date() });
-        } catch (chatErr) {
-          logger.warn(`Failed to create chat message for broadcast ${broadcast._id}, phone ${broadcastMsg.phoneNumber}: ${chatErr.message}`);
         }
+
+        // Resolve text per-contact when dynamic variables are used
+        const contactResolvedText = hasDynamicVars
+          ? resolveTemplateTextForContact(templateDoc, perContactComponents)
+          : resolvedTemplateText;
+
+        const hostedHeaderUrl = await whatsappService.getTemplateHeaderImageUrl(broadcast.wabaId, template.name, template.language);
+        const chatMessage = await Message.create({
+          chatId: chat._id,
+          wabaId: broadcast.wabaId,
+          phoneNumberId: broadcast.phoneNumberId,
+          messageId,
+          waId,
+          direction: 'outbound',
+          type: 'template',
+          text: contactResolvedText,
+          status: 'sent',
+          metadata: {
+            templateName: template.name,
+            templateLanguage: template.language,
+            templateComponents: whatsappService.withHostedHeaderImage(resolvedTemplateComponents, hostedHeaderUrl) || undefined,
+            templateImageUrl: hostedHeaderUrl || undefined,
+            broadcastId: broadcast._id.toString(),
+          },
+        });
+
+        // Update chat last message timestamp
+        await Chat.findByIdAndUpdate(chat._id, { lastMessageAt: new Date(), lastStaffMessageAt: new Date() });
+
+        // Emit socket event for real-time chat UI update
+        try {
+          const io = getIO();
+          io.emit('message:new', { chatId: chat._id, message: chatMessage });
+          const populatedChat = await Chat.findById(chat._id).populate('contactId');
+          io.emit('chat:update', { chatId: chat._id, chat: populatedChat });
+        } catch (socketErr) {
+          // Non-critical, just log
+        }
+      } catch (chatErr) {
+        logger.warn(`Failed to create chat message for broadcast ${broadcast._id}, phone ${phoneNumber}: ${chatErr.message}`);
       }
 
-      logger.info(`[OPTIMIZATION] Chat message creation completed for batch ${batchId}`);
+      if (broadcast.broadcastListId) {
+        await BroadcastListMember.updateOne(
+          { broadcastListId: broadcast.broadcastListId, phoneNumber },
+          { status: 'sent' }
+        );
+      }
+      sentCount++;
     } catch (err) {
-      logger.error(`Failed to create chat messages in background: ${err.message}`);
-    }
-  });
+      const isSkipped = err.name === 'SkipContactError';
+      
+      await BroadcastMessage.create({
+        broadcastId: broadcast._id,
+        contactId,
+        phoneNumber,
+        status: isSkipped ? 'skipped' : 'failed',
+        errorCode: err.response?.data?.error?.code || (isSkipped ? 403 : 500),
+        errorMessage: err.response?.data?.error?.message || err.message,
+      });
 
-  // ========================================
-  // OPTIMIZATION 6: BULK UPDATE BROADCAST LIST MEMBERS
-  // ========================================
-  if (broadcast.broadcastListId) {
-    logger.info(`[OPTIMIZATION] Bulk updating broadcast list member statuses...`);
-    
-    const sentPhones = broadcastMessages.map(m => m.phoneNumber);
-    const failedPhones = failedMessages.map(m => m.phoneNumber);
-    const skippedPhones = failedMessages.filter(m => m.status === 'skipped').map(m => m.phoneNumber);
-
-    if (sentPhones.length > 0) {
-      await BroadcastListMember.updateMany(
-        { broadcastListId: broadcast.broadcastListId, phoneNumber: { $in: sentPhones } },
-        { status: 'sent' }
-      );
-    }
-    if (failedPhones.length > 0) {
-      await BroadcastListMember.updateMany(
-        { broadcastListId: broadcast.broadcastListId, phoneNumber: { $in: failedPhones } },
-        { status: 'failed' }
-      );
-    }
-    if (skippedPhones.length > 0) {
-      await BroadcastListMember.updateMany(
-        { broadcastListId: broadcast.broadcastListId, phoneNumber: { $in: skippedPhones } },
-        { status: 'opted_out' }
-      );
+      if (broadcast.broadcastListId) {
+        await BroadcastListMember.updateOne(
+          { broadcastListId: broadcast.broadcastListId, phoneNumber },
+          { status: isSkipped ? 'opted_out' : 'failed' }
+        );
+      }
+      
+      if (isSkipped) {
+        sentCount++; // We count skipped as "processed" in the batch loop but handle stat specifically below
+      } else {
+        failedCount++;
+      }
     }
   }
 
-  // Handle spillover batch if daily limit was hit
+  // If some phones exceeded the daily limit mid-batch, create a spillover batch
   if (phonesDeferred.length > 0) {
     const nextDay = new Date();
     nextDay.setDate(nextDay.getDate() + 1);
@@ -538,13 +455,14 @@ async function processBroadcastBatch(batchId) {
 
     const spilloverBatch = await BroadcastBatch.create({
       broadcastId: broadcast._id,
-      batchNumber: batch.batchNumber + 0.5,
+      batchNumber: batch.batchNumber + 0.5, // intermediate batch
       scheduledAt: nextDay,
       status: 'pending',
       memberPhones: phonesDeferred,
       memberCount: phonesDeferred.length,
     });
 
+    // Schedule via Agenda
     const { getAgenda } = require('../jobs/agenda');
     const agenda = getAgenda();
     if (agenda) {
@@ -552,11 +470,17 @@ async function processBroadcastBatch(batchId) {
     }
   }
 
-  // Update batch and broadcast statistics
+  // Update batch stats
+  const batchSkippedCount = await BroadcastMessage.countDocuments({ 
+    broadcastId: broadcast._id, 
+    status: 'skipped',
+    createdAt: { $gte: batch.startedAt || new Date() } // Rough filter for current batch
+  });
+
   await BroadcastBatch.findByIdAndUpdate(batchId, {
     status: 'completed',
     completedAt: new Date(),
-    sentCount: sentCount - failedMessages.filter(m => m.status === 'skipped').length,
+    sentCount: sentCount - batchSkippedCount, // Actual sent are successful ones
     failedCount,
   });
 
@@ -566,7 +490,12 @@ async function processBroadcastBatch(batchId) {
   const allBatchSkipped = await BroadcastMessage.countDocuments({ broadcastId: broadcast._id, status: 'skipped' });
   const totalRecipients = await BroadcastMessage.countDocuments({ broadcastId: broadcast._id });
 
-  const pendingBatches = await BroadcastBatch.countDocuments({ broadcastId: broadcast._id, status: 'pending' });
+  // Check if there are more pending batches
+  const pendingBatches = await BroadcastBatch.countDocuments({
+    broadcastId: broadcast._id,
+    status: 'pending',
+  });
+
   const nextPendingBatch = await BroadcastBatch.findOne({
     broadcastId: broadcast._id,
     status: 'pending',
@@ -601,8 +530,6 @@ async function processBroadcastBatch(batchId) {
   } catch (e) {
     logger.warn('Socket emit failed for broadcast batch update:', e.message);
   }
-
-  logger.info(`[OPTIMIZATION] Batch ${batchId} completed in optimized mode`);
 }
 
 module.exports = {
