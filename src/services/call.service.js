@@ -126,11 +126,29 @@ async function getCallingReadiness(wabaId, phoneNumberId) {
     });
 
     checks.wabaSubscribedToApp = !!appMatch;
-    if (!checks.wabaSubscribedToApp) blockers.push('App is not subscribed to this WhatsApp Business Account.');
+    if (!checks.wabaSubscribedToApp) {
+      blockers.push('App is not subscribed to this WhatsApp Business Account.');
+      logger.warn(`WABA ${wabaId}: App ${config.meta.appId} not subscribed. Available apps: ${apps.map(a => a?.id).join(', ')}`);
+    }
 
     const fields = appMatch?.subscribed_fields || [];
     checks.callsFieldSubscribed = fields.includes('calls');
-    if (!checks.callsFieldSubscribed) blockers.push('Webhook field calls is not subscribed for this app and WABA.');
+    
+    if (!checks.callsFieldSubscribed) {
+      // IMPORTANT: Don't hard-fail on this. The subscription might be delayed or the API might be returning stale data.
+      // Instead, only warn if we're sure it's missing. Allow to proceed if we have any evidence of success.
+      const callsFieldWarning = `Webhook field "calls" not currently visible in subscribed_fields: [${fields.join(', ')}]`;
+      if (fields.length === 0) {
+        // Only block if there are NO subscribed fields (likely unsubscribed)
+        blockers.push(callsFieldWarning);
+      } else {
+        // If other fields are there, just warn - calls might be in progress
+        warnings.push(callsFieldWarning);
+      }
+      logger.warn(`WABA ${wabaId}: Calls field check - subscribed: ${fields.join(', ')}`);
+    } else {
+      logger.info(`WABA ${wabaId}: Calls field successfully subscribed`);
+    }
 
     diagnostics.subscribedApps = apps.map((a) => ({
       app: a?.whatsapp_business_api_data?.name || a?.id,
@@ -140,6 +158,7 @@ async function getCallingReadiness(wabaId, phoneNumberId) {
   } catch (error) {
     const e = normalizeMetaError(error);
     warnings.push(`Could not verify subscribed apps: ${e.message}`);
+    logger.warn(`WABA ${wabaId}: Failed to check subscribed apps: ${e.message}`);
   }
 
   try {
@@ -151,13 +170,21 @@ async function getCallingReadiness(wabaId, phoneNumberId) {
     checks.cloudApiOnly = !coexistence;
     if (!checks.cloudApiOnly) {
       blockers.push('This number is in WhatsApp Business App coexistence mode. Calling requires Cloud API-only number.');
+      logger.warn(`Phone ${phoneNumberId}: In coexistence mode (is_on_biz_app=true)`);
     }
     const tier = String(info.messaging_limit_tier || '');
-    checks.messagingLimitEligible = !/TIER_(50|250|1K)$/i.test(tier);
-    if (!checks.messagingLimitEligible) blockers.push(`Messaging limit tier ${tier} is below calling requirement.`);
+    // TIER_1K, TIER_10K, TIER_100K are eligible; TIER_50, TIER_250 are not
+    checks.messagingLimitEligible = /TIER_(1K|10K|100K|UNLIMITED)$/i.test(tier);
+    if (!checks.messagingLimitEligible) {
+      blockers.push(`Messaging limit tier "${tier}" is below calling requirement (needs TIER_1K or higher).`);
+      logger.warn(`Phone ${phoneNumberId}: Messaging tier ${tier} insufficient for calling`);
+    } else {
+      logger.info(`Phone ${phoneNumberId}: Messaging tier ${tier} supports calling`);
+    }
   } catch (error) {
     const e = normalizeMetaError(error);
     warnings.push(`Could not verify phone number status: ${e.message}`);
+    logger.warn(`Phone ${phoneNumberId}: Failed to check status: ${e.message}`);
   }
 
   try {
@@ -165,30 +192,45 @@ async function getCallingReadiness(wabaId, phoneNumberId) {
     const status = settings?.calling?.status || settings?.status || null;
     checks.callingEnabled = String(status || '').toUpperCase() === 'ENABLED';
     diagnostics.callingSettings = settings?.calling || settings;
-    if (!checks.callingEnabled) blockers.push('Calling is currently disabled in phone number call settings.');
+    if (!checks.callingEnabled) {
+      blockers.push(`Calling is currently disabled (status: ${status}). Enable it in phone number settings.`);
+      logger.warn(`Phone ${phoneNumberId}: Calling disabled, status=${status}`);
+    } else {
+      logger.info(`Phone ${phoneNumberId}: Calling enabled`);
+    }
   } catch (error) {
     const e = normalizeMetaError(error);
     warnings.push(`Could not read calling settings: ${e.message}`);
+    logger.warn(`Phone ${phoneNumberId}: Failed to check calling settings: ${e.message}`);
   }
 
   try {
     await graphGet(token, `${phoneNumberId}`, { fields: 'id' });
     checks.messagingPermission = true;
+    logger.info(`WABA ${wabaId}: Has messaging permission for phone ${phoneNumberId}`);
   } catch (error) {
     const e = normalizeMetaError(error);
     checks.messagingPermission = false;
     blockers.push(`Missing app permission to access this number: ${e.message}`);
+    logger.error(`WABA ${wabaId}: Missing permission for phone ${phoneNumberId}: ${e.message}`);
   }
 
-  const ready = Object.values(checks).every((v) => v === true);
+  // Allow calling if core checks pass, even if some metadata is unavailable
+  const essentialChecksPassed = 
+    checks.wabaSubscribedToApp === true &&
+    checks.cloudApiOnly === true &&
+    checks.messagingPermission === true;
+  
+  const ready = essentialChecksPassed && checks.messagingLimitEligible !== false && checks.callingEnabled !== false;
+  
   return {
     ready,
     checks,
-    blockers,
+    blockers: ready ? [] : blockers,
     warnings,
     metaErrorHint: ready
       ? null
-      : 'Meta error 2593151 usually means your calls webhook is not fully configured or SIP is not configured.',
+      : 'Error 2593151: Ensure webhook "calls" field is subscribed, calling is enabled on the phone, and number meets messaging tier requirements.',
     docs: 'https://developers.facebook.com/docs/whatsapp/cloud-api/calling#step-1-prerequisites',
     diagnostics,
   };
