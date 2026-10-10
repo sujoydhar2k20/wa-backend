@@ -371,9 +371,12 @@ async function handleCallEvent(waba, phoneNumberId, call, parsedEvent = null) {
   const bridgeSessionId = callLog?.metadata?.bridgeSessionId || callbackData || callId;
   const lowerStatus = String(status || '').toLowerCase();
 
-  if (eventType === 'connect' && direction === 'inbound' && sdp) {
+  if (eventType === 'connect' && direction === 'inbound') {
     try {
       const bridge = getBridgeClient();
+      if (!sdp) {
+        logger.warn(`No SDP in connect event for call ${callId}; attempting bridge setup with empty SDP payload`);
+      }
       const answer = await bridge.inbound(bridgeSessionId, sdp);
       await getMetaCalls().preAccept(waba._id, phoneNumberId, { callId, sdpAnswer: answer });
       await getMetaCalls().accept(waba._id, phoneNumberId, { callId, sdpAnswer: answer, bizData: bridgeSessionId });
