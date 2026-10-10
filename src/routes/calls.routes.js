@@ -10,15 +10,11 @@ router.use(authenticate);
 router.get('/logs', callsController.getAllCallLogs);
 
 // Chat-specific call operations
-router.get('/:chatId/readiness', callsController.getCallingReadiness);
 router.post('/:chatId/request-permission', callsController.requestPermission);
 router.post('/:chatId/initiate', callsController.initiateCall);
 router.get('/:chatId/logs', callsController.getChatCallLogs);
 
 // Call-specific operations
-router.post('/:callLogId/accept', callsController.acceptIncomingCall);
-router.post('/:callLogId/reject', callsController.rejectIncomingCall);
-router.get('/:callLogId/media-session', callsController.getMediaSession);
 router.post('/:callLogId/terminate', callsController.terminateCall);
 
 module.exports = router;

@@ -39,36 +39,6 @@ async function requestPermission(req, res, next) {
 }
 
 /**
- * GET /api/calls/:chatId/readiness
- * Check Meta Cloud API calling prerequisites for this chat's phone number.
- */
-async function getCallingReadiness(req, res, next) {
-  try {
-    const { chatId } = req.params;
-    const chat = await Chat.findById(chatId).populate('wabaId');
-    if (!chat) return res.status(404).json({ success: false, error: 'Chat not found' });
-
-    const waba = chat.wabaId;
-    const phoneNumberId = chat.phoneNumberId || waba.phoneNumbers?.[0]?.phoneNumberId;
-    if (!phoneNumberId) {
-      return res.status(400).json({ success: false, error: 'No phone number ID available for this chat' });
-    }
-
-    const readiness = await callService.getCallingReadiness(waba._id, phoneNumberId);
-    return res.json({ success: true, readiness });
-  } catch (error) {
-    logger.error('Get calling readiness error:', error.message);
-    if (error.response?.data) {
-      return res.status(error.response.status || 500).json({
-        success: false,
-        error: error.response.data?.error?.message || 'Failed to check calling readiness',
-      });
-    }
-    next(error);
-  }
-}
-
-/**
  * POST /api/calls/:chatId/initiate
  * Start an outbound call to the customer.
  */
@@ -100,51 +70,6 @@ async function initiateCallHandler(req, res, next) {
         error: error.response.data?.error?.message || 'Failed to initiate call',
       });
     }
-    next(error);
-  }
-}
-
-/**
- * POST /api/calls/:callLogId/accept
- * Staff accepts an inbound ringing call.
- */
-async function acceptIncomingCallHandler(req, res, next) {
-  try {
-    const { callLogId } = req.params;
-    const callLog = await callService.acceptIncomingCall(callLogId, req.user);
-    res.json({ success: true, callLog });
-  } catch (error) {
-    logger.error('Accept incoming call error:', error.message);
-    next(error);
-  }
-}
-
-/**
- * POST /api/calls/:callLogId/reject
- * Staff rejects an inbound ringing call.
- */
-async function rejectIncomingCallHandler(req, res, next) {
-  try {
-    const { callLogId } = req.params;
-    const callLog = await callService.rejectIncomingCall(callLogId);
-    res.json({ success: true, callLog });
-  } catch (error) {
-    logger.error('Reject incoming call error:', error.message);
-    next(error);
-  }
-}
-
-/**
- * GET /api/calls/:callLogId/media-session
- * Get LiveKit token/room details for staff browser audio.
- */
-async function getMediaSessionHandler(req, res, next) {
-  try {
-    const { callLogId } = req.params;
-    const session = await callService.createMediaSession(callLogId, req.user);
-    res.json({ success: true, session });
-  } catch (error) {
-    logger.error('Get media session error:', error.message);
     next(error);
   }
 }
@@ -225,12 +150,8 @@ async function getAllCallLogs(req, res, next) {
 }
 
 module.exports = {
-  getCallingReadiness,
   requestPermission,
   initiateCall: initiateCallHandler,
-  acceptIncomingCall: acceptIncomingCallHandler,
-  rejectIncomingCall: rejectIncomingCallHandler,
-  getMediaSession: getMediaSessionHandler,
   terminateCall: terminateCallHandler,
   getChatCallLogs,
   getAllCallLogs,
