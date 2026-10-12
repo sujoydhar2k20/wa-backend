@@ -31,6 +31,14 @@ again for that call. Emits `call:dismissed` to the user's other tabs.
    - green button: `canCall === true`
    - red button: show `reason`; offer phone dialler or "Ask for WhatsApp call permission"
 2. `POST /api/calls/:chatId/request-permission` (optional body `{ "text": "..." }`) → 409 already allowed, 429 Meta limit (1/day, 2/week)
+
+**Send a "Call on WhatsApp" button** (free interactive message, any staff device):
+- `GET /api/calls/:chatId/status` → `callButton: { ok, reason?, windowEndsAt?, defaultText }`
+- `POST /api/calls/:chatId/send-call-button` body `{ "text": "optional, max 1024 chars" }` → `{ message }`;
+  409 when the customer hasn't messaged/called in 24 h (WhatsApp then only allows a template) or one was sent < 2 min ago.
+  Same access rule as calling: staff only in chats assigned to them, admins anywhere. The chat gets `message:new`
+  with `metadata.kind = 'call_button'`.
+
 3. Place the call: `ua.call('sip:' + dialTarget + '@' + domain, ...)` where `dialTarget = chat-<chatId>`.
    The backend re-checks everything; a refused call is hung up and `call:blocked` is emitted.
    (`POST /api/calls/:chatId/initiate` does the same check and returns `dialTarget`.)

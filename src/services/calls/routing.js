@@ -70,6 +70,22 @@ function digitsOnly(v) {
   return /^[+\d\s()-]+$/.test(s) && d.length >= 8 && d.length <= 15 ? d : null;
 }
 
+/**
+ * Staff "Send call button": a free-form interactive message, so only inside WhatsApp's 24-hour customer
+ * service window (opened by the customer's last message or call). Also blocks double taps (2 min per chat).
+ */
+function callButtonAllowed({ lastCustomerAt, lastSentAt, now = new Date() }) {
+  const t = now.getTime();
+  const last = lastCustomerAt ? new Date(lastCustomerAt).getTime() : 0;
+  if (!last || t - last >= 24 * 3600e3) {
+    return { ok: false, reason: "The customer hasn't messaged or called in the last 24 hours, so WhatsApp only allows a template." };
+  }
+  if (lastSentAt && t - new Date(lastSentAt).getTime() < 2 * 60e3) {
+    return { ok: false, reason: 'A call button was just sent to this customer. Please wait a moment.' };
+  }
+  return { ok: true, windowEndsAt: new Date(last + 24 * 3600e3) };
+}
+
 function formatDuration(sec) {
   const s = Math.max(0, Math.round(sec || 0));
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
@@ -77,5 +93,5 @@ function formatDuration(sec) {
 
 module.exports = {
   eligibleRingUsers, buildRingPlan, canUserCallChat, permissionValid,
-  permissionRequestAllowed, shouldSendMissedMessage, digitsOnly, formatDuration, isAdmin,
+  permissionRequestAllowed, shouldSendMissedMessage, callButtonAllowed, digitsOnly, formatDuration, isAdmin,
 };

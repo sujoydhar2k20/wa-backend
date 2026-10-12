@@ -74,10 +74,11 @@ async function busyUserIds() {
 
 async function endpointsForUsers(userIds) {
   if (!userIds.length) return [];
-  const users = await User.find({ _id: { $in: userIds }, isActive: true }).select('sip.deskPhone').lean();
+  const users = await User.find({ _id: { $in: userIds }, isActive: true }).select('sip.deskPhone sip.androidAppAt').lean();
   const out = [];
   for (const u of users) {
     out.push(sip.endpointFor(u._id));
+    if (sip.hasAndroidApp(u)) out.push(sip.appEndpointFor(u._id)); // Asterisk waits for the phone (push) to register
     if (u.sip?.deskPhone) out.push(sip.deskEndpointFor(u._id));
   }
   return out;
@@ -135,7 +136,7 @@ async function inboundRoute({ uniqueid, wacid, from, to }) {
   const firstStage = plan.first || plan.all;
   const notice = payloadFor(callLog, { contactName: contactName(contact, waId), wabaName: waba.businessName, stage: firstStage.stage, ringSeconds: firstStage.seconds });
   emitToUsers(firstStage.userIds, 'call:incoming', notice);
-  push(firstStage.userIds, { title: 'Incoming WhatsApp call', body: `${notice.contactName} is calling`, data: { type: 'incoming_call', ...notice } });
+  push(firstStage.userIds, { title: 'Incoming WhatsApp call', body: `${notice.contactName} is calling`, data: { type: 'incoming_call', ...notice, sentAt: Date.now() }, ttlSeconds: 45 });
 
   const firstEps = plan.first ? await endpointsForUsers(plan.first.userIds) : [];
   const allEps = await endpointsForUsers(plan.all.userIds);
@@ -158,7 +159,7 @@ async function stageAll({ callLogId }) {
   const fresh = allIds.filter((id) => !(callLog.metadata?.plan?.first || []).map(String).includes(id));
   const notice = payloadFor(callLog, { contactName: callLog.metadata?.contactName, stage: 'all', ringSeconds: callingConfig.get().ringAllSeconds });
   emitToUsers(allIds, 'call:incoming', notice);
-  push(fresh, { title: 'Incoming WhatsApp call', body: `${notice.contactName || 'A customer'} is calling`, data: { type: 'incoming_call', ...notice } });
+  push(fresh, { title: 'Incoming WhatsApp call', body: `${notice.contactName || 'A customer'} is calling`, data: { type: 'incoming_call', ...notice, sentAt: Date.now() }, ttlSeconds: 45 });
   const eps = await endpointsForUsers(allIds);
   return `ok|${eps.join('~')}`;
 }
@@ -187,18 +188,24 @@ async function decline({ callLogId, user }) {
   return { ok: true, stoppedDevices: hungUp };
 }
 
-/** Hang up every ringing Asterisk channel of this user's devices (PJSIP/u<id>-..., PJSIP/u<id>-desk-...). */
+/**
+ * Hang up every ringing Asterisk channel of this user's devices (PJSIP/u<id>-..., -desk, -app) and the
+ * "waiting for the phone" leg (Local/u<id>-app@app-wait), so a phone that registers later does not ring.
+ */
 async function hangupUserLegs(userId) {
   const cfg = callingConfig.get();
   const { amiCommand } = require('./ami');
   const out = await amiCommand(cfg.ami, 'core show channels concise');
   const ep = sip.endpointFor(userId);
-  const names = out.split('\n').map((l) => l.split('!')[0]).filter((n) => n.startsWith(`PJSIP/${ep}-`));
-  for (const n of names) {
-    if (!/^PJSIP\/u[0-9a-f]{24}(-desk)?-[0-9a-f]+$/.test(n)) continue;
-    await amiCommand(cfg.ami, `channel request hangup ${n}`);
+  const names = out.split('\n').map((l) => l.split('!')[0])
+    .filter((n) => n.startsWith(`PJSIP/${ep}-`) || n.startsWith(`Local/${ep}-app@app-wait-`));
+  let n = 0;
+  for (const name of names) {
+    if (!/^PJSIP\/u[0-9a-f]{24}(-desk|-app)?-[0-9a-f]+$/.test(name) && !/^Local\/u[0-9a-f]{24}-app@app-wait-[0-9a-f]+;[12]$/.test(name)) continue;
+    await amiCommand(cfg.ami, `channel request hangup ${name}`);
+    n += 1;
   }
-  return names.length;
+  return n;
 }
 
 // ---------- answered (both directions) ----------
@@ -221,7 +228,7 @@ async function answered({ callLogId, endpoint }) {
   const payload = payloadFor(res, { answeredBy: answeredBy ? { id: String(answeredBy._id), name: answeredBy.name } : null });
   const targets = res.direction === 'inbound' ? res.ringTargets : [res.initiatedBy];
   emitToUsers(targets, 'call:answered', payload);
-  if (res.direction === 'inbound') push((res.ringTargets || []).map(String).filter((id) => id !== String(res.answeredBy)), { title: '', body: '', data: { type: 'call_answered_elsewhere', callLogId: String(res._id) } });
+  if (res.direction === 'inbound') push((res.ringTargets || []).map(String).filter((id) => id !== String(res.answeredBy)), { title: '', body: '', data: { type: 'call_answered_elsewhere', callLogId: String(res._id) }, ttlSeconds: 120 });
   return 'ok';
 }
 
@@ -308,7 +315,7 @@ async function hangup({ callLogId, dialstatus, answeredtime, recfile, cause }) {
 
   const targets = callLog.direction === 'inbound' ? callLog.ringTargets : [callLog.initiatedBy];
   emitToUsers(targets, 'call:ended', payloadFor(callLog, { duration: callLog.duration, endReason: callLog.endReason }));
-  if (callLog.direction === 'inbound' && !wasAnswered) push((targets || []).map(String), { title: '', body: '', data: { type: 'call_ended', callLogId: String(callLog._id) } });
+  if (callLog.direction === 'inbound' && !wasAnswered) push((targets || []).map(String), { title: '', body: '', data: { type: 'call_ended', callLogId: String(callLog._id) }, ttlSeconds: 120 });
 
   if (callLog.direction === 'inbound' && callLog.status === 'missed') await sendMissedCallMessage(callLog);
   if (!wasAnswered && recfile) recordings.discardRecording(recfile);

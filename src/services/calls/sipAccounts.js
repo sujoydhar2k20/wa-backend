@@ -5,6 +5,8 @@
  *
  * Every active superadmin/admin/staff user gets:
  *   u<userId>        WebRTC account (web panel / Android app, over wss via nginx)
+ *   u<userId>-app    Android app (WebRTC over wss). Rung through a "wait for the phone" step, because a
+ *                    phone woken by a push registers a few seconds after the call started.
  *   u<userId>-desk   optional TLS + SDES account for Linphone / desk phones (user.sip.deskPhone)
  * Passwords are random, stored encrypted on the User, and written into a generated
  * Asterisk include file (mode 600, owned by the container's asterisk uid). After a change
@@ -22,10 +24,15 @@ const callingConfig = require('./config');
 const CALL_ROLES = ['superadmin', 'admin', 'staff'];
 const endpointFor = (userId) => `u${String(userId)}`;
 const deskEndpointFor = (userId) => `u${String(userId)}-desk`;
+const appEndpointFor = (userId) => `u${String(userId)}-app`;
 const userIdFromEndpoint = (ep) => {
-  const m = /^u([0-9a-f]{24})(-desk)?$/.exec(String(ep || ''));
-  return m ? { userId: m[1], device: m[2] ? 'desk' : 'app' } : null;
+  const m = /^u([0-9a-f]{24})(-desk|-app)?$/.exec(String(ep || ''));
+  if (!m) return null;
+  return { userId: m[1], device: m[2] === '-desk' ? 'desk' : m[2] === '-app' ? 'android' : 'app' };
 };
+/** Users who used the Android app recently get the app account in their ring list. */
+const ANDROID_ACTIVE_DAYS = 90;
+const hasAndroidApp = (u, now = Date.now()) => !!u?.sip?.androidAppAt && now - new Date(u.sip.androidAppAt).getTime() < ANDROID_ACTIVE_DAYS * 86400e3;
 const newPassword = () => crypto.randomBytes(24).toString('base64url'); // [A-Za-z0-9_-] only: safe in Asterisk config
 
 async function ensureAccounts() {
@@ -56,6 +63,13 @@ function renderPjsip(users) {
       `[${ep}](webrtc_user)`, `auth=${ep}`, `aors=${ep}`, `callerid=${cid}`,
       `[${ep}](user_auth)`, `username=${ep}`, `password=${pw}`,
       `[${ep}](user_aor)`, 'max_contacts=10', '',
+    );
+    const aep = appEndpointFor(u._id);
+    out.push(
+      `[${aep}](webrtc_user)`, `auth=${aep}`, `aors=${aep}`, `callerid=${cid}`,
+      `[${aep}](user_auth)`, `username=${aep}`, `password=${pw}`,
+      // one phone per user; a new registration replaces the old one
+      `[${aep}](user_aor)`, 'max_contacts=1', 'remove_existing=yes', '',
     );
     if (u.sip?.deskPhone) {
       const dep = deskEndpointFor(u._id);
@@ -144,7 +158,7 @@ function startPeriodicSync(intervalMs = 120000) {
   return t;
 }
 
-async function getCredentials(userId) {
+async function getCredentials(userId, device = 'web') {
   const u = await User.findById(userId).select('+sip.passwordEnc').lean();
   if (!u || !u.isActive || !CALL_ROLES.includes(u.role)) return null;
   if (!u.sip?.passwordEnc) {
@@ -154,7 +168,8 @@ async function getCredentials(userId) {
     if (!again?.sip?.passwordEnc) return null;
     u.sip = again.sip;
   }
-  return { username: endpointFor(u._id), password: open(u.sip.passwordEnc), displayName: u.name, deskPhone: !!u.sip.deskPhone };
+  const username = device === 'android' ? appEndpointFor(u._id) : endpointFor(u._id);
+  return { username, password: open(u.sip.passwordEnc), displayName: u.name, deskPhone: !!u.sip.deskPhone };
 }
 
 async function resetPassword(userId) {
@@ -163,6 +178,6 @@ async function resetPassword(userId) {
 }
 
 module.exports = {
-  CALL_ROLES, endpointFor, deskEndpointFor, userIdFromEndpoint,
+  CALL_ROLES, endpointFor, deskEndpointFor, appEndpointFor, userIdFromEndpoint, hasAndroidApp,
   renderPjsip, renderDialplan, ensureAccounts, syncNow, scheduleSync, startPeriodicSync, getCredentials, resetPassword,
 };

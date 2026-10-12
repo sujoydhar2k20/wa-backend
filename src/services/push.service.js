@@ -101,6 +101,8 @@ async function sendPushNotificationToUsers(userIds, payload) {
             data: fcmData,
             android: {
                 priority: 'high',
+                // calls: a late delivery must not ring a phone after the call is over
+                ...(payload.ttlSeconds ? { ttl: payload.ttlSeconds * 1000 } : {}),
             },
             tokens: allTokens,
         };

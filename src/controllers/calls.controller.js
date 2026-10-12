@@ -7,6 +7,7 @@ const permissions = require('../services/calls/permissions');
 const recordings = require('../services/calls/recordings');
 const flow = require('../services/calls/callFlow');
 const routing = require('../services/calls/routing');
+const callButton = require('../services/calls/callButton');
 
 async function loadChatForUser(req, res) {
   const chat = await Chat.findById(req.params.chatId);
@@ -22,8 +23,13 @@ async function mySip(req, res, next) {
   try {
     const cfg = callingConfig.get();
     if (!cfg.enabled) return res.json({ success: true, enabled: false });
-    const cred = await sip.getCredentials(req.user._id);
+    const device = req.query.device === 'android' ? 'android' : 'web';
+    const cred = await sip.getCredentials(req.user._id, device);
     if (!cred) return res.status(403).json({ success: false, error: 'Calling is not available for this user' });
+    if (device === 'android') {
+      const { User } = require('../models');
+      await User.updateOne({ _id: req.user._id }, { $set: { 'sip.androidAppAt': new Date() } });
+    }
     res.set('Cache-Control', 'no-store');
     res.json({
       success: true, enabled: true,
@@ -50,6 +56,7 @@ async function chatStatus(req, res, next) {
       permission: permissions.describe(perm),
       permissionRequest: routing.permissionValid(perm) ? { allowed: false, reason: 'Already allowed' } : routing.permissionRequestAllowed(p.requests || []),
       callingEnabledOnNumber: callingConfig.get().phoneNumberIds.includes(chat.phoneNumberId),
+      callButton: await callButton.status(chat),
     });
   } catch (e) { next(e); }
 }
@@ -62,6 +69,19 @@ async function requestPermission(req, res, next) {
       return res.status(400).json({ success: false, error: 'WhatsApp calling is not enabled on this business number.' });
     }
     const message = await permissions.requestPermission({ chat, user: req.user, bodyText: req.body?.text });
+    try { require('../websocket/socket.server').getIO().emit('message:new', { chatId: String(chat._id), message }); } catch (_) { /* ignore */ }
+    res.json({ success: true, message });
+  } catch (e) {
+    if (e.statusCode) return res.status(e.statusCode).json({ success: false, error: e.message });
+    next(e);
+  }
+}
+
+/** POST /api/calls/:chatId/send-call-button — body { text? }: interactive "Call on WhatsApp" button (24 h window only). */
+async function sendCallButton(req, res, next) {
+  try {
+    const chat = await loadChatForUser(req, res); if (!chat) return;
+    const message = await callButton.send({ chat, user: req.user, text: req.body?.text });
     try { require('../websocket/socket.server').getIO().emit('message:new', { chatId: String(chat._id), message }); } catch (_) { /* ignore */ }
     res.json({ success: true, message });
   } catch (e) {
@@ -169,4 +189,4 @@ async function streamRecording(req, res, next) {
   } catch (e) { next(e); }
 }
 
-module.exports = { declineCall, mySip, chatStatus, requestPermission, initiate, chatLogs, allLogs, recordingUrl, streamRecording };
+module.exports = { declineCall, mySip, chatStatus, requestPermission, sendCallButton, initiate, chatLogs, allLogs, recordingUrl, streamRecording };

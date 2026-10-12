@@ -15,6 +15,7 @@ router.post('/:callLogId/decline', calls.declineCall);
 router.get('/:chatId/status', calls.chatStatus);
 router.get('/:chatId/logs', calls.chatLogs);
 router.post('/:chatId/request-permission', calls.requestPermission);
+router.post('/:chatId/send-call-button', calls.sendCallButton);
 router.post('/:chatId/initiate', calls.initiate);
 
 module.exports = router;

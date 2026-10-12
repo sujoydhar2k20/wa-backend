@@ -95,3 +95,22 @@ describe('helpers', () => {
     expect(r.formatDuration(5)).toBe('0:05');
   });
 });
+
+describe('callButtonAllowed', () => {
+  const { callButtonAllowed } = require('../routing');
+  const now = new Date('2026-10-12T10:00:00Z');
+  test('allowed inside the 24 h window', () => {
+    const r = callButtonAllowed({ lastCustomerAt: new Date(now - 23 * 3600e3), now });
+    expect(r.ok).toBe(true);
+    expect(r.windowEndsAt.getTime()).toBe(now.getTime() + 3600e3);
+  });
+  test('refused after 24 h or with no customer contact', () => {
+    expect(callButtonAllowed({ lastCustomerAt: new Date(now - 24 * 3600e3), now }).ok).toBe(false);
+    expect(callButtonAllowed({ lastCustomerAt: null, now }).ok).toBe(false);
+  });
+  test('blocks a second send within 2 minutes', () => {
+    const lastCustomerAt = new Date(now - 3600e3);
+    expect(callButtonAllowed({ lastCustomerAt, lastSentAt: new Date(now - 60e3), now }).ok).toBe(false);
+    expect(callButtonAllowed({ lastCustomerAt, lastSentAt: new Date(now - 3 * 60e3), now }).ok).toBe(true);
+  });
+});

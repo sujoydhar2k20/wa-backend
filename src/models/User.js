@@ -20,6 +20,7 @@ const userSchema = new mongoose.Schema(
     sip: {
       passwordEnc: { type: String, select: false }, // AES-256-GCM, see services/calls/sipAccounts.js
       deskPhone: { type: Boolean, default: false },  // also create a TLS account for Linphone/desk phones
+      androidAppAt: { type: Date },                   // last time the Android app fetched its calling account
       createdAt: { type: Date },
     },
   },
