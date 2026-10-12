@@ -19,6 +19,11 @@
  *           (SDES, call button hidden, callback permission and other settings preserved), fetch the NEW
  *           password and write it straight into deploy/asterisk/.env (never printed), then verify.
  *           Without --yes it only shows what it would do.
+ *   node scripts/calling-sip-setup.js call-icon show|hide --phone <PHONE_NUMBER_ID> [--countries IN] [--yes]
+ *        -> GO-LIVE switch for the WhatsApp call button customers see in your chat / business profile.
+ *           show = DEFAULT (customers can call you any time), hide = DISABLE_ALL (only via the call
+ *           buttons you send). --countries IN limits the button to customers with Indian numbers.
+ *           Without --yes it only shows what it would do. Verifies the SIP password is unchanged.
  *   node scripts/calling-sip-setup.js sip-webhooks on|off --phone <PHONE_NUMBER_ID>
  *        -> turn Meta's SIP call webhooks (call_created / terminate) on or off. Changes nothing else;
  *           verifies afterwards that the SIP server and password are unchanged.
@@ -72,7 +77,7 @@ function writeSipPasswordToEnv(envFile, pw) {
 
 (async () => {
   const phoneId = opt('phone');
-  if (!cmd || !phoneId) fail('usage: node scripts/calling-sip-setup.js <status|enable|password|send-call-button|request-permission|disable|rotate-sip-password|sip-webhooks> --phone <PHONE_NUMBER_ID> [--host <sip host>] [--to <number>]');
+  if (!cmd || !phoneId) fail('usage: node scripts/calling-sip-setup.js <status|enable|password|send-call-button|request-permission|call-icon|disable|rotate-sip-password|sip-webhooks> --phone <PHONE_NUMBER_ID> [--host <sip host>] [--to <number>]');
 
   await connectDB();
   const waba = await Waba.findOne({ 'phoneNumbers.phoneNumberId': phoneId });
@@ -153,7 +158,8 @@ function writeSipPasswordToEnv(envFile, pw) {
         step2: {
           calling: {
             status: 'ENABLED',
-            call_icon_visibility: 'DISABLE_ALL',
+            // keep the customer call button as it is (hidden before go-live, shown after)
+            call_icon_visibility: before.call_icon_visibility || 'DISABLE_ALL',
             srtp_key_exchange_protocol: 'SDES',
             ...(keep.callback_permission_status ? { callback_permission_status: keep.callback_permission_status } : {}),
             sip: { status: 'ENABLED', webhook_delivery: before.sip?.webhook_delivery || 'DISABLED', servers: [{ hostname: host, port: 5061 }] },
@@ -199,7 +205,7 @@ function writeSipPasswordToEnv(envFile, pw) {
       }
       const checks = [
         ['calling.status', after.status, 'ENABLED'],
-        ['call_icon_visibility', after.call_icon_visibility, 'DISABLE_ALL'],
+        ['call_icon_visibility', after.call_icon_visibility, before.call_icon_visibility || 'DISABLE_ALL'],
         ['srtp_key_exchange_protocol', after.srtp_key_exchange_protocol, 'SDES'],
         ['sip.status', after.sip?.status, 'ENABLED'],
         ['sip.servers', (after.sip?.servers || []).map((sv) => `${sv.hostname}${sv.port ? `:${sv.port}` : ''}`).join(','), `${host}`],
@@ -218,6 +224,39 @@ function writeSipPasswordToEnv(envFile, pw) {
       }
       console.log(ok ? '\nRotation complete.' : '\nRotation done, but some values differ (see DIFF lines). Send these lines to Claude.');
       console.log('Next: cd deploy/asterisk && docker compose up -d --force-recreate   (Asterisk reads .env only when the container is created)');
+      break;
+    }
+
+    case 'call-icon': {
+      const mode = String(args[1] || '').toLowerCase();
+      if (!['show', 'hide'].includes(mode)) fail('usage: call-icon show|hide --phone <PHONE_NUMBER_ID> [--countries IN] [--yes]');
+      const sha = (v) => crypto.createHash('sha256').update(String(v || '')).digest('hex');
+      const getFull = async () => (await call('get', `/${phoneId}/settings`, token, undefined, { include_sip_credentials: true })).calling || {};
+      const before = await getFull();
+      if (before.status !== 'ENABLED') fail('Calling is not enabled on this number (run "enable" first)');
+      const target = mode === 'show' ? 'DEFAULT' : 'DISABLE_ALL';
+      const countries = (opt('countries') || '').split(',').map((c) => c.trim().toUpperCase()).filter(Boolean);
+      const body = { calling: { call_icon_visibility: target } };
+      if (mode === 'show' && countries.length) body.calling.call_icons = { restrict_to_user_countries: countries };
+      console.log(`call button now: ${before.call_icon_visibility || '(not reported)'}${before.call_icons?.restrict_to_user_countries?.length ? ` (countries ${before.call_icons.restrict_to_user_countries.join(',')})` : ''}`);
+      console.log(mode === 'show'
+        ? `-> SHOW the WhatsApp call button to customers${countries.length ? ` with numbers from ${countries.join(',')}` : ''}. They can then call you any time (calling hours are set in WhatsApp Manager).`
+        : '-> HIDE the call button. Customers can only call through call buttons you send.');
+      console.log('POST settings:', JSON.stringify(body));
+      if (!args.includes('--yes')) { console.log('\nDry run only. Re-run with --yes to apply.'); break; }
+      const pwBefore = (before.sip?.servers || []).map((sv) => sha(sv.sip_user_password));
+      console.log('result:', JSON.stringify(await call('post', `/${phoneId}/settings`, token, body)));
+      const after = await getFull();
+      const pwAfter = (after.sip?.servers || []).map((sv) => sha(sv.sip_user_password));
+      const same = JSON.stringify(pwBefore) === JSON.stringify(pwAfter);
+      console.log(`${after.call_icon_visibility === target ? 'OK  ' : 'DIFF'} call_icon_visibility: ${after.call_icon_visibility ?? '(not reported)'} (expected ${target})`);
+      console.log(`     calling.status=${after.status} sip.status=${after.sip?.status}`);
+      console.log(`SIP password unchanged: ${same ? 'YES' : 'NO'}`);
+      if (!same) {
+        const envFile = path.resolve(opt('env-file') || path.join(__dirname, '../deploy/asterisk/.env'));
+        console.log(`Meta issued a new SIP password: ${writeSipPasswordToEnv(envFile, after.sip.servers[0].sip_user_password)}`);
+        console.log('Apply it: cd deploy/asterisk && docker compose up -d --force-recreate');
+      }
       break;
     }
 

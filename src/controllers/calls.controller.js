@@ -8,6 +8,7 @@ const recordings = require('../services/calls/recordings');
 const flow = require('../services/calls/callFlow');
 const routing = require('../services/calls/routing');
 const callButton = require('../services/calls/callButton');
+const reports = require('../services/calls/reports');
 
 async function loadChatForUser(req, res) {
   const chat = await Chat.findById(req.params.chatId);
@@ -152,6 +153,31 @@ async function allLogs(req, res, next) {
   } catch (e) { next(e); }
 }
 
+/** GET /api/calls/reports?from=YYYY-MM-DD&to=YYYY-MM-DD&wabaId= — admins only. */
+async function callReport(req, res, next) {
+  try {
+    if (!routing.isAdmin(req.user)) return res.status(403).json({ success: false, error: 'Only admins can see call reports' });
+    const { from, to } = reports.parseRange(req.query);
+    const report = await reports.loadReport({ from, to, wabaId: req.query.wabaId || undefined });
+    res.set('Cache-Control', 'no-store');
+    res.json({ success: true, ...report });
+  } catch (e) { next(e); }
+}
+
+/** GET /api/calls/reports/export?from=&to=&wabaId= — CSV of every call in the range (admins only). */
+async function callReportCsv(req, res, next) {
+  try {
+    if (!routing.isAdmin(req.user)) return res.status(403).json({ success: false, error: 'Only admins can export call reports' });
+    const { from, to } = reports.parseRange(req.query);
+    const csv = await reports.loadCsv({ from, to, wabaId: req.query.wabaId || undefined });
+    const name = `whatsapp-calls-${reports.localDate(from)}-to-${reports.localDate(to)}.csv`;
+    res.set('Content-Type', 'text/csv; charset=utf-8');
+    res.set('Content-Disposition', `attachment; filename="${name}"`);
+    res.set('Cache-Control', 'no-store');
+    res.send(csv);
+  } catch (e) { next(e); }
+}
+
 async function canAccessCallLog(user, callLog) {
   if (routing.isAdmin(user)) return true;
   if ([callLog.answeredBy, callLog.initiatedBy].map(String).includes(String(user._id))) return true;
@@ -189,4 +215,4 @@ async function streamRecording(req, res, next) {
   } catch (e) { next(e); }
 }
 
-module.exports = { declineCall, mySip, chatStatus, requestPermission, sendCallButton, initiate, chatLogs, allLogs, recordingUrl, streamRecording };
+module.exports = { declineCall, mySip, chatStatus, requestPermission, sendCallButton, callReport, callReportCsv, initiate, chatLogs, allLogs, recordingUrl, streamRecording };

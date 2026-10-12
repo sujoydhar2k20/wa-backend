@@ -10,6 +10,8 @@ router.use(authenticate, requireAdminOrStaff);
 
 router.get('/me/sip', calls.mySip);
 router.get('/logs', calls.allLogs);
+router.get('/reports', calls.callReport);
+router.get('/reports/export', calls.callReportCsv);
 router.get('/:callLogId/recording-url', calls.recordingUrl);
 router.post('/:callLogId/decline', calls.declineCall);
 router.get('/:chatId/status', calls.chatStatus);

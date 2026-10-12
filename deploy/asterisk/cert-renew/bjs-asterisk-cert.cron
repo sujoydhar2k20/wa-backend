@@ -1,0 +1,3 @@
+# Install: cp bjs-asterisk-cert.cron /etc/cron.d/bjs-asterisk-cert && chmod 644 /etc/cron.d/bjs-asterisk-cert
+# Applies a renewed TLS certificate to Asterisk at 03:30 (see bjs-asterisk-deploy-hook.sh).
+30 3 * * * root [ -f /var/lib/bjs-calls/cert-renewed ] && cd /var/www/whats-app-backend/deploy/asterisk && docker compose up -d --force-recreate >> /var/log/bjs-asterisk/cert-reload.log 2>&1 && rm -f /var/lib/bjs-calls/cert-renewed
