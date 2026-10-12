@@ -1,6 +1,7 @@
 'use strict';
 
-const { Chat, CallLog } = require('../models');
+const { Chat, CallLog, CallEvent } = require('../models');
+const { logger } = require('../utils/logger');
 const callingConfig = require('../services/calls/config');
 const sip = require('../services/calls/sipAccounts');
 const permissions = require('../services/calls/permissions');
@@ -153,6 +154,25 @@ async function allLogs(req, res, next) {
   } catch (e) { next(e); }
 }
 
+/**
+ * POST /api/calls/client-event — the Android app / web panel reports a step of a call for diagnostics:
+ * { callLogId?, event: 'push_received'|'answer_tapped'|'registered'|'invite_received'|'connected'|'failed'|..., detail?, device }
+ * Privacy-safe: short codes only, no tokens or message content.
+ */
+async function clientEvent(req, res, next) {
+  try {
+    const event = String(req.body?.event || '');
+    if (!/^[a-z_]{2,40}$/.test(event)) return res.status(400).json({ success: false, error: 'Invalid event' });
+    const callLogId = /^[0-9a-f]{24}$/i.test(String(req.body?.callLogId || '')) ? req.body.callLogId : undefined;
+    const device = ['android', 'web'].includes(req.body?.device) ? req.body.device : 'android';
+    const detail = String(req.body?.detail || '').replace(/[^\w .:,;=+\-()/]/g, '').slice(0, 200) || undefined;
+    await CallEvent.create({ source: 'client', callLogId, event, detail, device, userId: req.user._id });
+    const line = `[calls][client] ${device} user=${req.user._id} calllog=${callLogId || '-'} ${event}${detail ? ` ${detail}` : ''}`;
+    if (event === 'failed' || event.endsWith('_error')) logger.warn(line); else logger.info(line);
+    res.json({ success: true });
+  } catch (e) { next(e); }
+}
+
 /** GET /api/calls/reports?from=YYYY-MM-DD&to=YYYY-MM-DD&wabaId= — admins only. */
 async function callReport(req, res, next) {
   try {
@@ -215,4 +235,4 @@ async function streamRecording(req, res, next) {
   } catch (e) { next(e); }
 }
 
-module.exports = { declineCall, mySip, chatStatus, requestPermission, sendCallButton, callReport, callReportCsv, initiate, chatLogs, allLogs, recordingUrl, streamRecording };
+module.exports = { clientEvent, declineCall, mySip, chatStatus, requestPermission, sendCallButton, callReport, callReportCsv, initiate, chatLogs, allLogs, recordingUrl, streamRecording };

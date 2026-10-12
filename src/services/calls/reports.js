@@ -45,7 +45,9 @@ function parseRange(query = {}, now = new Date()) {
  * users: { [userId]: name }
  */
 function buildReport({ calls, followUps = {}, users = {}, from, to }) {
-  const inbound = calls.filter((c) => c.direction === 'inbound' && c.status !== 'ringing');
+  // Customer calls WhatsApp refused before they reached us (payment, unsupported device...): counted apart
+  const failedAtMeta = calls.filter((c) => c.direction === 'inbound' && c.metadata?.failedAtMeta);
+  const inbound = calls.filter((c) => c.direction === 'inbound' && c.status !== 'ringing' && !c.metadata?.failedAtMeta);
   const outbound = calls.filter((c) => c.direction === 'outbound' && c.status !== 'ringing');
   const inAnswered = inbound.filter((c) => ANSWERED.has(c.status) && c.answeredAt);
   const inMissed = inbound.filter((c) => !(ANSWERED.has(c.status) && c.answeredAt));
@@ -70,7 +72,14 @@ function buildReport({ calls, followUps = {}, users = {}, from, to }) {
     avgTalkSeconds: avg(talk.filter((x) => x > 0)),
     missedFollowedUp: inMissed.filter((c) => followUps[String(c._id)]).length,
     missedNotFollowedUp: inMissed.filter((c) => !followUps[String(c._id)]).length,
+    failedAtWhatsApp: failedAtMeta.length,
   };
+  const failedReasons = {};
+  for (const c of failedAtMeta) {
+    const e = (c.meta?.errors || [])[0];
+    const key = e?.code ? `${e.code}${e.meaning ? ` · ${e.meaning}` : ''}` : 'Unknown (no error code from WhatsApp)';
+    failedReasons[key] = (failedReasons[key] || 0) + 1;
+  }
 
   // ---- per staff member
   const staff = new Map();
@@ -131,7 +140,7 @@ function buildReport({ calls, followUps = {}, users = {}, from, to }) {
   for (const c of inMissed) perHour[localHour(c.createdAt)].missed += 1;
 
   // ---- missed calls not followed up yet (newest first)
-  const notFollowedUp = inMissed
+  const notFollowedUp = [...inMissed, ...failedAtMeta]
     .filter((c) => !followUps[String(c._id)])
     .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
     .slice(0, 100)
@@ -142,9 +151,10 @@ function buildReport({ calls, followUps = {}, users = {}, from, to }) {
       contactName: c.metadata?.contactName || (c.waId ? `+${c.waId}` : 'Unknown'),
       at: c.createdAt,
       assignedTo: (c.metadata?.plan?.first || []).map((id) => users[String(id)] || 'Unknown'),
+      failedAtWhatsApp: !!c.metadata?.failedAtMeta,
     }));
 
-  return { range: { from, to }, totals, perStaff, perDay, perHour, notFollowedUp };
+  return { range: { from, to }, totals, failedReasons, perStaff, perDay, perHour, notFollowedUp };
 }
 
 /**
@@ -182,7 +192,7 @@ async function loadReport({ from, to, wabaId }) {
   const filter = { createdAt: { $gte: from, $lte: to } };
   if (wabaId) filter.wabaId = wabaId;
   const calls = await CallLog.find(filter)
-    .select('chatId wabaId waId direction status stage answeredBy initiatedBy duration startedAt answeredAt createdAt metadata.plan metadata.declinedBy metadata.contactName')
+    .select('chatId wabaId waId direction status stage answeredBy initiatedBy duration startedAt answeredAt createdAt meta.errors metadata.plan metadata.declinedBy metadata.contactName metadata.failedAtMeta')
     .lean();
   const missed = calls.filter((c) => c.direction === 'inbound' && c.status !== 'ringing' && !(ANSWERED.has(c.status) && c.answeredAt));
   const ids = new Set();
@@ -220,7 +230,7 @@ function toCsv(calls, users = {}) {
     const staffId = c.direction === 'inbound' ? c.answeredBy : c.initiatedBy;
     const answered = !!c.answeredAt;
     const result = c.direction === 'inbound'
-      ? (answered ? 'Answered' : 'Missed')
+      ? (c.metadata?.failedAtMeta ? `Failed at WhatsApp${c.meta?.errors?.[0]?.code ? ` (${c.meta.errors[0].code})` : ''}` : answered ? 'Answered' : 'Missed')
       : (c.status === 'blocked' ? 'Not allowed' : answered ? 'Connected' : 'Not answered');
     lines.push([
       fmtLocal(c.createdAt), c.direction === 'inbound' ? 'Incoming' : 'Outgoing', result,
@@ -236,7 +246,7 @@ async function loadCsv({ from, to, wabaId }) {
   const filter = { createdAt: { $gte: from, $lte: to }, status: { $ne: 'ringing' } };
   if (wabaId) filter.wabaId = wabaId;
   const calls = await CallLog.find(filter).sort({ createdAt: 1 }).limit(50000)
-    .select('waId direction status answeredBy initiatedBy duration startedAt answeredAt createdAt recording.status metadata.contactName').lean();
+    .select('waId direction status answeredBy initiatedBy duration startedAt answeredAt createdAt recording.status meta.errors metadata.contactName metadata.failedAtMeta').lean();
   const ids = [...new Set(calls.flatMap((c) => [c.answeredBy, c.initiatedBy]).filter(Boolean).map(String))];
   const users = Object.fromEntries((await User.find({ _id: { $in: ids } }).select('name').lean()).map((u) => [String(u._id), u.name]));
   return toCsv(calls, users);

@@ -9,6 +9,7 @@ router.get('/recordings/:callLogId', calls.streamRecording);
 router.use(authenticate, requireAdminOrStaff);
 
 router.get('/me/sip', calls.mySip);
+router.post('/client-event', calls.clientEvent);
 router.get('/logs', calls.allLogs);
 router.get('/reports', calls.callReport);
 router.get('/reports/export', calls.callReportCsv);

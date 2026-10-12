@@ -315,7 +315,21 @@ async function hangup({ callLogId, dialstatus, answeredtime, recfile, cause }) {
 
   const targets = callLog.direction === 'inbound' ? callLog.ringTargets : [callLog.initiatedBy];
   emitToUsers(targets, 'call:ended', payloadFor(callLog, { duration: callLog.duration, endReason: callLog.endReason }));
-  if (callLog.direction === 'inbound' && !wasAnswered) push((targets || []).map(String), { title: '', body: '', data: { type: 'call_ended', callLogId: String(callLog._id) }, ttlSeconds: 120 });
+  if (callLog.direction === 'inbound' && !wasAnswered) {
+    // Phones stop ringing and show "Missed WhatsApp call from <name>" (tap opens the chat).
+    // People who declined it get outcome 'declined' (no missed-call notification for them).
+    const declined = (callLog.metadata?.declinedBy || []).map(String);
+    const base = {
+      type: 'call_ended', callLogId: String(callLog._id), chatId: callLog.chatId ? String(callLog.chatId) : '',
+      waId: callLog.waId || '', contactName: callLog.metadata?.contactName || (callLog.waId ? `+${callLog.waId}` : 'WhatsApp caller'),
+      endedAt: Date.now(),
+    };
+    const all = (targets || []).map(String);
+    const missedTo = all.filter((id) => !declined.includes(id));
+    const declinedTo = all.filter((id) => declined.includes(id));
+    if (missedTo.length) push(missedTo, { title: '', body: '', data: { ...base, outcome: 'missed' }, ttlSeconds: 3600 });
+    if (declinedTo.length) push(declinedTo, { title: '', body: '', data: { ...base, outcome: 'declined' }, ttlSeconds: 120 });
+  }
 
   if (callLog.direction === 'inbound' && callLog.status === 'missed') await sendMissedCallMessage(callLog);
   if (!wasAnswered && recfile) recordings.discardRecording(recfile);

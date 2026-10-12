@@ -18,6 +18,8 @@ const calls = [
   { _id: '5', direction: 'outbound', status: 'terminated', waId: '913', initiatedBy: A, createdAt: t('2026-10-13T12:10:00Z'), answeredAt: t('2026-10-13T12:10:08Z'), duration: 40 },
   { _id: '6', direction: 'outbound', status: 'terminated', waId: '915', initiatedBy: A, createdAt: t('2026-10-13T12:20:00Z'), duration: 0 },
   { _id: '7', direction: 'outbound', status: 'blocked', waId: '916', initiatedBy: B, createdAt: t('2026-10-13T12:30:00Z'), duration: 0 },
+  // refused by WhatsApp before reaching us (no payment method)
+  { _id: '9', direction: 'inbound', status: 'failed', waId: '918', chatId: 'c9', createdAt: t('2026-10-13T12:50:00Z'), meta: { errors: [{ code: 131044, meaning: 'No valid payment method' }] }, metadata: { failedAtMeta: true, contactName: 'Chitra' } },
   // still ringing: ignored
   { _id: '8', direction: 'inbound', status: 'ringing', waId: '917', createdAt: t('2026-10-13T12:40:00Z') },
 ];
@@ -29,8 +31,9 @@ describe('call reports', () => {
     expect(r.totals).toMatchObject({
       inbound: 4, inboundAnswered: 2, inboundMissed: 2, answerRate: 50, avgSecondsToAnswer: 20, answeredWithin25s: 50,
       outbound: 3, outboundConnected: 1, outboundNotAnswered: 1, outboundBlocked: 1,
-      talkSeconds: 120, avgTalkSeconds: 40, missedFollowedUp: 1, missedNotFollowedUp: 1,
+      talkSeconds: 120, avgTalkSeconds: 40, missedFollowedUp: 1, missedNotFollowedUp: 1, failedAtWhatsApp: 1,
     });
+    expect(r.failedReasons).toEqual({ '131044 · No valid payment method': 1 });
   });
 
   test('per staff', () => {
@@ -53,8 +56,10 @@ describe('call reports', () => {
   });
 
   test('missed and not followed up list', () => {
-    expect(r.notFollowedUp).toHaveLength(1);
-    expect(r.notFollowedUp[0]).toMatchObject({ callLogId: '4', contactName: 'Bina', chatId: 'c4', assignedTo: [] });
+    expect(r.notFollowedUp).toHaveLength(2);
+    // newest first: Bina 13:00Z, Chitra 12:50Z
+    expect(r.notFollowedUp[0]).toMatchObject({ callLogId: '4', contactName: 'Bina', chatId: 'c4', assignedTo: [], failedAtWhatsApp: false });
+    expect(r.notFollowedUp[1]).toMatchObject({ callLogId: '9', contactName: 'Chitra', failedAtWhatsApp: true });
   });
 
   test('range parsing: IST days, default 7 days, swapped and capped', () => {
@@ -70,7 +75,7 @@ describe('call reports', () => {
   });
 
   test('CSV: IST time, results, formula-safe, Excel BOM', () => {
-    const csv = toCsv([calls[0], calls[3], calls[6], { ...calls[3], metadata: { contactName: '=HYPERLINK("x")' } }], users);
+    const csv = toCsv([calls[0], calls[3], calls[6], { ...calls[3], metadata: { contactName: '=HYPERLINK("x")' } }, calls[7]], users);
     expect(csv.charCodeAt(0)).toBe(0xfeff);
     const lines = csv.trim().split('\r\n');
     expect(lines[0]).toContain('Date (IST)');
@@ -78,5 +83,6 @@ describe('call reports', () => {
     expect(lines[2]).toContain('Incoming,Missed,Bina,"=""+914"""');
     expect(lines[3]).toContain('Outgoing,Not allowed');
     expect(lines[4]).toContain(`"'=HYPERLINK(""x"")"`);
+    expect(lines[5]).toContain('Failed at WhatsApp (131044)');
   });
 });
