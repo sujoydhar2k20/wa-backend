@@ -87,6 +87,9 @@ app.use(requestLogger);
 
 app.use('/api', routes);
 
+// Private Asterisk -> backend calls (loopback + shared secret only; see middleware/internalAuth.js)
+app.use('/internal/calls', require('./routes/internalCalls.routes'));
+
 app.use((req, res) => res.status(404).json({ success: false, message: 'Not found' }));
 app.use(errorHandler);
 

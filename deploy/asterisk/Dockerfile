@@ -40,12 +40,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates libedit2 libjansson4 libxml2 libuuid1 libsqlite3-0 libssl3 \
       libsrtp2-1 libcurl4 libopus0 libopusfile0 gettext-base procps tini \
     && rm -rf /var/lib/apt/lists/* \
-    && groupadd -r asterisk && useradd -r -g asterisk -d /var/lib/asterisk -s /usr/sbin/nologin asterisk
+    && groupadd -r -g 2000 asterisk && useradd -r -u 2000 -g 2000 -d /var/lib/asterisk -s /usr/sbin/nologin asterisk
 COPY --from=build /out/ /
-RUN mkdir -p /etc/asterisk-templates /var/lib/asterisk/certs /var/spool/asterisk/monitor /var/log/asterisk /var/run/asterisk \
+RUN mkdir -p /etc/asterisk-templates /etc/asterisk/generated /var/lib/asterisk/certs /var/spool/asterisk/monitor /var/log/asterisk /var/run/asterisk \
     && chown -R asterisk:asterisk /etc/asterisk /var/lib/asterisk /var/spool/asterisk /var/log/asterisk /var/run/asterisk
 COPY config/ /etc/asterisk-templates/
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod 755 /usr/local/bin/entrypoint.sh
+# Fixed uid/gid 2000: the backend writes generated/pjsip_users.conf owned by uid 2000, mode 600.
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
 CMD ["asterisk", "-f", "-U", "asterisk", "-G", "asterisk"]

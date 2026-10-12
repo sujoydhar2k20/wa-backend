@@ -19,6 +19,9 @@
  *           (SDES, call button hidden, callback permission and other settings preserved), fetch the NEW
  *           password and write it straight into deploy/asterisk/.env (never printed), then verify.
  *           Without --yes it only shows what it would do.
+ *   node scripts/calling-sip-setup.js sip-webhooks on|off --phone <PHONE_NUMBER_ID>
+ *        -> turn Meta's SIP call webhooks (call_created / terminate) on or off. Changes nothing else;
+ *           verifies afterwards that the SIP server and password are unchanged.
  */
 require('dotenv').config();
 const axios = require('axios');
@@ -69,7 +72,7 @@ function writeSipPasswordToEnv(envFile, pw) {
 
 (async () => {
   const phoneId = opt('phone');
-  if (!cmd || !phoneId) fail('usage: node scripts/calling-sip-setup.js <status|enable|password|send-call-button|request-permission|disable|rotate-sip-password> --phone <PHONE_NUMBER_ID> [--host <sip host>] [--to <number>]');
+  if (!cmd || !phoneId) fail('usage: node scripts/calling-sip-setup.js <status|enable|password|send-call-button|request-permission|disable|rotate-sip-password|sip-webhooks> --phone <PHONE_NUMBER_ID> [--host <sip host>] [--to <number>]');
 
   await connectDB();
   const waba = await Waba.findOne({ 'phoneNumbers.phoneNumberId': phoneId });
@@ -215,6 +218,30 @@ function writeSipPasswordToEnv(envFile, pw) {
       }
       console.log(ok ? '\nRotation complete.' : '\nRotation done, but some values differ (see DIFF lines). Send these lines to Claude.');
       console.log('Next: cd deploy/asterisk && docker compose up -d --force-recreate   (Asterisk reads .env only when the container is created)');
+      break;
+    }
+
+    case 'sip-webhooks': {
+      const mode = String(args[1] || '').toLowerCase();
+      if (!['on', 'off'].includes(mode)) fail('usage: sip-webhooks on|off --phone <PHONE_NUMBER_ID>');
+      const sha = (v) => crypto.createHash('sha256').update(String(v || '')).digest('hex');
+      const getFull = async () => (await call('get', `/${phoneId}/settings`, token, undefined, { include_sip_credentials: true })).calling || {};
+      const before = await getFull();
+      if (before.sip?.status !== 'ENABLED') fail('SIP is not enabled on this number');
+      const pwBefore = (before.sip.servers || []).map((sv) => sha(sv.sip_user_password));
+      const body = { calling: { sip: { webhook_delivery: mode === 'on' ? 'ENABLED' : 'DISABLED' } } };
+      console.log('POST settings:', JSON.stringify(body));
+      console.log('result:', JSON.stringify(await call('post', `/${phoneId}/settings`, token, body)));
+      const after = await getFull();
+      const pwAfter = (after.sip?.servers || []).map((sv) => sha(sv.sip_user_password));
+      const same = JSON.stringify(pwBefore) === JSON.stringify(pwAfter);
+      console.log(`sip.status=${after.sip?.status} webhook_delivery=${after.sip?.webhook_delivery ?? '(not reported)'} servers=${(after.sip?.servers || []).map((sv) => sv.hostname).join(',')}`);
+      console.log(`SIP password unchanged: ${same ? 'YES' : 'NO'}`);
+      if (!same) {
+        const envFile = path.resolve(opt('env-file') || path.join(__dirname, '../deploy/asterisk/.env'));
+        console.log(`Meta issued a new SIP password: ${writeSipPasswordToEnv(envFile, after.sip.servers[0].sip_user_password)}`);
+        console.log('Apply it: cd deploy/asterisk && docker compose up -d --force-recreate');
+      }
       break;
     }
 

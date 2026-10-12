@@ -1,6 +1,9 @@
 const User = require('../models/User');
 const Session = require('../models/Session');
 
+// Keep WhatsApp calling accounts on Asterisk in step with users (debounced; no-op if calling is disabled)
+const syncCallingAccounts = () => { try { require('./calls/sipAccounts').scheduleSync(); } catch (_) { /* calling optional */ } };
+
 async function list({ page, limit, role, wabaId, isActive }) {
   const filter = {};
   if (role) filter.role = role;
@@ -23,6 +26,7 @@ async function create(data) {
   const existing = await User.findOne({ phone });
   if (existing) throw Object.assign(new Error('Phone already registered'), { statusCode: 400 });
   const user = await User.create({ phone, role: role || 'staff', name, email, assignedWabaId: assignedWabaId || null });
+  syncCallingAccounts();
   return user.toObject();
 }
 
@@ -50,6 +54,7 @@ async function update(id, data, currentUser) {
   if (['admin', 'superadmin'].includes(currentUser.role) && wasActive && !user.isActive) {
     await Session.deleteMany({ userId: id });
   }
+  syncCallingAccounts();
   
   return user.toObject();
 }
@@ -63,6 +68,7 @@ async function remove(id) {
   
   // Delete the user from the database
   await User.findByIdAndDelete(id);
+  syncCallingAccounts();
   
   return { _id: id, deleted: true };
 }

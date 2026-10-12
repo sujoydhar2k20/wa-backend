@@ -26,5 +26,6 @@ module.exports = {
   AiSetting: require('./AiSetting'),
   AiCategory: require('./AiCategory'),
   CallLog: require('./CallLog'),
+  CallPermission: require('./CallPermission'),
   Notification: require('./Notification'),
 };

@@ -1,20 +1,19 @@
 const express = require('express');
 const router = express.Router();
-const callsController = require('../controllers/calls.controller');
-const { authenticate } = require('../middleware/auth.middleware');
+const calls = require('../controllers/calls.controller');
+const { authenticate, requireAdminOrStaff } = require('../middleware/auth.middleware');
 
-// All routes require authentication
-router.use(authenticate);
+// Signed-link playback (no Authorization header possible from <audio>); must be before authenticate
+router.get('/recordings/:callLogId', calls.streamRecording);
 
-// Get all call logs (admin view) — must be before :chatId routes
-router.get('/logs', callsController.getAllCallLogs);
+router.use(authenticate, requireAdminOrStaff);
 
-// Chat-specific call operations
-router.post('/:chatId/request-permission', callsController.requestPermission);
-router.post('/:chatId/initiate', callsController.initiateCall);
-router.get('/:chatId/logs', callsController.getChatCallLogs);
-
-// Call-specific operations
-router.post('/:callLogId/terminate', callsController.terminateCall);
+router.get('/me/sip', calls.mySip);
+router.get('/logs', calls.allLogs);
+router.get('/:callLogId/recording-url', calls.recordingUrl);
+router.get('/:chatId/status', calls.chatStatus);
+router.get('/:chatId/logs', calls.chatLogs);
+router.post('/:chatId/request-permission', calls.requestPermission);
+router.post('/:chatId/initiate', calls.initiate);
 
 module.exports = router;

@@ -4,14 +4,15 @@ services:
     build: .
     image: bjs-asterisk:22
     container_name: bjs-asterisk
-    # Host networking: SIP (5061/tcp) and RTP (10000-10999/udp by default) are used directly,
-    # which avoids Docker NAT problems with call audio.
+    # Host networking: SIP (5061/tcp), RTP (10000-10999/udp), and the localhost-only HTTP (8088,
+    # websocket for nginx) and AMI (5038) ports are used directly; avoids Docker NAT problems with audio.
     network_mode: host
     restart: unless-stopped
     env_file: .env
     volumes:
       - /etc/letsencrypt:/etc/letsencrypt:ro
       - /var/lib/bjs-calls/recordings:/var/spool/asterisk/monitor
+      - /var/lib/bjs-calls/asterisk:/etc/asterisk/generated
       - /var/log/bjs-asterisk:/var/log/asterisk
     logging:
       driver: json-file

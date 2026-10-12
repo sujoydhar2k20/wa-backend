@@ -12,6 +12,8 @@ async function start() {
   const server = http.createServer(app);
   initSocket(server);
   await initAgenda();
+  // WhatsApp calling: keep Asterisk staff accounts in sync with users (no-op unless CALLING_ENABLED=true)
+  require('./src/services/calls/sipAccounts').startPeriodicSync();
 
   server.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);

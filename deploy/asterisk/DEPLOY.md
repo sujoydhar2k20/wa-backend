@@ -1,122 +1,140 @@
-# Phase 1: WhatsApp calling test on +91 98740 85669 (Asterisk in Docker, SIP mode)
+# WhatsApp calling: deploy Phase 2 (Asterisk + backend routing)
 
-What this does: Meta sends WhatsApp calls for this number to Asterisk at `lk.biswakarmagold.com:5061`
-(TLS, SDES-encrypted Opus audio). Asterisk rings test softphones and records answered calls.
-Your Node backend, web panel, Android app, chats and broadcasts are NOT changed in this phase.
-The WhatsApp call button stays HIDDEN from customers; testers call through a button message.
+Phase 1 (SIP test with Linphone) is already running on the server. Phase 2 connects Asterisk to the
+Node backend: every admin/staff user gets their own calling account automatically, the backend decides
+who rings (assigned staff 25 s, then everyone 25 s), logs every call, adds call entries to chats, sends
+the missed-call message, tracks call permission and stores recordings for 1 year.
 
-Tested before delivery (simulated Meta, real Asterisk 22.11.0 image): TLS login, SDES + Opus,
-ring 1001 first then 1001-1003, recording with audio. Not testable without Meta: the real Meta leg.
+Nothing changes for customers yet: the WhatsApp call button stays hidden (DISABLE_ALL). The web panel and
+Android app screens come in Phases 3 and 4; until then you test with Linphone (per-user "desk" accounts).
+
+Everything below runs on the server as root. Keep your SSH session open.
 
 ---------------------------------------------------------------------------------------------
-## 0. Pre-checks (on the server, as root)
-
-    cd /var/www/whats-app-backend && git pull
-    apt install -y docker-compose-v2
-    docker compose version
-    ss -lntup | grep -E ':5061 |:1[0-9]{4} ' || echo "ports free"      # must print "ports free"
-
-## 1. TLS certificate for lk.biswakarmagold.com
-
-    certbot certonly --nginx -d lk.biswakarmagold.com      # if this errors, send me the output
-    ls /etc/letsencrypt/live/lk.biswakarmagold.com/        # fullchain.pem privkey.pem
-
-Restart Asterisk automatically when the certificate renews:
-
-    cat > /etc/letsencrypt/renewal-hooks/deploy/bjs-asterisk.sh <<'HOOK'
-    #!/bin/sh
-    case "$RENEWED_DOMAINS" in *lk.biswakarmagold.com*) docker restart bjs-asterisk ;; esac
-    HOOK
-    chmod 755 /etc/letsencrypt/renewal-hooks/deploy/bjs-asterisk.sh
-
-## 2. Firewall (adds rules only)
-
-    ufw allow 5061/tcp comment 'asterisk sip tls'
-    ufw allow 10000:10999/udp comment 'asterisk rtp'
-    ufw status | grep -E '5061|10000'
-
-If your hosting provider has its own firewall panel, open the same two there.
-
-## 3. Switch on calling + SIP in Meta (call button stays hidden)
+## 0. Checks (read-only)
 
     cd /var/www/whats-app-backend
-    node scripts/calling-sip-setup.js status  --phone 1244660898719753
-    node scripts/calling-sip-setup.js enable  --phone 1244660898719753 --host lk.biswakarmagold.com
-    node scripts/calling-sip-setup.js password --phone 1244660898719753
-Keep the printed META_SIP_PASSWORD for step 4. Do not paste it into chat.
-If `enable` fails, copy the error line (it has no secrets) and stop here.
+    grep -E '^PORT=' .env                       # backend port, used as BACKEND_URL below (default 3000)
+    ps -o user= -p "$(pgrep -f 'whats-app-backend.*server.js|server.js' | head -1)"   # should print root
+    getent hosts "$(hostname)" || echo "hostname does not resolve"
+    ss -lntp | grep -E ':8088 |:5038 ' || echo "8088/5038 free"
+    which ffmpeg
 
-## 4. Configure and start Asterisk
+- If the backend does **not** run as root, tell Claude before continuing (staff account file ownership).
+- If "hostname does not resolve": `echo "127.0.1.1 $(hostname)" >> /etc/hosts` (Asterisk needs it for WebRTC).
+
+## 1. Pull the code
+
+From your Mac (commit and push first, see the chat), then on the server:
+
+    cd /var/www/whats-app-backend && git pull
+    npm ci --omit=dev        # no new packages, but keeps node_modules in sync
+
+## 2. New secrets
+
+    openssl rand -hex 32     # -> CALLING_INTERNAL_SECRET
+    openssl rand -hex 32     # -> AMI secret
+
+Add to the **backend** `.env` (`/var/www/whats-app-backend/.env`):
+
+    CALLING_ENABLED=true
+    CALLING_PHONE_NUMBER_IDS=1244660898719753
+    CALLING_INTERNAL_SECRET=<first value>
+    ASTERISK_AMI_SECRET=<second value>
+    SIP_DOMAIN=lk.biswakarmagold.com
+    SIP_WSS_URL=wss://lk.biswakarmagold.com/ws
+    ASTERISK_GENERATED_DIR=/var/lib/bjs-calls/asterisk
+    CALL_RECORDINGS_DIR=/var/lib/bjs-calls/recordings
+
+Add to **Asterisk** `deploy/asterisk/.env` (keep the existing lines; you can delete the old
+EXT_1001/1002/1003_PASSWORD, EARLY_ANSWER and RING_* lines, they are no longer used):
+
+    BACKEND_URL=http://127.0.0.1:<PORT from step 0>
+    CALLING_INTERNAL_SECRET=<first value, same as backend>
+    AMI_SECRET=<second value, same as backend ASTERISK_AMI_SECRET>
+    DEVICE_WAIT_SECONDS=8
+
+## 3. Folders
+
+    mkdir -p /var/lib/bjs-calls/asterisk /var/lib/bjs-calls/recordings
+    chmod 750 /var/lib/bjs-calls/asterisk
+
+## 4. Restart the backend first (it writes the staff accounts)
+
+    pm2 restart whats-backend          # use your pm2 app name (pm2 ls)
+    pm2 logs whats-backend --lines 30 --nostream | grep -i calls
+    ls -l /var/lib/bjs-calls/asterisk  # pjsip_users.conf and extensions_users.conf, owner 2000, mode 600
+
+A line "accounts written but Asterisk reload failed (will retry)" is expected until step 5.
+
+## 5. Rebuild and restart Asterisk
 
     cd /var/www/whats-app-backend/deploy/asterisk
-    cp .env.example .env && chmod 600 .env
-    openssl rand -hex 16     # run 3 times, one password per extension
-    nano .env                # fill META_SIP_PASSWORD and EXT_1001/1002/1003_PASSWORD
-    mkdir -p /var/lib/bjs-calls/recordings /var/log/bjs-asterisk
-    docker compose up -d --build          # first build takes about 5-10 minutes
-    docker compose logs --tail 30
+    docker compose up -d --build --force-recreate      # rebuild takes about 5-10 minutes
+    docker compose logs --tail 40
+    docker exec bjs-asterisk asterisk -rx "pjsip show endpoints" | grep -c "Endpoint:  u"   # one per active admin/staff
+    docker exec bjs-asterisk asterisk -rx "http show status" | grep Bound                    # 127.0.0.1:8088
+    docker exec bjs-asterisk asterisk -rx "manager show users"                               # bjsbackend
 
-Checks:
+Within 2 minutes the backend log shows "calling accounts updated (N users), Asterisk reloaded".
 
-    docker exec bjs-asterisk asterisk -rx "pjsip show transports"     # transport-tls 0.0.0.0:5061
-    docker exec bjs-asterisk asterisk -rx "module show like srtp"     # res_srtp Running
-    docker exec bjs-asterisk asterisk -rx "pjsip show endpoints"      # 1001 1002 1003 whatsapp
-    openssl s_client -quiet -verify_hostname lk.biswakarmagold.com -connect lk.biswakarmagold.com:5061 </dev/null
-        # must show "verify return:1" for every line and no "hostname mismatch"
+## 6. nginx: websocket for the web panel / Android app (new site file only)
 
-## 5. Test softphone (Linphone, free: linphone.org) on a phone or computer
+    cp nginx-lk.conf /etc/nginx/sites-available/lk.biswakarmagold.com
+    ln -s /etc/nginx/sites-available/lk.biswakarmagold.com /etc/nginx/sites-enabled/
+    nginx -t && systemctl reload nginx        # reload ONLY if the test says ok
+    curl -s -o /dev/null -w '%{http_code}\n' -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
+      -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGVzdA==' -H 'Sec-WebSocket-Protocol: sip' \
+      https://lk.biswakarmagold.com/ws        # 101 = websocket works
 
-Add a SIP account:
-- Username `1001`, password = EXT_1001_PASSWORD, domain `lk.biswakarmagold.com`
-- Transport **TLS**; SIP server `sip:lk.biswakarmagold.com;transport=tls`
-- Disable ICE; Encryption **SRTP-SDES**, mandatory; enable all audio codecs (Opus first)
-Status should turn green. Dial **600**: you hear a prompt, then your own voice (echo test).
-Optionally set up 1002 on a second device to test "ring everyone".
+## 7. Meta: switch on SIP call webhooks (informational: Meta's call id, duration, errors)
 
-## 6. Test calls (note the time of each, and the result)
+    cd /var/www/whats-app-backend
+    node scripts/calling-sip-setup.js sip-webhooks on --phone 1244660898719753
+    # must print "SIP password unchanged: YES"
 
-Use a personal WhatsApp number (not the business number) as the "customer".
+## 8. Linphone test accounts (per user)
 
-| # | Test | How | Expected |
-|---|------|-----|----------|
-| A | Customer calls in | Send the business number any message from the tester, then run `node scripts/calling-sip-setup.js send-call-button --phone 1244660898719753 --to 91XXXXXXXXXX` and tap the button | 1001 rings; answer; both sides hear each other |
-| B | Fallback ring | Repeat A, don't answer 1001 for 25 s | after 25 s, 1001-1003 ring together |
-| C | Nobody answers | Repeat A, answer nothing | note after how many seconds the tester's call ends (Meta's limit) |
-| D | Long call | Repeat A, talk 2+ minutes | no drop at about 32 s, audio stays both ways |
-| E | Business calls customer | `node scripts/calling-sip-setup.js request-permission --phone 1244660898719753 --to 91XXXXXXXXXX`, tester taps Allow, then dial `91XXXXXXXXXX` from Linphone | tester's WhatsApp rings; answer; audio both ways |
-| F | Recording | after A/E | `ls -R /var/lib/bjs-calls/recordings` shows wav files that play correctly |
+For each user who will test with Linphone (use their login phone number from the panel):
 
-Optional G: set `EARLY_ANSWER=yes` in .env, `docker compose up -d`, repeat B and C. The customer's
-call connects at once and hears ringing while staff are rung (no Meta time limit), but the call
-then never shows as "missed" on the customer's phone. We decide in Phase 2 which behaviour to keep.
+    cd /var/www/whats-app-backend
+    node scripts/calling-desk-phone.js on --phone <user login phone>
 
-Logs for anything that fails (send me the output; it contains no passwords):
+It prints that user's Linphone username (`u<userId>-desk`) and password on the server terminal only.
+Linphone: same settings as Phase 1 (TLS, SIP server `sip:lk.biswakarmagold.com;transport=tls`, ICE off,
+SRTP-SDES mandatory). Do not paste passwords into chat. Remove later with `... off --phone ...`.
 
+## 9. Tests (note the time of each)
+
+| # | Test | Expected |
+|---|------|----------|
+| A | Customer whose chat is **assigned** to a tester calls (send the call button: `node scripts/calling-sip-setup.js send-call-button --phone 1244660898719753 --to 91XXXXXXXXXX`) | only the assigned tester rings for 25 s, then everyone with a registered device |
+| B | Answer it | chat shows "📞 Incoming WhatsApp call · m:ss · answered by <name>"; a few seconds after hang-up `GET /api/calls/<callLogId>/recording-url` works |
+| C | Call again, nobody answers | after ~50 s: chat shows "📞 Missed WhatsApp call" and the customer receives the missed-call message with the **Call on WhatsApp** button (once per 30 min) |
+| D | Linphone of a staff member **not** assigned to the chat dials `chat-<chatId>` | refused (log: WA-OUTBOUND-DENIED ... assigned to you) |
+| E | Assigned tester dials `chat-<chatId>` before the customer allowed calls | refused ("not allowed WhatsApp calls") |
+| F | Ask permission: `POST /api/calls/<chatId>/request-permission` (or the script `request-permission`), customer taps Allow, then dial `chat-<chatId>` again | customer's WhatsApp rings; chat shows "Customer allowed WhatsApp calls" and later the outgoing call entry |
+| G | Deactivate a test user in the panel | within 2 min their account disappears from `pjsip show endpoints` |
+
+Useful logs (no passwords in them):
+
+    pm2 logs whats-backend --lines 200 --nostream | grep '\[calls\]'
     grep -E "WA-|ERROR|WARNING" /var/log/bjs-asterisk/messages.log | tail -50
 
-Detailed SIP trace for one test call:
+## Rollback
 
-    docker exec bjs-asterisk asterisk -rx "pjsip set logger on"
-    # make the call, then:
-    docker exec bjs-asterisk asterisk -rx "pjsip set logger off"
-    docker logs bjs-asterisk 2>&1 | tail -400 > /tmp/sip-trace.txt   # contains phone numbers; share privately
+- Pause calling for customers (no Asterisk change needed):
+  `node scripts/calling-sip-setup.js disable --phone 1244660898719753`
+- Back to Phase 1 code: `git checkout <phase-1 commit> -- deploy/asterisk && docker compose up -d --build --force-recreate`,
+  set `CALLING_ENABLED=false` in the backend .env and `pm2 restart whats-backend`.
+- Remove the nginx site: `rm /etc/nginx/sites-enabled/lk.biswakarmagold.com && nginx -t && systemctl reload nginx`.
 
-## 7. Between test sessions / rollback
-
-Pause calling (number goes back to today's state, Asterisk can keep running):
-
-    node scripts/calling-sip-setup.js disable --phone 1244660898719753
-
-Full removal:
-
-    cd /var/www/whats-app-backend/deploy/asterisk && docker compose down && docker rmi bjs-asterisk:22
-    ufw delete allow 5061/tcp && ufw delete allow 10000:10999/udp
-    rm /etc/letsencrypt/renewal-hooks/deploy/bjs-asterisk.sh
-    # recordings stay in /var/lib/bjs-calls/recordings until you delete them
-
-## Notes
-- Meta is recognised only by its published IP ranges (config/pjsip.conf). If a real test call never
-  reaches Asterisk, the log will show "No matching endpoint" with the source IP; send it to me.
-- Port 5061 is open to the internet for staff phones; extension passwords must stay long and random.
-- Recordings are 8 kHz WAV (about 57 MB per hour of talk). Phase 2 converts and links them to chats,
-  and adds 1-year cleanup.
+## What changed in Asterisk (for reference)
+- Test extensions 1001-1003 removed; staff accounts come from `/var/lib/bjs-calls/asterisk/pjsip_users.conf`
+  (written by the backend, mode 600, uid 2000 = the container's asterisk user).
+- New websocket transport (HTTP server on 127.0.0.1:8088, only reachable through nginx `/ws`).
+- AMI on 127.0.0.1:5038 (backend only, used to reload accounts).
+- Dialplan asks the backend (`/internal/calls/*`, loopback + shared secret) who to ring, reports answer and
+  hang-up, and checks every outgoing call. If the backend is down, incoming calls still ring everyone.
+- If no device of a stage is online, Asterisk waits up to DEVICE_WAIT_SECONDS (8) for one (e.g. a phone
+  woken by push) before moving on.

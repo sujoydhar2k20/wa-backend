@@ -16,6 +16,12 @@ const userSchema = new mongoose.Schema(
     profilePicture: { type: String, default: null },
     primaryChannel: { type: String, default: null },
     fcmTokens: { type: [String], default: [] },
+    // WhatsApp calling account on the PBX (Asterisk). Created automatically for active users.
+    sip: {
+      passwordEnc: { type: String, select: false }, // AES-256-GCM, see services/calls/sipAccounts.js
+      deskPhone: { type: Boolean, default: false },  // also create a TLS account for Linphone/desk phones
+      createdAt: { type: Date },
+    },
   },
   { timestamps: true }
 );

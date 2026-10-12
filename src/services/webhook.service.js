@@ -362,6 +362,19 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
                         title: interactive.button_reply.title
                     }
                 };
+            } else if (interactive.type === 'call_permission_reply' && interactive.call_permission_reply) {
+                // Customer allowed/declined WhatsApp calls from the business (or allowed automatically by calling us)
+                const reply = interactive.call_permission_reply;
+                const accepted = String(reply.response).toLowerCase() === 'accept';
+                messageData.text = accepted
+                    ? `📞 Customer allowed WhatsApp calls${reply.is_permanent ? ' (permanently)' : ''}`
+                    : '📞 Customer declined WhatsApp calls';
+                messageData.metadata = { kind: 'call_permission_reply', call_permission_reply: reply };
+                try {
+                    await require('./calls/permissions').recordReply({ wabaId: waba._id, phoneNumberId, waId, reply });
+                } catch (permErr) {
+                    logger.error(`Failed to record call permission reply from ${waId}: ${permErr.message}`);
+                }
             } else if (interactive.type === 'list_reply' && interactive.list_reply) {
                 messageData.text = interactive.list_reply.title;
                 messageData.metadata = {

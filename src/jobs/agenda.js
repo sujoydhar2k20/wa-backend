@@ -42,12 +42,14 @@ async function initAgenda() {
   require('./bulkSend.jobs')(agenda);
   require('./mediaCleanup.jobs')(agenda);
   require('./bot.jobs')(agenda);
+  require('./calls.jobs')(agenda);
 
   // 2. Start agenda processing queue
   await agenda.start();
 
   // 3. Schedule recurring/interval jobs
   await agenda.every('24 hours', 'cleanup-expired-media');
+  await agenda.every('24 hours', 'cleanup-old-calls');
 
   return agenda;
 }
