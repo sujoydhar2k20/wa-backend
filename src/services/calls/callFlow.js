@@ -143,11 +143,15 @@ async function inboundRoute({ uniqueid, wacid, from, to }) {
   return ['ok', callLog._id, firstEps.join('~'), plan.first ? plan.first.seconds : 0, allEps.join('~'), plan.all.seconds].join('|');
 }
 
-/** Asterisk: stage 1 (assigned staff) finished without answer, now ringing everyone. */
+/**
+ * Asterisk: stage 1 (assigned staff) finished without answer, now ringing everyone.
+ * Returns "ok|<endpoints ~ separated>": everyone in the plan except users who declined this call.
+ */
 async function stageAll({ callLogId }) {
   const callLog = await CallLog.findById(callLogId);
-  if (!callLog || callLog.status !== 'ringing') return 'ok';
-  const allIds = (callLog.metadata?.plan?.all || []).map(String);
+  if (!callLog || callLog.status !== 'ringing') return 'ok|';
+  const declined = (callLog.metadata?.declinedBy || []).map(String);
+  const allIds = (callLog.metadata?.plan?.all || []).map(String).filter((id) => !declined.includes(id));
   callLog.stage = 'all';
   callLog.ringTargets = Array.from(new Set([...(callLog.ringTargets || []).map(String), ...allIds]));
   await callLog.save();
@@ -155,7 +159,46 @@ async function stageAll({ callLogId }) {
   const notice = payloadFor(callLog, { contactName: callLog.metadata?.contactName, stage: 'all', ringSeconds: callingConfig.get().ringAllSeconds });
   emitToUsers(allIds, 'call:incoming', notice);
   push(fresh, { title: 'Incoming WhatsApp call', body: `${notice.contactName || 'A customer'} is calling`, data: { type: 'incoming_call', ...notice } });
-  return 'ok';
+  const eps = await endpointsForUsers(allIds);
+  return `ok|${eps.join('~')}`;
+}
+
+/**
+ * A staff member declined a ringing call (web/app). Stops ringing on all of that user's devices.
+ * If they were the assigned staff member in stage 1, Asterisk moves on to ringing everyone at once;
+ * a user who declined is not rung again for this call.
+ */
+async function decline({ callLogId, user }) {
+  const callLog = await CallLog.findById(callLogId);
+  if (!callLog || callLog.direction !== 'inbound') return { ok: false, status: 404, error: 'Call not found' };
+  if (callLog.status !== 'ringing') return { ok: true, alreadyEnded: true };
+  const uid = String(user._id);
+  const targeted = [...(callLog.ringTargets || []), ...(callLog.metadata?.plan?.all || [])].map(String).includes(uid);
+  if (!targeted) return { ok: false, status: 403, error: 'This call is not ringing for you' };
+  await CallLog.updateOne({ _id: callLog._id }, { $addToSet: { 'metadata.declinedBy': user._id } });
+  emitToUsers([uid], 'call:dismissed', { callLogId: String(callLog._id), reason: 'declined' });
+  let hungUp = 0;
+  try {
+    hungUp = await hangupUserLegs(uid);
+  } catch (e) {
+    logger.error(`[calls] decline: could not stop ringing for ${uid}: ${e.message}`);
+  }
+  logger.info(`[calls] ${user.name || uid} declined ${callLog._id} (stage ${callLog.stage}, ${hungUp} device legs stopped)`);
+  return { ok: true, stoppedDevices: hungUp };
+}
+
+/** Hang up every ringing Asterisk channel of this user's devices (PJSIP/u<id>-..., PJSIP/u<id>-desk-...). */
+async function hangupUserLegs(userId) {
+  const cfg = callingConfig.get();
+  const { amiCommand } = require('./ami');
+  const out = await amiCommand(cfg.ami, 'core show channels concise');
+  const ep = sip.endpointFor(userId);
+  const names = out.split('\n').map((l) => l.split('!')[0]).filter((n) => n.startsWith(`PJSIP/${ep}-`));
+  for (const n of names) {
+    if (!/^PJSIP\/u[0-9a-f]{24}(-desk)?-[0-9a-f]+$/.test(n)) continue;
+    await amiCommand(cfg.ami, `channel request hangup ${n}`);
+  }
+  return names.length;
 }
 
 // ---------- answered (both directions) ----------
@@ -328,7 +371,7 @@ async function authorizeOutbound({ endpoint, target, uniqueid }) {
 }
 
 module.exports = {
-  inboundRoute, stageAll, answered, hangup, authorizeOutbound, outboundBlockReason,
+  inboundRoute, stageAll, decline, answered, hangup, authorizeOutbound, outboundBlockReason,
   // exported for tests
   _internals: { findWabaForNumber, ensureContactAndChat, busyUserIds, createChatEntry, sendMissedCallMessage, resolveOutboundChat },
 };

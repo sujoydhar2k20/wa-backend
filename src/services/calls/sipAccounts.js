@@ -55,7 +55,7 @@ function renderPjsip(users) {
     out.push(
       `[${ep}](webrtc_user)`, `auth=${ep}`, `aors=${ep}`, `callerid=${cid}`,
       `[${ep}](user_auth)`, `username=${ep}`, `password=${pw}`,
-      `[${ep}](user_aor)`, '',
+      `[${ep}](user_aor)`, 'max_contacts=10', '',
     );
     if (u.sip?.deskPhone) {
       const dep = deskEndpointFor(u._id);

@@ -83,7 +83,7 @@ Within 2 minutes the backend log shows "calling accounts updated (N users), Aste
     cp nginx-lk.conf /etc/nginx/sites-available/lk.biswakarmagold.com
     ln -s /etc/nginx/sites-available/lk.biswakarmagold.com /etc/nginx/sites-enabled/
     nginx -t && systemctl reload nginx        # reload ONLY if the test says ok
-    curl -s -o /dev/null -w '%{http_code}\n' -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
+    curl -s -o /dev/null -w '%{http_code}\n' --http1.1 --max-time 3 -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
       -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGVzdA==' -H 'Sec-WebSocket-Protocol: sip' \
       https://lk.biswakarmagold.com/ws        # 101 = websocket works
 

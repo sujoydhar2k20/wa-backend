@@ -62,6 +62,7 @@ describe('generated Asterisk accounts', () => {
     expect(conf).toContain('[u64b7f0000000000000000001-desk](desk_user)');
     expect(conf).not.toContain('[u64b7f0000000000000000002-desk]');
     expect(conf).toContain('password=pw2');
+    expect(conf).toContain('[u64b7f0000000000000000002](user_aor)\nmax_contacts=10');
     expect(conf).toContain('callerid="Rina Boss x" <u64b7f0000000000000000001>');
     expect(conf).not.toMatch(/Rina "Boss"; x/);
   });

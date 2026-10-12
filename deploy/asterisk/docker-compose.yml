@@ -14,6 +14,8 @@ services:
       - /var/lib/bjs-calls/recordings:/var/spool/asterisk/monitor
       - /var/lib/bjs-calls/asterisk:/etc/asterisk/generated
       - /var/log/bjs-asterisk:/var/log/asterisk
+      # Config templates from this folder: config changes need only `docker compose up -d --force-recreate`
+      - ./config:/etc/asterisk-templates:ro
     logging:
       driver: json-file
       options: { max-size: "20m", max-file: "5" }

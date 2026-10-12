@@ -80,6 +80,15 @@ async function initiate(req, res, next) {
   } catch (e) { next(e); }
 }
 
+/** POST /api/calls/:callLogId/decline — stop ringing on all my devices (assigned staff: everyone rings now). */
+async function declineCall(req, res, next) {
+  try {
+    const r = await flow.decline({ callLogId: req.params.callLogId, user: req.user });
+    if (!r.ok) return res.status(r.status || 400).json({ success: false, error: r.error });
+    res.json({ success: true, ...r });
+  } catch (e) { next(e); }
+}
+
 const LOG_POPULATE = [
   { path: 'answeredBy', select: 'name' },
   { path: 'initiatedBy', select: 'name' },
@@ -156,4 +165,4 @@ async function streamRecording(req, res, next) {
   } catch (e) { next(e); }
 }
 
-module.exports = { mySip, chatStatus, requestPermission, initiate, chatLogs, allLogs, recordingUrl, streamRecording };
+module.exports = { declineCall, mySip, chatStatus, requestPermission, initiate, chatLogs, allLogs, recordingUrl, streamRecording };

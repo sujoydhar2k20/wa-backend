@@ -11,6 +11,7 @@ router.use(authenticate, requireAdminOrStaff);
 router.get('/me/sip', calls.mySip);
 router.get('/logs', calls.allLogs);
 router.get('/:callLogId/recording-url', calls.recordingUrl);
+router.post('/:callLogId/decline', calls.declineCall);
 router.get('/:chatId/status', calls.chatStatus);
 router.get('/:chatId/logs', calls.chatLogs);
 router.post('/:chatId/request-permission', calls.requestPermission);

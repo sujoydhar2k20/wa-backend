@@ -19,6 +19,13 @@ session.on('icecandidate', (e) => { if (!readyTimer) readyTimer = setTimeout(() 
 session.answer({ mediaConstraints: { audio: true, video: false } });
 ```
 
+Every open tab / device registers separately (up to 10 per user) and every one of them rings.
+Incoming INVITEs to staff carry the header `X-BJS-CallLog: <callLogId>` to match them with socket events.
+
+**Decline:** `POST /api/calls/:callLogId/decline` stops ringing on all of the user's tabs/devices. If the user
+is the assigned staff member (first 25 s), everyone else is rung at once; a user who declined is not rung
+again for that call. Emits `call:dismissed` to the user's other tabs.
+
 ## 2. Calling a customer
 1. `GET /api/calls/:chatId/status` → `{ canCall, reason, dialTarget, permission: {status: granted|expired|declined|none, expiresAt}, permissionRequest: {ok|allowed, reason} }`
    - green button: `canCall === true`
@@ -35,6 +42,7 @@ Rules: staff only chats assigned to them; admins/superadmins any chat; customer 
 |---|---|---|
 | `call:incoming` | a customer is calling; stage `assigned` (assigned staff, 25 s) or `all` | `callLogId, chatId, waId, contactName, wabaName, stage, ringSeconds` |
 | `call:answered` | someone answered (others stop ringing UI) | `callLogId, answeredBy {id,name}` |
+| `call:dismissed` | you declined in another tab | `callLogId, reason` |
 | `call:ended` | call finished (answered, missed, failed) | `callLogId, status, duration, endReason` |
 | `call:outgoing` | your outgoing call was authorised | `callLogId, chatId` |
 | `call:blocked` | your outgoing call was refused | `chatId, reason` |
