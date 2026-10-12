@@ -1,0 +1,18 @@
+# WhatsApp calling PBX (Asterisk). Run from this folder:  docker compose up -d --build
+services:
+  asterisk:
+    build: .
+    image: bjs-asterisk:22
+    container_name: bjs-asterisk
+    # Host networking: SIP (5061/tcp) and RTP (10000-10999/udp by default) are used directly,
+    # which avoids Docker NAT problems with call audio.
+    network_mode: host
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+      - /var/lib/bjs-calls/recordings:/var/spool/asterisk/monitor
+      - /var/log/bjs-asterisk:/var/log/asterisk
+    logging:
+      driver: json-file
+      options: { max-size: "20m", max-file: "5" }
