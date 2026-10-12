@@ -161,6 +161,10 @@ async function streamRecording(req, res, next) {
     const file = callLog?.recording?.path && recordings.resolveFile(callLog.recording.path);
     if (!file) return res.status(404).json({ success: false, error: 'Recording not found' });
     res.set('Cache-Control', 'private, max-age=3600');
+    // The web panel (chat.biswakarmagold.com) plays this in an <audio> element (no-cors); Helmet's default
+    // Cross-Origin-Resource-Policy: same-origin makes the browser drop it. 'same-site' is not reliable either
+    // (Chromium refused it in testing), and access is already guarded by the signed, expiring token in the URL.
+    res.set('Cross-Origin-Resource-Policy', 'cross-origin');
     res.sendFile(file);
   } catch (e) { next(e); }
 }

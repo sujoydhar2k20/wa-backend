@@ -57,9 +57,17 @@ async function processRecording(callLogId, relWav) {
       await CallLog.updateOne({ _id: callLogId }, { $set: { 'recording.status': 'none' }, $unset: { 'recording.path': '' } });
       return;
     }
-    const relOut = rel.replace(/\.wav$/i, '.m4a');
-    const out = abs(relOut);
-    const r = await ffmpeg(['-y', '-loglevel', 'error', '-i', wav, '-ac', '1', '-c:a', 'aac', '-b:a', '32k', '-movflags', '+faststart', out]);
+    // MP3 plays in every browser (Chrome/Chromium builds without AAC, Firefox on Linux, iOS Safari).
+    // If this ffmpeg has no MP3 encoder, fall back to AAC (.m4a).
+    let relOut = rel.replace(/\.wav$/i, '.mp3');
+    let out = abs(relOut);
+    let r = await ffmpeg(['-y', '-loglevel', 'error', '-i', wav, '-ac', '1', '-c:a', 'libmp3lame', '-b:a', '32k', out]);
+    if (!r.ok) {
+      try { if (fs.existsSync(out)) fs.unlinkSync(out); } catch (_) { /* ignore */ }
+      relOut = rel.replace(/\.wav$/i, '.m4a');
+      out = abs(relOut);
+      r = await ffmpeg(['-y', '-loglevel', 'error', '-i', wav, '-ac', '1', '-c:a', 'aac', '-b:a', '32k', '-movflags', '+faststart', out]);
+    }
     if (!r.ok) {
       logger.warn(`[calls] recording conversion failed for ${callLogId}, keeping WAV: ${r.err.trim().slice(-300)}`);
       await CallLog.updateOne({ _id: callLogId }, { $set: { 'recording.status': 'ready', 'recording.sizeBytes': size } });
