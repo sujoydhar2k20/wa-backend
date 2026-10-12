@@ -1029,6 +1029,7 @@ async function startWithPhone(req, res, next) {
 }
 
 module.exports = {
+    bulkAssignRandom,
     list,
     search,
     get,
@@ -1047,3 +1048,73 @@ module.exports = {
     toggleDnd,
     startWithPhone,
 };
+
+/**
+ * POST /chats/bulk-assign-random   (admin / superadmin only — enforced in the service as well)
+ * Body: { wabaId?, status?, tagId?, isUnread?, isWaiting?, dryRun?, confirm?, expectedCount?, requestId? }
+ * The chat set is re-evaluated on the server (the browser never sends chat ids).
+ */
+async function bulkAssignRandom(req, res, next) {
+    try {
+        const { bulkAssignRandom: run, BulkAssignError } = require('../services/bulkAssign.service');
+        const { User } = require('../models');
+        const { getMonthlyTagId } = require('../utils/tag');
+        const mongoose = require('mongoose');
+        const { wabaId, status, tagId, isUnread, isWaiting, dryRun, confirm, expectedCount, requestId } = req.body || {};
+
+        const isId = (v) => typeof v === 'string' && mongoose.isValidObjectId(v);
+        const filter = {};
+        if (wabaId !== undefined && wabaId !== '') {
+            if (!isId(wabaId)) return res.status(400).json({ success: false, message: 'Invalid wabaId' });
+            filter.wabaId = wabaId;
+        }
+        if (status !== undefined && status !== '') {
+            if (!['open', 'closed', 'awaiting_reply'].includes(status)) return res.status(400).json({ success: false, message: 'Invalid status' });
+            filter.status = status;
+        }
+        if (tagId !== undefined && tagId !== '') {
+            if (!isId(tagId)) return res.status(400).json({ success: false, message: 'Invalid tagId' });
+            filter.tags = tagId;
+        }
+        if (isUnread !== undefined) filter.isUnread = isUnread === true || isUnread === 'true';
+        if (isWaiting === true || isWaiting === 'true') {
+            filter.$or = [
+                { lastStaffMessageAt: null },
+                { $expr: { $gt: ['$lastCustomerMessageAt', '$lastStaffMessageAt'] } },
+            ];
+            if (!filter.status) filter.status = { $ne: 'closed' };
+        }
+
+        const isDry = dryRun === true || dryRun === 'true';
+        if (!isDry && confirm !== true) {
+            return res.status(400).json({ success: false, code: 'CONFIRMATION_REQUIRED', message: 'Explicit confirmation is required.' });
+        }
+        const expected = expectedCount === undefined ? undefined : Number(expectedCount);
+        if (expected !== undefined && (!Number.isInteger(expected) || expected < 1)) {
+            return res.status(400).json({ success: false, message: 'Invalid expectedCount' });
+        }
+
+        const result = await run(
+            { Chat, User, ChatActivity, getMonthlyTagId, logger },
+            { actor: req.user, filter, dryRun: isDry, expectedCount: expected, requestId: typeof requestId === 'string' ? requestId.slice(0, 80) : undefined }
+        );
+
+        if (!isDry && result.assigned > 0 && !result.duplicateRequest) {
+            try {
+                const io = getIO();
+                io.emit('chats:bulk-assigned', { count: result.assigned });
+                for (const s of result.perStaff) {
+                    io.to(`user:${s.staffId}`).emit('chats:bulk-assigned:me', { count: s.count, assignedByName: req.user.name || 'Admin' });
+                }
+            } catch (e) {
+                logger.warn('Socket emit failed for bulk assignment:', e.message);
+            }
+        }
+        res.json({ success: true, ...result });
+    } catch (e) {
+        if (e && e.name === 'BulkAssignError') {
+            return res.status(e.status).json({ success: false, code: e.code, message: e.message });
+        }
+        next(e);
+    }
+}

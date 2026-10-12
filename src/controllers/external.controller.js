@@ -2,6 +2,7 @@ const { Chat, Message, Contact, ApiKey } = require('../models');
 const crypto = require('crypto');
 const { getIO } = require('../websocket/socket.server');
 const { logger } = require('../utils/logger');
+const { loadChatForSocket } = require('../utils/chatSocket');
 const whatsappService = require('../services/whatsapp.service');
 
 const sendTemplate = async (req, res) => {
@@ -123,7 +124,7 @@ const sendTemplate = async (req, res) => {
             io.emit('message:new', { chatId: chat._id, message });
             
             // Also update chat list
-            const populatedChat = await Chat.findById(chat._id).populate('contactId');
+            const populatedChat = await loadChatForSocket(chat._id);
             io.emit('chat:update', { chatId: chat._id, chat: populatedChat });
         } catch (e) {
             logger.warn('Socket emit failed for external template message:', e.message);

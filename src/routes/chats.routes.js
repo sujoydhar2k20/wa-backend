@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const chatsController = require('../controllers/chats.controller');
-const { authenticate } = require('../middleware/auth.middleware');
+const { authenticate, requireAdmin } = require('../middleware/auth.middleware');
 
 router.use(authenticate);
 router.get('/', chatsController.list);
@@ -10,6 +10,7 @@ router.get('/search', chatsController.search);
 router.post('/start-with-phone', chatsController.startWithPhone);
 router.get('/all-auto-messages', chatsController.getAllAutoMessages);
 router.delete('/all-auto-messages', chatsController.deleteAllAutoMessages);
+router.post('/bulk-assign-random', requireAdmin, chatsController.bulkAssignRandom);
 router.get('/:id', chatsController.get);
 router.post('/:id/assign', chatsController.assign);
 router.post('/:id/transfer', chatsController.transfer);

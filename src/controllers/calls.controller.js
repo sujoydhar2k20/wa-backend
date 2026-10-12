@@ -134,9 +134,10 @@ async function allLogs(req, res, next) {
     const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
     const limit = Math.min(parseInt(req.query.limit, 10) || 50, 200);
     const filter = {};
-    if (req.query.status) filter.status = req.query.status;
-    if (req.query.direction) filter.direction = req.query.direction;
-    if (req.query.wabaId) filter.wabaId = req.query.wabaId;
+    // Plain strings only: a query like ?status[$ne]=x must not become a Mongo operator.
+    if (typeof req.query.status === 'string' && req.query.status) filter.status = req.query.status;
+    if (typeof req.query.direction === 'string' && req.query.direction) filter.direction = req.query.direction;
+    if (typeof req.query.wabaId === 'string' && /^[0-9a-f]{24}$/i.test(req.query.wabaId)) filter.wabaId = req.query.wabaId;
     if (req.query.from || req.query.to) {
       filter.createdAt = {};
       if (req.query.from) filter.createdAt.$gte = new Date(req.query.from);

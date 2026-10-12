@@ -2,6 +2,7 @@ const { Broadcast, BroadcastBatch, BroadcastMessage, BroadcastListMember, Waba, 
 const whatsappService = require('./whatsapp.service');
 const { getIO } = require('../websocket/socket.server');
 const { logger } = require('../utils/logger');
+const { loadChatForSocket } = require('../utils/chatSocket');
 
 /**
  * Get the messaging limit for a WABA phone number.
@@ -107,6 +108,79 @@ function calculateBatches(totalMembers, dailyLimit, sentToday = 0) {
   }
 
   return { batches, totalBatches: batches.length };
+}
+
+/**
+ * Mirror a sent broadcast template into the customer's chat history.
+ *
+ * Data-integrity rule: this function must NEVER write ownership fields
+ * (assignedTo, collaborators). Existing chats are only touched with a $set of
+ * activity timestamps, and a missing chat is created atomically via
+ * $setOnInsert, so a concurrent assignment made by staff / the webhook auto-assign
+ * can never be overwritten by broadcast processing.
+ */
+async function recordBroadcastInChat({
+  broadcast, template, phoneNumber, contactId, messageId, contactResolvedText, resolvedTemplateComponents,
+}) {
+  try {
+    const waId = phoneNumber.replace(/\D/g, '');
+    const now = new Date();
+
+    // Existing chat: untouched here. New chat: created closed + unassigned, atomically.
+    const chat = await Chat.findOneAndUpdate(
+      { wabaId: broadcast.wabaId, waId },
+      {
+        $setOnInsert: {
+          wabaId: broadcast.wabaId,
+          phoneNumberId: broadcast.phoneNumberId,
+          phoneNumber: waId,
+          waId,
+          ...(contactId ? { contactId } : {}),
+          status: 'closed',
+          lastCustomerMessageAt: new Date(0),
+          isUnread: false,
+        },
+      },
+      { new: true, upsert: true, setDefaultsOnInsert: true }
+    );
+
+    const hostedHeaderUrl = await whatsappService.getTemplateHeaderImageUrl(broadcast.wabaId, template.name, template.language);
+    const chatMessage = await Message.create({
+      chatId: chat._id,
+      wabaId: broadcast.wabaId,
+      phoneNumberId: broadcast.phoneNumberId,
+      messageId,
+      waId,
+      direction: 'outbound',
+      type: 'template',
+      text: contactResolvedText,
+      status: 'sent',
+      metadata: {
+        templateName: template.name,
+        templateLanguage: template.language,
+        templateComponents: whatsappService.withHostedHeaderImage(resolvedTemplateComponents, hostedHeaderUrl) || undefined,
+        templateImageUrl: hostedHeaderUrl || undefined,
+        broadcastId: broadcast._id.toString(),
+      },
+    });
+
+    // Activity timestamps only (explicit $set; no assignment fields).
+    await Chat.findByIdAndUpdate(chat._id, { $set: { lastMessageAt: now, lastStaffMessageAt: now } });
+
+    // Emit socket events for real-time chat UI update (non-critical)
+    try {
+      const io = getIO();
+      io.emit('message:new', { chatId: chat._id, message: chatMessage });
+      // Fully populated (incl. assignedTo/collaborators) so clients never see a bare id
+      // and render the chat as "Unassigned".
+      const populatedChat = await loadChatForSocket(chat._id);
+      io.emit('chat:update', { chatId: chat._id, chat: populatedChat });
+    } catch (socketErr) {
+      // Non-critical
+    }
+  } catch (chatErr) {
+    logger.warn(`Failed to create chat message for broadcast ${broadcast._id}, phone ${phoneNumber}: ${chatErr.message}`);
+  }
 }
 
 /**
@@ -353,65 +427,19 @@ async function processBroadcastBatch(batchId) {
         status: 'sent',
       });
 
-      // Also create a Message in the individual chat so it appears in chat history
-      try {
-        const waId = phoneNumber.replace(/\D/g, '');
-        let chat = await Chat.findOne({ wabaId: broadcast.wabaId, waId });
-        if (!chat) {
-          // Create a new chat for this contact if one doesn't exist
-          chat = await Chat.create({
-            wabaId: broadcast.wabaId,
-            phoneNumberId: broadcast.phoneNumberId,
-            phoneNumber: waId,
-            waId,
-            contactId: contactId || undefined,
-            status: 'closed',
-            lastMessageAt: new Date(),
-            lastCustomerMessageAt: new Date(0),
-            isUnread: false,
-          });
-        }
-
-        // Resolve text per-contact when dynamic variables are used
-        const contactResolvedText = hasDynamicVars
+      // Also create a Message in the individual chat so it appears in chat history.
+      // NOTE: this must never touch ownership fields (assignedTo / collaborators).
+      await recordBroadcastInChat({
+        broadcast,
+        template,
+        phoneNumber,
+        contactId,
+        messageId,
+        contactResolvedText: hasDynamicVars
           ? resolveTemplateTextForContact(templateDoc, perContactComponents)
-          : resolvedTemplateText;
-
-        const hostedHeaderUrl = await whatsappService.getTemplateHeaderImageUrl(broadcast.wabaId, template.name, template.language);
-        const chatMessage = await Message.create({
-          chatId: chat._id,
-          wabaId: broadcast.wabaId,
-          phoneNumberId: broadcast.phoneNumberId,
-          messageId,
-          waId,
-          direction: 'outbound',
-          type: 'template',
-          text: contactResolvedText,
-          status: 'sent',
-          metadata: {
-            templateName: template.name,
-            templateLanguage: template.language,
-            templateComponents: whatsappService.withHostedHeaderImage(resolvedTemplateComponents, hostedHeaderUrl) || undefined,
-            templateImageUrl: hostedHeaderUrl || undefined,
-            broadcastId: broadcast._id.toString(),
-          },
-        });
-
-        // Update chat last message timestamp
-        await Chat.findByIdAndUpdate(chat._id, { lastMessageAt: new Date(), lastStaffMessageAt: new Date() });
-
-        // Emit socket event for real-time chat UI update
-        try {
-          const io = getIO();
-          io.emit('message:new', { chatId: chat._id, message: chatMessage });
-          const populatedChat = await Chat.findById(chat._id).populate('contactId');
-          io.emit('chat:update', { chatId: chat._id, chat: populatedChat });
-        } catch (socketErr) {
-          // Non-critical, just log
-        }
-      } catch (chatErr) {
-        logger.warn(`Failed to create chat message for broadcast ${broadcast._id}, phone ${phoneNumber}: ${chatErr.message}`);
-      }
+          : resolvedTemplateText,
+        resolvedTemplateComponents,
+      });
 
       if (broadcast.broadcastListId) {
         await BroadcastListMember.updateOne(
@@ -537,4 +565,5 @@ module.exports = {
   getSentTodayCount,
   calculateBatches,
   processBroadcastBatch,
+  recordBroadcastInChat,
 };
