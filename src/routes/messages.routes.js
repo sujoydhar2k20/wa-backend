@@ -14,5 +14,6 @@ router.post('/:id/read', messagesController.markRead);
 router.post('/:chatId/note', messagesController.addNote);
 router.delete('/:id', messagesController.deleteMsg);
 router.post('/:id/retry', messagesController.retry);
+router.post('/:id/media/retry', messagesController.retryMedia);
 
 module.exports = router;

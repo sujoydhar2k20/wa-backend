@@ -30,4 +30,5 @@ module.exports = {
   CallEvent: require('./CallEvent'),
   Notification: require('./Notification'),
   SendRequest: require('./SendRequest'),
+  WebhookFailure: require('./WebhookFailure'),
 };

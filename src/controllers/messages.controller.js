@@ -814,4 +814,46 @@ async function sendBulk(req, res, next) {
     }
 }
 
-module.exports = { send, sendBulk, search, react, markRead, addNote, deleteMsg, retry };
+/** Admins see every chat; staff only the chats assigned to them (same rule as the chat list). */
+function canUseChat(user, chat) {
+    if (!user || !chat) return false;
+    if (['admin', 'superadmin'].includes(user.role)) return true;
+    return String(chat.assignedTo?._id || chat.assignedTo || '') === String(user._id);
+}
+
+/**
+ * POST /messages/:id/media/retry — download an inbound photo/sticker/voice note/file again when the
+ * first download from WhatsApp failed (Meta keeps media ids for about 7 days).
+ */
+async function retryMedia(req, res, next) {
+    try {
+        const message = await Message.findById(req.params.id);
+        if (!message) return res.status(404).json({ success: false, message: 'Message not found' });
+        const chat = await Chat.findById(message.chatId).select('assignedTo wabaId');
+        if (!canUseChat(req.user, chat)) return res.status(403).json({ success: false, message: 'Not allowed' });
+        if (message.mediaUrl) return res.json(message); // already available
+        if (message.direction !== 'inbound' || !message.mediaId) {
+            return res.status(400).json({ success: false, message: 'This message has no media to download' });
+        }
+        const { processMediaAsync } = require('../services/webhook.service');
+        const result = await processMediaAsync(chat, {
+            mediaId: message.mediaId, wabaId: message.wabaId, mimeType: message.mimeType,
+            fileName: message.fileName, messageId: message.messageId,
+        }, message.type === 'sticker' ? 'sticker' : message.type);
+        if (!result?.mediaUrl) {
+            return res.status(502).json({ success: false, code: 'MEDIA_UNAVAILABLE', message: 'WhatsApp did not return the file. It may have expired (older than about 7 days).' });
+        }
+        message.mediaUrl = result.mediaUrl;
+        message.metadata = { ...(message.metadata || {}), ...(result.metadata || {}), mediaPending: false };
+        message.markModified('metadata');
+        await message.save();
+        try {
+            require('../websocket/socket.server').getIO().emit('message:update', { chatId: String(message.chatId), message });
+        } catch (_) { /* socket optional */ }
+        res.json(message);
+    } catch (e) {
+        next(e);
+    }
+}
+
+module.exports = { send, sendBulk, search, react, markRead, addNote, deleteMsg, retry, retryMedia, canUseChat };
