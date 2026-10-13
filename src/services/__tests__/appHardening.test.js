@@ -110,7 +110,7 @@ describe('sendGuard (message idempotency)', () => {
 
 // ---------------------------------------------------------------- assign on answer
 describe('assign customer to the person who answers', () => {
-  const { decide, assignChatToAnswerer } = require('../calls/assignOnAnswer');
+  const { decide, assignmentTexts, assignChatToAnswerer } = require('../calls/assignOnAnswer');
   const A = 'a'.repeat(24);
   const B = 'b'.repeat(24);
   const CHAT = 'c'.repeat(24);
@@ -140,21 +140,51 @@ describe('assign customer to the person who answers', () => {
       },
       ChatActivity: { create: jest.fn(async (d) => created.activity.push(d)) },
       Message: { create: jest.fn(async (d) => { created.message.push(d); return { _id: 'm', ...d }; }) },
-      User: { findById: () => ({ select: () => ({ lean: async () => ({ name: 'Staff B' }) }) }) },
+      User: { findById: (id) => ({ select: () => ({ lean: async () => ({ name: id === A ? 'Staff A' : 'Staff B' }) }) }) },
     };
-    const io = { emit: (e) => emitted.push(e), to: () => ({ emit: (e) => emitted.push(`me:${e}`) }) };
-    return { models, created, emitted, getIO: () => io };
+    const meEvents = [];
+    const io = { emit: (e) => emitted.push(e), to: () => ({ emit: (e, p) => { emitted.push(`me:${e}`); meEvents.push(p); } }) };
+    const notified = [];
+    return { models, created, emitted, meEvents, notified, notify: async (n) => notified.push(n), getIO: () => io };
   }
 
   test('staff B answers an escalated call: chat moves from A to B, activity + system message + socket events', async () => {
     const chat = { _id: CHAT, assignedTo: A, wabaId: 'w' };
     const f = fakeModels(chat);
-    const r = await assignChatToAnswerer({ _id: 'call1', direction: 'inbound', chatId: CHAT, answeredBy: B }, { models: f.models, isMonthly: async () => false, getIO: f.getIO });
+    const r = await assignChatToAnswerer(
+      { _id: 'call1', direction: 'inbound', chatId: CHAT, answeredBy: B, metadata: { contactName: 'Rina Das' } },
+      { models: f.models, isMonthly: async () => false, getIO: f.getIO, notify: f.notify },
+    );
     expect(r.action).toBe('assign');
     expect(chat.assignedTo).toBe(B);
     expect(f.created.activity[0].details.reason).toBe('call_answered:call1');
-    expect(f.created.message[0].text).toMatch(/answered a WhatsApp call/);
+    expect(f.created.message[0].text).toBe('Staff B answered a WhatsApp call and was assigned this chat (previously assigned to Staff A)');
+    expect(f.created.message[0].metadata.previousAssignee).toEqual({ id: A, name: 'Staff A' });
     expect(f.emitted).toEqual(expect.arrayContaining(['chat:assigned', 'chat:update', 'message:new', 'me:chat:assigned:me']));
+    expect(f.meEvents[0].previousAssigneeName).toBe('Staff A');
+    // the new assignee learns who had the customer; the previous assignee learns who took over
+    expect(f.notified).toHaveLength(2);
+    expect(f.notified[0]).toMatchObject({ recipientId: B, title: 'Chat assigned to you' });
+    expect(f.notified[0].body).toMatch(/Rina Das.*previously handled by Staff A/);
+    expect(f.notified[1]).toMatchObject({ recipientId: A, title: 'Chat reassigned' });
+    expect(f.notified[1].body).toMatch(/Staff B answered Rina Das's call/);
+  });
+
+  test('unassigned chat: says nobody had it, only the answerer is notified', async () => {
+    const chat = { _id: CHAT, assignedTo: null, wabaId: 'w' };
+    const f = fakeModels(chat);
+    await assignChatToAnswerer({ _id: 'c', direction: 'inbound', chatId: CHAT, answeredBy: B, waId: '919800000000' },
+      { models: f.models, isMonthly: async () => false, getIO: f.getIO, notify: f.notify });
+    expect(f.created.message[0].text).toMatch(/not assigned to anyone before/);
+    expect(f.notified).toHaveLength(1);
+    expect(f.notified[0].body).toMatch(/\+919800000000's call/);
+  });
+
+  test('handover texts', () => {
+    const t = assignmentTexts({ answererName: 'Priya', previousName: 'Rahul', customerName: 'Mr Sen' });
+    expect(t.systemMessage).toBe('Priya answered a WhatsApp call and was assigned this chat (previously assigned to Rahul)');
+    expect(t.toPreviousAssignee.body).toBe("Priya answered Mr Sen's call and is now handling this customer.");
+    expect(assignmentTexts({ answererName: 'Priya', previousName: null }).toPreviousAssignee).toBeNull();
   });
 
   test('assigned staff answers: nothing changes', async () => {

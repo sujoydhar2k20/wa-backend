@@ -490,8 +490,24 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
         logger.error(`Error triggering notification: ${notifErr.message}`);
     }
 
+    // A message WhatsApp generated because the customer is calling (e.g. the automatic call permission):
+    // keep it in the chat, but no auto-replies or bot flows - a staff member is taking the call.
+    const callEvents = require('./calls/callEvents');
+    const isCallGenerated = callEvents.isCallGeneratedMessage({
+        msg,
+        messageData,
+        recentInboundCall: (msg.type === 'unsupported' || msg.type === 'system')
+            ? await callEvents.hasRecentInboundCall({ phoneNumberId, waId })
+            : false,
+    });
+    if (isCallGenerated) {
+        logger.info(`[bot] skipped for call-generated ${msg.type} message ${msg.id} (chat ${chat._id})`);
+    }
+
     // Product code auto-reply + AI fallback
-    if (msg.type === 'text' && msg.text?.body) {
+    if (isCallGenerated) {
+        // nothing: no automatic replies for call events
+    } else if (msg.type === 'text' && msg.text?.body) {
         const textBody = msg.text.body;
         const codeCandidates = extractProductCodeCandidates(textBody);
         const directCode = detectProductCode(textBody);
@@ -534,13 +550,15 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
         }
     }
 
-    botService.processIncomingMessage({
-        waba, phoneNumberId, chat, message, text: msgText || '', isNewChat
-    }).catch(e => logger.error('Bot execution error:', e.message));
+    if (!isCallGenerated) {
+        botService.processIncomingMessage({
+            waba, phoneNumberId, chat, message, text: msgText || '', isNewChat
+        }).catch(e => logger.error('Bot execution error:', e.message));
+    }
 
     // Trigger on_open_conversation for brand new chats AND for chats reopened after being closed
     logger.info(`[bot] open-conversation check for chat ${chat._id} (waId: ${waId}): isNewChat=${isNewChat}, wasReopened=${wasReopened}`);
-    if (isNewChat || wasReopened) {
+    if ((isNewChat || wasReopened) && !isCallGenerated) {
         botService.processOpenConversation({
             waba, phoneNumberId, chat, message, text: msgText || '',
         }).catch(e => logger.error('Bot on_open_conversation error:', e.message));

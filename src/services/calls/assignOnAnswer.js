@@ -12,6 +12,10 @@
  *
  * The update is conditional on the assignee read a moment earlier, so a manual (re)assignment that
  * happens at the same instant is never overwritten.
+ *
+ * The new assignee is told who had the customer before (system message in the chat, the
+ * "assigned to you" notification and the socket event), and the previous assignee is told
+ * who took the customer over.
  */
 const { Chat, ChatActivity, Message, User } = require('../../models');
 const { logger } = require('../../utils/logger');
@@ -26,6 +30,31 @@ function decide({ chat, answeredBy, isMonthlyChat }) {
   return { action: 'assign', from: sid(chat.assignedTo), to: sid(answeredBy) };
 }
 
+/** Pure texts, unit-tested. [previousName] is null when the chat had no assignee. */
+function assignmentTexts({ answererName, previousName, customerName }) {
+  const who = answererName || 'A team member';
+  const customer = customerName || 'a customer';
+  const before = previousName ? `previously assigned to ${previousName}` : 'not assigned to anyone before';
+  return {
+    systemMessage: `${who} answered a WhatsApp call and was assigned this chat (${before})`,
+    toNewAssignee: {
+      title: 'Chat assigned to you',
+      body: previousName
+        ? `You answered ${customer}'s call. This customer was previously handled by ${previousName}.`
+        : `You answered ${customer}'s call. This customer was not assigned to anyone before.`,
+    },
+    toPreviousAssignee: previousName
+      ? { title: 'Chat reassigned', body: `${who} answered ${customer}'s call and is now handling this customer.` }
+      : null,
+  };
+}
+
+function notifySafe() {
+  return async (n) => {
+    try { await require('../notification.service').createNotification(n); } catch (_) { /* optional */ }
+  };
+}
+
 function ioSafe() {
   try { return require('../../websocket/socket.server').getIO(); } catch (_) { return null; }
 }
@@ -34,6 +63,7 @@ async function assignChatToAnswerer(callLog, deps = {}) {
   const models = { Chat, ChatActivity, Message, User, ...(deps.models || {}) };
   const isMonthly = deps.isMonthly || require('../../utils/tag').isMonthly;
   const getIO = deps.getIO || ioSafe;
+  const notify = deps.notify || notifySafe();
 
   if (!callLog || callLog.direction !== 'inbound' || !callLog.chatId || !callLog.answeredBy) return { action: 'none', reason: 'not-applicable' };
   const chat = await models.Chat.findById(callLog.chatId).select('assignedTo tags wabaId').lean();
@@ -56,6 +86,11 @@ async function assignChatToAnswerer(callLog, deps = {}) {
 
   const answerer = await models.User.findById(callLog.answeredBy).select('name phone').lean();
   const name = answerer?.name || 'A team member';
+  const previousId = sid(chat.assignedTo);
+  const previous = previousId ? await models.User.findById(previousId).select('name phone').lean() : null;
+  const previousName = previousId ? (previous?.name || 'another team member') : null;
+  const customerName = callLog.metadata?.contactName || (callLog.waId ? `+${callLog.waId}` : '');
+  const texts = assignmentTexts({ answererName: answerer?.name, previousName, customerName });
   await models.ChatActivity.create({
     chatId: chat._id,
     type: 'assigned',
@@ -67,9 +102,13 @@ async function assignChatToAnswerer(callLog, deps = {}) {
     wabaId: chat.wabaId,
     direction: 'internal',
     type: 'system',
-    text: `${name} answered a WhatsApp call and was assigned this chat`,
+    text: texts.systemMessage,
     sentBy: callLog.answeredBy,
-    metadata: { kind: 'assigned_by_call', callLogId: String(callLog._id) },
+    metadata: {
+      kind: 'assigned_by_call',
+      callLogId: String(callLog._id),
+      previousAssignee: previousId ? { id: previousId, name: previousName } : null,
+    },
   });
 
   const io = getIO();
@@ -87,10 +126,22 @@ async function assignChatToAnswerer(callLog, deps = {}) {
     io.emit('chat:assigned', payload);
     io.emit('chat:update', payload);
     io.emit('message:new', { chatId: String(chat._id), message: sysMessage });
-    io.to(`user:${sid(callLog.answeredBy)}`).emit('chat:assigned:me', { chatId: String(chat._id), chat: populated, assignedByName: 'WhatsApp call' });
+    io.to(`user:${sid(callLog.answeredBy)}`).emit('chat:assigned:me', {
+      chatId: String(chat._id),
+      chat: populated,
+      assignedByName: 'WhatsApp call',
+      previousAssigneeName: previousName,
+    });
+  }
+
+  // Notification Center (and push) for both sides of the handover.
+  const meta = { chatId: String(chat._id), callLogId: String(callLog._id), previousAssigneeName: previousName };
+  await notify({ recipientId: callLog.answeredBy, type: 'assignment', ...texts.toNewAssignee, metadata: meta });
+  if (previousId && texts.toPreviousAssignee) {
+    await notify({ recipientId: previousId, type: 'assignment', ...texts.toPreviousAssignee, metadata: meta });
   }
   logger.info(`[calls] ${callLog._id}: chat ${chat._id} assigned to ${name} (was ${decision.from || 'unassigned'})`);
   return decision;
 }
 
-module.exports = { decide, assignChatToAnswerer };
+module.exports = { decide, assignmentTexts, assignChatToAnswerer };
