@@ -46,6 +46,59 @@ async function convertAudioForMeta(buffer) {
     }
 }
 
+// WhatsApp shows the voice-message play icon only for OGG/OPUS files up to 512 KB.
+const VOICE_PLAY_ICON_MAX_BYTES = 512 * 1024;
+
+function runFfmpeg(args, timeout = 60000) {
+    return new Promise((resolve, reject) => {
+        execFile('ffmpeg', args, { timeout }, (err, _stdout, stderr) => {
+            if (err) reject(new Error(`ffmpeg failed: ${err.message} ${String(stderr || '').slice(-300)}`));
+            else resolve();
+        });
+    });
+}
+
+/**
+ * Convert a staff-recorded voice note to OGG/OPUS mono for a WhatsApp voice message.
+ * Tries libopus first, then ffmpeg's built-in (experimental) opus encoder for servers built without
+ * libopus. Re-encodes at a lower bitrate if the file is over 512 KB (the play-icon limit).
+ * Returns { buffer, oversize } or throws when no OPUS encoder works (the caller then falls back to an
+ * ordinary audio attachment and says so).
+ */
+async function convertVoiceNoteForMeta(buffer) {
+    const id = `${Date.now()}_${process.pid}_${Math.random().toString(36).slice(2)}`;
+    const tmpIn = path.join(os.tmpdir(), `wa_voice_in_${id}`);
+    const tmpOut = path.join(os.tmpdir(), `wa_voice_out_${id}.ogg`);
+    const encoders = [
+        ['-c:a', 'libopus', '-application', 'voip'],
+        ['-c:a', 'opus', '-strict', '-2', '-ar', '48000'],
+    ];
+    try {
+        await fs.promises.writeFile(tmpIn, buffer);
+        let lastErr;
+        for (const enc of encoders) {
+            for (const bitrate of ['32k', '16k', '12k']) {
+                try {
+                    await runFfmpeg(['-y', '-i', tmpIn, '-vn', '-ac', '1', ...enc, '-b:a', bitrate, '-f', 'ogg', tmpOut]);
+                    const out = await fs.promises.readFile(tmpOut);
+                    if (!out.length) throw new Error('ffmpeg produced an empty voice file');
+                    if (out.length <= VOICE_PLAY_ICON_MAX_BYTES || bitrate === '12k') {
+                        logger.info(`Voice note converted to OGG/OPUS (${enc[1]}, ${bitrate}): ${buffer.length} -> ${out.length} bytes`);
+                        return { buffer: out, oversize: out.length > VOICE_PLAY_ICON_MAX_BYTES };
+                    }
+                } catch (e) {
+                    lastErr = e;
+                    break; // this encoder is unavailable/broken: try the next one
+                }
+            }
+        }
+        throw lastErr || new Error('No OPUS encoder available');
+    } finally {
+        fs.promises.unlink(tmpIn).catch(() => {});
+        fs.promises.unlink(tmpOut).catch(() => {});
+    }
+}
+
 /**
  * Detect the real MIME type of a document from its binary magic bytes.
  * Server Content-Type headers are often wrong (guessed from extension).
@@ -202,6 +255,10 @@ async function send(req, res, next) {
 async function sendInner(req, res, next) {
     try {
         const { chatId, type = 'text', text, mediaUrl, caption, templateName, language, components, replyToMessageId } = req.body;
+        // Voice note recorded in the app/panel (not a picked audio file): sent as a WhatsApp voice message.
+        const wantsVoice = type === 'audio' && (req.body.voice === true || req.body.voice === 'true');
+        let sentAsVoice = false;
+        let voiceNotice;
         if (!chatId) return res.status(400).json({ success: false, message: 'chatId is required' });
 
         const chat = await Chat.findById(chatId).populate('contactId');
@@ -333,7 +390,21 @@ async function sendInner(req, res, next) {
                     // Browsers record in WebM, MP4, or other formats depending on platform.
                     // Magic-byte detection is unreliable when the VPS serves wrong Content-Type.
                     // ffmpeg accepts any valid input and always produces clean OGG/Opus for Meta.
-                    if (type === 'audio') {
+                    if (type === 'audio' && wantsVoice) {
+                        try {
+                            const voice = await convertVoiceNoteForMeta(buffer);
+                            buffer = voice.buffer;
+                            mimeType = 'audio/ogg';
+                            sentAsVoice = true;
+                            if (voice.oversize) voiceNotice = 'oversize';
+                        } catch (err) {
+                            // Never pretend: send it as an ordinary audio file and record why.
+                            logger.warn(`Voice note could not be converted to OGG/OPUS, sending as audio file: ${err.message}`);
+                            voiceNotice = 'opus_unavailable';
+                            buffer = await convertAudioForMeta(buffer);
+                            mimeType = 'audio/mp4';
+                        }
+                    } else if (type === 'audio') {
                         buffer = await convertAudioForMeta(buffer);
                         mimeType = 'audio/mp4';
                     }
@@ -381,7 +452,7 @@ async function sendInner(req, res, next) {
 
             // Retry send with exponential backoff (handles 429 rate limits when sending multiple images)
             waResult = await retryWithBackoff(
-                () => whatsappService.sendMediaMessage(chat.wabaId, chat.phoneNumberId, chat.waId, type, mediaIdToSend, caption || '', metaMessageIdToReply)
+                () => whatsappService.sendMediaMessage(chat.wabaId, chat.phoneNumberId, chat.waId, type, mediaIdToSend, caption || '', metaMessageIdToReply, { voice: sentAsVoice })
             );
         } else {
             return res.status(400).json({ success: false, message: `Unsupported message type: ${type}` });
@@ -473,6 +544,9 @@ async function sendInner(req, res, next) {
                 templateLanguage: req._templateData.language,
                 templateComponents: req._templateData.components,
                 templateImageUrl: req._templateData.templateImageUrl || undefined,
+            } : type === 'audio' ? {
+                voice: sentAsVoice,
+                ...(voiceNotice ? { voiceNotice } : {}),
             } : undefined,
         });
 
@@ -661,6 +735,7 @@ async function retry(req, res, next) {
         const mediaUrl = message.mediaUrl;
         const text = message.text;
         const caption = message.caption;
+        let retryAsVoice = false;
 
         let waResult;
         if (type === 'text') {
@@ -680,9 +755,19 @@ async function retry(req, res, next) {
                     let mimeType = response.headers['content-type'] || 'image/jpeg';
                     mimeType = mimeType.split(';')[0].trim();
 
-                    if (type === 'audio') {
+                    if (type === 'audio' && message.metadata?.voice === true) {
+                        try {
+                            buffer = (await convertVoiceNoteForMeta(buffer)).buffer;
+                            mimeType = 'audio/ogg';
+                            retryAsVoice = true;
+                        } catch (err) {
+                            logger.warn(`Voice note retry: OGG/OPUS conversion failed, sending as audio file: ${err.message}`);
+                            buffer = await convertAudioForMeta(buffer);
+                            mimeType = 'audio/mp4';
+                        }
+                    } else if (type === 'audio') {
                         buffer = await convertAudioForMeta(buffer);
-                        mimeType = 'audio/ogg';
+                        mimeType = 'audio/mp4'; // convertAudioForMeta produces AAC/M4A
                     }
 
                     if (type === 'video') {
@@ -712,7 +797,7 @@ async function retry(req, res, next) {
             }
 
             waResult = await retryWithBackoff(
-                () => whatsappService.sendMediaMessage(chat.wabaId, chat.phoneNumberId, chat.waId, type, mediaIdToSend, caption || '')
+                () => whatsappService.sendMediaMessage(chat.wabaId, chat.phoneNumberId, chat.waId, type, mediaIdToSend, caption || '', null, { voice: retryAsVoice })
             );
         } else {
             return res.status(400).json({ success: false, message: `Cannot retry message type: ${type}` });
@@ -856,4 +941,4 @@ async function retryMedia(req, res, next) {
     }
 }
 
-module.exports = { send, sendBulk, search, react, markRead, addNote, deleteMsg, retry, retryMedia, canUseChat };
+module.exports = { send, sendBulk, search, react, markRead, addNote, deleteMsg, retry, retryMedia, canUseChat, convertVoiceNoteForMeta, VOICE_PLAY_ICON_MAX_BYTES };

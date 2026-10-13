@@ -4,6 +4,7 @@ const Template = require('../models/Template');
 const Contact = require('../models/Contact');
 const config = require('../config');
 const { logger } = require('../utils/logger');
+const { recipientFields, isBsuid, phoneDigits } = require('../utils/waIdentity');
 
 const BASE_URL = `https://graph.facebook.com/${config.meta.apiVersion}`;
 
@@ -25,10 +26,15 @@ async function getAccessToken(wabaId) {
  * (e.g. first outbound to an unknown number).
  */
 async function checkContactBlockedOrOptedOut(to) {
-  const sanitized = to.replace(/\D/g, '');
-  const contact = await Contact.findOne({
-    $or: [{ waId: sanitized }, { phoneNumber: sanitized }]
-  }).select('isBlocked isOptedOut').lean();
+  const value = String(to || '').trim();
+  let query;
+  if (isBsuid(value)) query = { bsuid: value };
+  else {
+    const sanitized = phoneDigits(value);
+    if (!sanitized) return; // recipientFields() rejects it with a clear error
+    query = { $or: [{ waId: sanitized }, { phoneNumber: sanitized }] };
+  }
+  const contact = await Contact.findOne(query).select('isBlocked isOptedOut').lean();
   if (contact && (contact.isBlocked || contact.isOptedOut)) {
     const reason = contact.isBlocked ? 'blocked' : 'opted-out';
     const err = new Error(`Cannot send messages to ${reason} contacts.`);
@@ -48,10 +54,17 @@ async function request(wabaId, method, path, data = null) {
   } catch (error) {
     if (error.response) {
       logger.error(`WhatsApp API Error: ${JSON.stringify(error.response.data)}`);
-      const metaMsg = error.response.data?.error?.message;
+      const metaErr = error.response.data?.error;
+      const metaMsg = metaErr?.message;
       if (metaMsg) {
         error.message = `Meta API Error: ${metaMsg}`;
         error.statusCode = error.response.status || 400;
+      }
+      if (metaErr?.code) error.metaCode = metaErr.code;
+      // 131062: this message type cannot be sent to a business-scoped user ID (username-only customer).
+      if (metaErr?.code === 131062) {
+        error.message = 'WhatsApp does not allow this message type for customers known only by their WhatsApp username/user ID (Meta error 131062). Ask the customer to share their phone number.';
+        error.statusCode = 400;
       }
     } else {
       logger.error(`WhatsApp API Request Error: ${error.message}`);
@@ -67,7 +80,7 @@ async function sendTextMessage(wabaId, phoneNumberId, to, text, replyToMessageId
   const body = {
     messaging_product: 'whatsapp',
     recipient_type: 'individual',
-    to: to.replace(/\D/g, ''),
+    ...recipientFields(to),
     type: 'text',
     text: { body: text },
   };
@@ -77,18 +90,30 @@ async function sendTextMessage(wabaId, phoneNumberId, to, text, replyToMessageId
   return request(wabaId, 'POST', path, body);
 }
 
-async function sendMediaMessage(wabaId, phoneNumberId, to, type, urlOrId, caption = '', replyToMessageId = null) {
+/**
+ * @param {object} [options]
+ * @param {boolean} [options.voice] audio only: send as a WhatsApp voice message (`audio.voice: true`).
+ *   Meta requires an OGG/OPUS file for this; callers must upload one (see convertVoiceNoteForMeta).
+ */
+async function sendMediaMessage(wabaId, phoneNumberId, to, type, urlOrId, caption = '', replyToMessageId = null, options = {}) {
   await checkContactBlockedOrOptedOut(to);
   const path = `/${phoneNumberId}/messages`;
   const key = type === 'document' ? 'document' : type;
   const isId = !urlOrId.startsWith('http');
-  const payload = type === 'document'
-    ? (isId ? { id: urlOrId, caption } : { link: urlOrId, caption })
-    : (isId ? { id: urlOrId, caption: caption || undefined } : { link: urlOrId, caption: caption || undefined });
+  let payload;
+  if (type === 'audio') {
+    // Audio messages have no caption on WhatsApp.
+    payload = isId ? { id: urlOrId } : { link: urlOrId };
+    if (options.voice) payload.voice = true;
+  } else {
+    payload = type === 'document'
+      ? (isId ? { id: urlOrId, caption } : { link: urlOrId, caption })
+      : (isId ? { id: urlOrId, caption: caption || undefined } : { link: urlOrId, caption: caption || undefined });
+  }
   const body = {
     messaging_product: 'whatsapp',
     recipient_type: 'individual',
-    to: to.replace(/\D/g, ''),
+    ...recipientFields(to),
     type,
     [key]: payload,
   };
@@ -413,7 +438,7 @@ async function sendTemplateMessage(wabaId, phoneNumberId, to, templateName, lang
   const body = {
     messaging_product: 'whatsapp',
     recipient_type: 'individual',
-    to: to.replace(/\D/g, ''),
+    ...recipientFields(to),
     type: 'template',
     template: { 
       name: templateName, 
@@ -445,7 +470,7 @@ async function sendInteractiveMessage(wabaId, phoneNumberId, to, interactivePayl
   const body = {
     messaging_product: 'whatsapp',
     recipient_type: 'individual',
-    to: to.replace(/\D/g, ''),
+    ...recipientFields(to),
     type: 'interactive',
     interactive: interactivePayload,
   };
@@ -470,7 +495,7 @@ async function reactToMessage(wabaId, phoneNumberId, to, messageId, emoji) {
   return request(wabaId, 'POST', path, {
     messaging_product: 'whatsapp',
     recipient_type: 'individual',
-    to: to.replace(/\D/g, ''),
+    ...recipientFields(to),
     type: 'reaction',
     reaction: { message_id: messageId, emoji: emoji || "" },
   });
