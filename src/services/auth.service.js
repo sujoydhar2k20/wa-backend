@@ -99,8 +99,14 @@ async function refresh(refreshToken) {
 }
 
 async function logout(userId, refreshToken) {
-  if (refreshToken) await Session.deleteOne({ refreshToken });
-  else await Session.deleteMany({ userId: userId });
+  if (refreshToken) {
+    await Session.deleteOne({ refreshToken: String(refreshToken) });
+    return { success: true };
+  }
+  // Without a refresh token only an authenticated user's own sessions may be removed.
+  // (Previously an anonymous call with no token ran deleteMany({ userId: undefined }) = every session.)
+  if (!userId) throw Object.assign(new Error('Refresh token required'), { statusCode: 400 });
+  await Session.deleteMany({ userId });
   return { success: true };
 }
 

@@ -189,3 +189,20 @@ describe('assign customer to the person who answers', () => {
     expect((await assignChatToAnswerer({ direction: 'inbound', answeredBy: B }, { models: f.models })).action).toBe('none');
   });
 });
+
+// ---------------------------------------------------------------- logout safety
+describe('logout never deletes other users\' sessions', () => {
+  beforeEach(() => jest.resetModules());
+  test('anonymous logout without refresh token is rejected; with token deletes only that session', async () => {
+    const deleteMany = jest.fn();
+    const deleteOne = jest.fn();
+    jest.doMock('../../models/Session', () => ({ deleteMany, deleteOne }));
+    const auth = require('../auth.service');
+    await expect(auth.logout(undefined, undefined)).rejects.toThrow('Refresh token required');
+    expect(deleteMany).not.toHaveBeenCalled();
+    await auth.logout(undefined, 'rt-1');
+    expect(deleteOne).toHaveBeenCalledWith({ refreshToken: 'rt-1' });
+    await auth.logout('u1');
+    expect(deleteMany).toHaveBeenCalledWith({ userId: 'u1' });
+  });
+});
