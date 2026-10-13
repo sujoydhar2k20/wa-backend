@@ -215,7 +215,11 @@ async function recordingUrl(req, res, next) {
     if (!(await canAccessCallLog(req.user, callLog))) return res.status(403).json({ success: false, error: 'Forbidden' });
     if (callLog.recording?.status !== 'ready') return res.status(404).json({ success: false, error: 'No recording', recordingStatus: callLog.recording?.status || 'none' });
     const token = recordings.signToken(callLog._id, req.user._id);
-    res.json({ success: true, url: `/api/calls/recordings/${callLog._id}?t=${encodeURIComponent(token)}`, expiresIn: 3600, durationSec: callLog.recording.durationSec });
+    const ext = (require('path').extname(callLog.recording.path || '').toLowerCase().replace('.', '')) || 'mp3';
+    const mimeType = { mp3: 'audio/mpeg', m4a: 'audio/mp4', wav: 'audio/wav', ogg: 'audio/ogg' }[ext] || 'application/octet-stream';
+    const stamp = new Date(callLog.startedAt || callLog.createdAt || Date.now()).toISOString().slice(0, 16).replace(/[-:T]/g, '');
+    const fileName = `call-${String(callLog.waId || 'customer').replace(/[^0-9A-Za-z]/g, '').slice(0, 20)}-${stamp}.${ext}`;
+    res.json({ success: true, url: `/api/calls/recordings/${callLog._id}?t=${encodeURIComponent(token)}`, expiresIn: 3600, durationSec: callLog.recording.durationSec, fileName, mimeType });
   } catch (e) { next(e); }
 }
 

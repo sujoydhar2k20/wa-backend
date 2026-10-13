@@ -29,4 +29,5 @@ module.exports = {
   CallPermission: require('./CallPermission'),
   CallEvent: require('./CallEvent'),
   Notification: require('./Notification'),
+  SendRequest: require('./SendRequest'),
 };

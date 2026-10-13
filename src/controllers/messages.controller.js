@@ -147,7 +147,59 @@ async function retryWithBackoff(fn, maxRetries = 3, baseDelayMs = 1500) {
     throw lastError;
 }
 
+/**
+ * POST /messages/send with optional idempotency.
+ * When the app sends clientMessageId (one id per logical message, reused on every retry), a repeated
+ * request returns the message created by the first one instead of sending to WhatsApp again.
+ */
 async function send(req, res, next) {
+    const sendGuard = require('../services/sendGuard.service');
+    const clientMessageId = sendGuard.normalizeClientId(req.body?.clientMessageId);
+    const chatId = req.body?.chatId;
+    if (!clientMessageId || !chatId || !/^[0-9a-fA-F]{24}$/.test(String(chatId))) return sendInner(req, res, next);
+
+    let claim;
+    try {
+        claim = await sendGuard.claim({ chatId, clientMessageId, userId: req.user._id });
+    } catch (e) {
+        return next(e);
+    }
+    if (claim.existing) {
+        try {
+            const existing = await Message.findById(claim.existing)
+                .populate('sentBy', 'name phone')
+                .populate({ path: 'replyToMessageId', select: '_id text type mediaUrl caption waId sentBy', populate: { path: 'sentBy', select: 'name' } });
+            if (existing) return res.status(200).json(existing);
+        } catch (e) {
+            return next(e);
+        }
+        await sendGuard.release(claim.key).catch(() => {});
+        return res.status(409).json({ success: false, code: 'SEND_IN_PROGRESS', message: 'This message is still being sent. Please wait.' });
+    }
+    if (claim.inProgress) {
+        return res.status(409).json({ success: false, code: 'SEND_IN_PROGRESS', message: 'This message is still being sent. Please wait.' });
+    }
+
+    req._clientMessageId = clientMessageId;
+    let settled = false;
+    const settle = (ok, body) => {
+        if (settled) return;
+        settled = true;
+        const id = ok && body && (body._id || body.id);
+        (id ? sendGuard.complete(claim.key, id) : sendGuard.release(claim.key)).catch(() => {});
+    };
+    const originalJson = res.json.bind(res);
+    res.json = (body) => {
+        settle(res.statusCode < 400, body);
+        return originalJson(body);
+    };
+    return sendInner(req, res, (err) => {
+        settle(false);
+        next(err);
+    });
+}
+
+async function sendInner(req, res, next) {
     try {
         const { chatId, type = 'text', text, mediaUrl, caption, templateName, language, components, replyToMessageId } = req.body;
         if (!chatId) return res.status(400).json({ success: false, message: 'chatId is required' });
@@ -413,6 +465,7 @@ async function send(req, res, next) {
             caption: caption || undefined,
             status: 'sent',
             sentBy: req.user._id,
+            clientMessageId: req._clientMessageId || undefined,
             replyToMessageId: replyToMessageId || undefined,
             quotedMessage: quotedMessage || undefined,
             metadata: type === 'template' && req._templateData ? {

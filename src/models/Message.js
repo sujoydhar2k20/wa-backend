@@ -49,6 +49,7 @@ const messageSchema = new mongoose.Schema(
     errorMessage: { type: String },
     sentBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     sentByBot: { type: Boolean, default: false },
+    clientMessageId: { type: String }, // set by the app; see SendRequest / sendGuard
     metadata: { type: mongoose.Schema.Types.Mixed },
     replyToMessageId: { type: mongoose.Schema.Types.ObjectId, ref: 'Message' },
     quotedMessage: quotedMessageSchema,
@@ -57,6 +58,7 @@ const messageSchema = new mongoose.Schema(
 );
 
 messageSchema.index({ chatId: 1, createdAt: -1 });
+messageSchema.index({ chatId: 1, clientMessageId: 1 }, { sparse: true });
 
 messageSchema.post('save', async function(doc) {
   try {

@@ -1,12 +1,14 @@
 const jwt = require('jsonwebtoken');
 const config = require('../config');
 const User = require('../models/User');
+const { isRevoked } = require('../utils/tokenRevocation');
 
 async function authenticate(req, res, next) {
   try {
     const authHeader = req.headers.authorization;
     const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null;
     if (!token) return res.status(401).json({ success: false, message: 'Unauthorized' });
+    if (isRevoked(token)) return res.status(401).json({ success: false, message: 'Unauthorized' });
     const decoded = jwt.verify(token, config.jwt.secret);
     const user = await User.findById(decoded.userId).select('-refreshToken');
     if (!user || !user.isActive) return res.status(401).json({ success: false, message: 'Unauthorized' });

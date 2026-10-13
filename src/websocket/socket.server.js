@@ -43,6 +43,7 @@ function initSocket(server) {
       const raw = auth.token || auth.Authorization || header || '';
       const token = String(raw).startsWith('Bearer ') ? String(raw).slice(7) : String(raw);
       if (!token) return next(new Error('Unauthorized'));
+      if (require('../utils/tokenRevocation').isRevoked(token)) return next(new Error('Unauthorized'));
 
       const decoded = jwt.verify(token, config.jwt.secret);
       const user = await User.findById(decoded.userId).select('_id role isActive');

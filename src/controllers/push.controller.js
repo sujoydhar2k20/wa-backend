@@ -40,6 +40,11 @@ exports.subscribe = async (req, res) => {
             user.fcmTokens = [];
         }
 
+        // A phone has one FCM token. If another account was logged in on this phone before (and its
+        // logout could not unsubscribe, e.g. offline), stop sending that account's pushes to this phone.
+        const released = await User.updateMany({ _id: { $ne: user._id }, fcmTokens: token }, { $pull: { fcmTokens: token } });
+        if (released?.modifiedCount) logger.info(`FCM token moved to user ${user.name} from ${released.modifiedCount} other account(s)`);
+
         // Save token if it doesn't already exist for this user
         if (!user.fcmTokens.includes(token)) {
             user.fcmTokens.push(token);

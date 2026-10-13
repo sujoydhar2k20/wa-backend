@@ -229,6 +229,12 @@ async function answered({ callLogId, endpoint }) {
   const targets = res.direction === 'inbound' ? res.ringTargets : [res.initiatedBy];
   emitToUsers(targets, 'call:answered', payload);
   if (res.direction === 'inbound') push((res.ringTargets || []).map(String).filter((id) => id !== String(res.answeredBy)), { title: '', body: '', data: { type: 'call_answered_elsewhere', callLogId: String(res._id) }, ttlSeconds: 120 });
+  // The person who answered becomes the customer's assigned staff (see assignOnAnswer.js for the rules).
+  // Not awaited: Asterisk must not wait for this before bridging the audio.
+  if (res.direction === 'inbound' && res.answeredBy) {
+    require('./assignOnAnswer').assignChatToAnswerer(res)
+      .catch((e) => logger.error(`[calls] assign-on-answer failed for ${res._id}: ${e.message}`));
+  }
   return 'ok';
 }
 
