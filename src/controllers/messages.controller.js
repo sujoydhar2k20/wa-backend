@@ -1,6 +1,7 @@
 const { Message, Chat, Contact } = require('../models');
 const whatsappService = require('../services/whatsapp.service');
 const { logger } = require('../utils/logger');
+const { addressOf } = require('../utils/waIdentity');
 const { execFile } = require('child_process');
 const os = require('os');
 const path = require('path');
@@ -295,7 +296,7 @@ async function sendInner(req, res, next) {
         let waResult;
         if (type === 'text') {
             if (!text) return res.status(400).json({ success: false, message: 'text is required for text messages' });
-            waResult = await whatsappService.sendTextMessage(chat.wabaId, chat.phoneNumberId, chat.waId, text, metaMessageIdToReply);
+            waResult = await whatsappService.sendTextMessage(chat.wabaId, chat.phoneNumberId, addressOf(chat), text, metaMessageIdToReply);
         } else if (type === 'template') {
             if (!templateName) return res.status(400).json({ success: false, message: 'templateName is required for template messages' });
 
@@ -353,7 +354,7 @@ async function sendInner(req, res, next) {
                 };
             }
 
-            waResult = await whatsappService.sendTemplateMessage(chat.wabaId, chat.phoneNumberId, chat.waId, templateName, language || 'en', components || []);
+            waResult = await whatsappService.sendTemplateMessage(chat.wabaId, chat.phoneNumberId, addressOf(chat), templateName, language || 'en', components || []);
 
             // For IMAGE headers, store our hosted copy (created/refreshed during send) in the message so
             // web and the Android app can render it. Meta's example CDN URLs are signed and expire.
@@ -452,7 +453,7 @@ async function sendInner(req, res, next) {
 
             // Retry send with exponential backoff (handles 429 rate limits when sending multiple images)
             waResult = await retryWithBackoff(
-                () => whatsappService.sendMediaMessage(chat.wabaId, chat.phoneNumberId, chat.waId, type, mediaIdToSend, caption || '', metaMessageIdToReply, { voice: sentAsVoice })
+                () => whatsappService.sendMediaMessage(chat.wabaId, chat.phoneNumberId, addressOf(chat), type, mediaIdToSend, caption || '', metaMessageIdToReply, { voice: sentAsVoice })
             );
         } else {
             return res.status(400).json({ success: false, message: `Unsupported message type: ${type}` });
@@ -528,7 +529,7 @@ async function sendInner(req, res, next) {
             wabaId: chat.wabaId,
             phoneNumberId: chat.phoneNumberId,
             messageId: msgId,
-            waId: chat.waId,
+            waId: chat.waId, bsuid: chat.bsuid,
             direction: 'outbound',
             type,
             text: messageText,
@@ -618,7 +619,7 @@ async function react(req, res, next) {
         const chat = await Chat.findById(message.chatId);
         if (!chat) return res.status(404).json({ success: false, message: 'Chat not found' });
 
-        await whatsappService.reactToMessage(chat.wabaId, chat.phoneNumberId, chat.waId, message.messageId, emoji);
+        await whatsappService.reactToMessage(chat.wabaId, chat.phoneNumberId, addressOf(chat), message.messageId, emoji);
 
         // Update database: remove existing reaction by this user, then add new one if not unreacting
         const userId = req.user._id.toString();
@@ -671,7 +672,7 @@ async function addNote(req, res, next) {
             chatId,
             wabaId: chat.wabaId,
             phoneNumberId: chat.phoneNumberId,
-            waId: chat.waId,
+            waId: chat.waId, bsuid: chat.bsuid,
             direction: 'internal',
             type: 'note',
             text,
@@ -739,7 +740,7 @@ async function retry(req, res, next) {
 
         let waResult;
         if (type === 'text') {
-            waResult = await whatsappService.sendTextMessage(chat.wabaId, chat.phoneNumberId, chat.waId, text);
+            waResult = await whatsappService.sendTextMessage(chat.wabaId, chat.phoneNumberId, addressOf(chat), text);
         } else if (['image', 'video', 'audio', 'document'].includes(type)) {
             let mediaIdToSend = mediaUrl;
 
@@ -797,7 +798,7 @@ async function retry(req, res, next) {
             }
 
             waResult = await retryWithBackoff(
-                () => whatsappService.sendMediaMessage(chat.wabaId, chat.phoneNumberId, chat.waId, type, mediaIdToSend, caption || '', null, { voice: retryAsVoice })
+                () => whatsappService.sendMediaMessage(chat.wabaId, chat.phoneNumberId, addressOf(chat), type, mediaIdToSend, caption || '', null, { voice: retryAsVoice })
             );
         } else {
             return res.status(400).json({ success: false, message: `Cannot retry message type: ${type}` });
@@ -863,7 +864,7 @@ async function sendBulk(req, res, next) {
                 chatId,
                 wabaId: chat.wabaId,
                 phoneNumberId: chat.phoneNumberId,
-                waId: chat.waId,
+                waId: chat.waId, bsuid: chat.bsuid,
                 direction: 'outbound',
                 type: item.type || 'image',
                 mediaUrl: item.mediaUrl,
@@ -941,4 +942,39 @@ async function retryMedia(req, res, next) {
     }
 }
 
-module.exports = { send, sendBulk, search, react, markRead, addNote, deleteMsg, retry, retryMedia, canUseChat, convertVoiceNoteForMeta, VOICE_PLAY_ICON_MAX_BYTES };
+/**
+ * POST /messages/:chatId/request-contact-info — ask a customer known only by their WhatsApp username /
+ * business-scoped user ID to share their phone number (Meta interactive `request_contact_info`; the
+ * customer taps a button and the reply arrives as a `contacts` message with origin "contact_request").
+ * Only for customers WITHOUT a known phone number; subject to the 24-hour customer-service window.
+ */
+async function requestContactInfo(req, res, next) {
+    try {
+        const chat = await Chat.findById(req.params.chatId);
+        if (!chat) return res.status(404).json({ success: false, message: 'Chat not found' });
+        if (!canUseChat(req.user, chat)) return res.status(403).json({ success: false, message: 'Not allowed' });
+        if (chat.waId) return res.status(400).json({ success: false, code: 'PHONE_KNOWN', message: 'This customer\'s phone number is already known.' });
+        if (!chat.bsuid) return res.status(400).json({ success: false, code: 'NO_RECIPIENT', message: 'This customer has no WhatsApp user ID.' });
+        const text = String(req.body?.text || '').trim().slice(0, 1024)
+            || 'Please share your phone number with us so our team can call you and keep your details up to date.';
+        const waResult = await whatsappService.sendInteractiveMessage(chat.wabaId, chat.phoneNumberId, addressOf(chat), {
+            type: 'request_contact_info',
+            body: { text },
+            action: { name: 'request_contact_info' },
+        });
+        const message = await Message.create({
+            chatId: chat._id, wabaId: chat.wabaId, phoneNumberId: chat.phoneNumberId,
+            messageId: waResult?.messages?.[0]?.id, waId: chat.waId, bsuid: chat.bsuid,
+            direction: 'outbound', type: 'interactive', text, status: 'sent', sentBy: req.user._id,
+            metadata: { kind: 'request_contact_info' },
+        });
+        try {
+            require('../websocket/socket.server').getIO().emit('message:new', { chatId: chat._id, message: await message.populate('sentBy', 'name phone') });
+        } catch (_) { /* socket optional */ }
+        res.status(201).json(message);
+    } catch (e) {
+        next(e);
+    }
+}
+
+module.exports = { requestContactInfo, send, sendBulk, search, react, markRead, addNote, deleteMsg, retry, retryMedia, canUseChat, convertVoiceNoteForMeta, VOICE_PLAY_ICON_MAX_BYTES };

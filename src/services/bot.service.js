@@ -8,6 +8,7 @@
 const { BotFlow, BotExecution, Chat, User, Message, Contact, Waba } = require('../models');
 const whatsappService = require('./whatsapp.service');
 const { logger } = require('../utils/logger');
+const { addressOf } = require('../utils/waIdentity');
 
 /**
  * Main entry: evaluate all enabled bot flows against incoming message context.
@@ -709,7 +710,7 @@ async function executeNode(node, context) {
             // If an image URL is provided, send as media message
             if (config.imageUrl) {
                 const waResult = await whatsappService.sendMediaMessage(
-                    waba._id, phoneNumberId, chat.waId, 'image', config.imageUrl, resolvedText
+                    waba._id, phoneNumberId, addressOf(chat), 'image', config.imageUrl, resolvedText
                 );
                 const msgId = waResult?.messages?.[0]?.id;
                 await saveOutboundMessage(chat, waba, phoneNumberId, msgId, 'image', resolvedText, {
@@ -720,7 +721,7 @@ async function executeNode(node, context) {
 
             // Plain text message
             const waResult = await whatsappService.sendTextMessage(
-                waba._id, phoneNumberId, chat.waId, resolvedText
+                waba._id, phoneNumberId, addressOf(chat), resolvedText
             );
             const msgId = waResult?.messages?.[0]?.id;
             await saveOutboundMessage(chat, waba, phoneNumberId, msgId, 'text', resolvedText);
@@ -730,7 +731,7 @@ async function executeNode(node, context) {
         case 'send_template': {
             if (!config.templateName) return { skipped: true, reason: 'No template configured' };
             const waResult = await whatsappService.sendTemplateMessage(
-                waba._id, phoneNumberId, chat.waId,
+                waba._id, phoneNumberId, addressOf(chat),
                 config.templateName,
                 config.language || 'en',
                 config.components || []
@@ -758,7 +759,7 @@ async function executeNode(node, context) {
                 },
             };
             const waResult = await whatsappService.sendInteractiveMessage(
-                waba._id, phoneNumberId, chat.waId, payload
+                waba._id, phoneNumberId, addressOf(chat), payload
             );
             const msgId = waResult?.messages?.[0]?.id;
             await saveOutboundMessage(chat, waba, phoneNumberId, msgId, 'interactive', resolvedBody || 'Interactive message', {
@@ -795,7 +796,7 @@ async function executeNode(node, context) {
                 },
             };
             const waResult = await whatsappService.sendInteractiveMessage(
-                waba._id, phoneNumberId, chat.waId, payload
+                waba._id, phoneNumberId, addressOf(chat), payload
             );
             const msgId = waResult?.messages?.[0]?.id;
             await saveOutboundMessage(chat, waba, phoneNumberId, msgId, 'interactive', resolvedBody || 'List message', {
@@ -1051,7 +1052,7 @@ async function saveOutboundMessage(chat, waba, phoneNumberId, msgId, type, text,
             wabaId: waba._id,
             phoneNumberId,
             messageId: msgId,
-            waId: chat.waId,
+            waId: chat.waId, bsuid: chat.bsuid,
             direction: 'outbound',
             type: resolvedType,
             text: resolvedType === 'image' ? undefined : text,

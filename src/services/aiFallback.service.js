@@ -1,6 +1,7 @@
 const axios = require('axios');
 const { AiSetting, AiCategory } = require('../models');
 const { logger } = require('../utils/logger');
+const { addressOf } = require('../utils/waIdentity');
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
@@ -419,7 +420,7 @@ async function handleAiFallback(waba, phoneNumberId, chat, message, text, whatsa
         const waResult = await whatsappService.sendTextMessage(
             waba._id,
             phoneNumberId,
-            chat.waId,
+            addressOf(chat),
             replyText,
             message.messageId // reply to the original message
         );
@@ -431,7 +432,7 @@ async function handleAiFallback(waba, phoneNumberId, chat, message, text, whatsa
             wabaId: waba._id,
             phoneNumberId,
             messageId: msgId,
-            waId: chat.waId,
+            waId: chat.waId, bsuid: chat.bsuid,
             direction: 'outbound',
             type: 'text',
             text: replyText,

@@ -2,8 +2,15 @@ const mongoose = require('mongoose');
 
 const contactSchema = new mongoose.Schema(
   {
-    phoneNumber: { type: String, required: true, index: true },
+    // Phone identity (digits). Optional since WhatsApp usernames (see bsuid).
+    phoneNumber: { type: String, index: true },
     waId: { type: String, index: true },
+    // Business-scoped user ID and its parent (".ENT.") ID, WhatsApp username. Never stored as a phone.
+    bsuid: { type: String, index: true },
+    parentBsuid: { type: String },
+    username: { type: String },
+    previousBsuids: [{ type: String }],
+    mergedInto: { type: mongoose.Schema.Types.ObjectId, ref: 'Contact' },
     name: { type: String },
     nickname: { type: String },
     nameOnWhatsApp: { type: String },
@@ -18,6 +25,11 @@ const contactSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+contactSchema.pre('validate', function requireIdentity(next) {
+  if (!this.mergedInto && !this.phoneNumber && !this.waId && !this.bsuid) this.invalidate('phoneNumber', 'A contact needs a phone number or a WhatsApp user ID');
+  next();
+});
 
 contactSchema.index({ phoneNumber: 1, waId: 1 });
 module.exports = mongoose.model('Contact', contactSchema);

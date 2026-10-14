@@ -9,7 +9,8 @@ async function list(req, res, next) {
             page = 1, limit = 20, wabaId, status, assignedTo, tag, tags, tagId, isUnread, isWaiting
         } = req.query;
         const skip = (parseInt(page, 10) - 1) * parseInt(limit, 10);
-        const filter = {};
+        // Chats folded into another chat of the same customer (phone + WhatsApp user ID) are hidden.
+        const filter = { mergedInto: null };
         if (wabaId) filter.wabaId = wabaId;
         if (status) filter.status = status;
         const filterTag = tag || tags || tagId;
@@ -36,7 +37,7 @@ async function list(req, res, next) {
                 .sort({ lastMessageAt: -1 })
                 .skip(skip)
                 .limit(parseInt(limit, 10))
-                .populate('contactId', 'name nameOnWhatsApp nickname profilePicture isOptedOut isBlocked')
+                .populate('contactId', 'name nameOnWhatsApp nickname username profilePicture isOptedOut isBlocked remoteBlock')
                 .populate('assignedTo', 'name phone')
                 .populate('wabaId', 'businessName phoneNumbers')
                 .populate('tags', 'name color'),
@@ -58,7 +59,7 @@ async function search(req, res, next) {
         const skip = (parseInt(page, 10) - 1) * parsedLimit;
 
         // Build access filter for staff restriction & wabaId
-        const accessFilter = {};
+        const accessFilter = { mergedInto: null };
         if (wabaId) accessFilter.wabaId = wabaId;
         if (req.user.role === 'staff') {
             accessFilter.assignedTo = req.user._id;
@@ -73,7 +74,11 @@ async function search(req, res, next) {
                 { name: { $regex: safeQ, $options: 'i' } },
                 { nickname: { $regex: safeQ, $options: 'i' } },
                 { phoneNumber: { $regex: phoneQ, $options: 'i' } },
-                { waId: { $regex: phoneQ, $options: 'i' } }
+                { waId: { $regex: phoneQ, $options: 'i' } },
+                { nameOnWhatsApp: { $regex: safeQ, $options: 'i' } },
+                // WhatsApp username (with or without "@") and business-scoped user ID
+                { username: { $regex: escapeRegex(String(q).replace(/^@/, '')), $options: 'i' } },
+                { bsuid: { $regex: safeQ, $options: 'i' } }
             ]},
             { _id: 1, name: 1, nickname: 1 }
         );
@@ -87,6 +92,7 @@ async function search(req, res, next) {
             $or: [
                 { phoneNumber: { $regex: phoneQ, $options: 'i' } },
                 { waId: { $regex: phoneQ, $options: 'i' } },
+                { bsuid: { $regex: safeQ, $options: 'i' } },
                 ...(contactIds.length > 0 ? [{ contactId: { $in: contactIds } }] : [])
             ]
         };
@@ -94,7 +100,7 @@ async function search(req, res, next) {
         const namePhoneChats = await Chat.find(namePhoneFilter)
             .sort({ lastMessageAt: -1 })
             .limit(parsedLimit)
-            .populate('contactId', 'name nameOnWhatsApp nickname profilePicture')
+            .populate('contactId', 'name nameOnWhatsApp nickname username profilePicture')
             .populate('assignedTo', 'name phone')
             .populate('wabaId', 'businessName phoneNumbers')
             .populate('tags', 'name color')
@@ -144,7 +150,7 @@ async function search(req, res, next) {
                     _id: { $in: msgChatIds.map(m => m._id) }
                 };
                 const msgChats = await Chat.find(msgChatFilter)
-                    .populate('contactId', 'name nameOnWhatsApp nickname profilePicture')
+                    .populate('contactId', 'name nameOnWhatsApp nickname username profilePicture')
                     .populate('assignedTo', 'name phone')
                     .populate('wabaId', 'businessName phoneNumbers')
                     .populate('tags', 'name color')
@@ -992,7 +998,7 @@ async function startWithPhone(req, res, next) {
         let chat = await Chat.findOne({
             wabaId: selectedWabaId,
             phoneNumber: normalizedPhone
-        }).populate('contactId', 'name nameOnWhatsApp nickname profilePicture isOptedOut isBlocked')
+        }).populate('contactId', 'name nameOnWhatsApp nickname username profilePicture isOptedOut isBlocked remoteBlock')
           .populate('wabaId', 'businessName phoneNumbers')
           .populate('assignedTo', 'name phone')
           .populate('tags', 'name color');
@@ -1012,7 +1018,7 @@ async function startWithPhone(req, res, next) {
 
             // Populate the newly created chat
             chat = await Chat.findById(chat._id)
-                .populate('contactId', 'name nameOnWhatsApp nickname profilePicture isOptedOut isBlocked')
+                .populate('contactId', 'name nameOnWhatsApp nickname username profilePicture isOptedOut isBlocked remoteBlock')
                 .populate('wabaId', 'businessName phoneNumbers')
                 .populate('assignedTo', 'name phone')
                 .populate('tags', 'name color');

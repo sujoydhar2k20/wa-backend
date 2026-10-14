@@ -12,6 +12,7 @@ router.post('/improve', messageImprovementController.improveMessageHandler);
 router.post('/:id/react', messagesController.react);
 router.post('/:id/read', messagesController.markRead);
 router.post('/:chatId/note', messagesController.addNote);
+router.post('/:chatId/request-contact-info', messagesController.requestContactInfo);
 router.delete('/:id', messagesController.deleteMsg);
 router.post('/:id/retry', messagesController.retry);
 router.post('/:id/media/retry', messagesController.retryMedia);

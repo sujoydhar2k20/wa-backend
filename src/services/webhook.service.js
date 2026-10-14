@@ -9,6 +9,8 @@ const { uploadToVPS } = require('../utils/vpsUpload');
 const aiFallbackService = require('./aiFallback.service');
 const { parseInboundContent, previewText } = require('./inboundMessage');
 const { isKnownStatus, statusGuard } = require('./messageStatus');
+const { senderIdentity, resolveContact, resolveChat, applyUserIdChange } = require('./customerIdentity');
+const { isBsuid, displayIdentity, addressOf, phoneDigits } = require('../utils/waIdentity');
 
 const GST = 0.03;
 
@@ -53,6 +55,12 @@ async function processWebhook(entry) {
         for (const change of entry?.changes || []) {
             const value = change?.value;
             if (!value) continue;
+
+            // A customer's business-scoped user ID changed.
+            if (change.field === 'user_id_update' || Array.isArray(value.user_id_update)) {
+                await require('./customerIdentity').processUserIdUpdate(value);
+                continue;
+            }
 
             if (value.statuses && value.statuses.length > 0) {
                 for (const statusObj of value.statuses) {
@@ -147,13 +155,26 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
     const parsed = parseInboundContent(msg);
     logger.info(`[webhook] inbound ${msg.type}${parsed.type !== msg.type ? `->${parsed.type}` : ''} ${msg.id}${msg.context ? ' (reply)' : ''}`);
 
-    const waId = msg.from; // Sender's phone number
-    
-    // Check if the number is globally blocked in AI settings
+    // Sender identity: phone (wa_id) and/or business-scoped user ID (BSUID). Either may be missing
+    // since WhatsApp usernames; a BSUID is never treated as a phone number.
+    const identity = senderIdentity(msg, contacts);
+    // Reply to our "share your phone number" request: the shared card is the customer's own number.
+    // Only origin "contact_request" counts; a contact card forwarded by the customer is someone else.
+    if (!identity.waId && identity.bsuid && msg.type === 'contacts') {
+        const own = (msg.contacts || []).find((c) => c?.origin === 'contact_request');
+        const ownPhone = phoneDigits(own?.phones?.find((p) => p?.wa_id)?.wa_id || own?.phones?.[0]?.phone);
+        if (ownPhone) identity.waId = ownPhone;
+    }
+    const waId = identity.waId || undefined; // phone digits, when WhatsApp shared them
+    const bsuid = identity.bsuid || undefined;
+    const senderKey = waId || bsuid; // stable sender reference (reactions, logs)
+    if (!senderKey) throw new Error('Inbound message has no sender identity (no from / from_user_id)');
+
+    // Check if the number is globally blocked in AI settings (phone numbers only)
     try {
         const { AiSetting } = require('../models');
         const aiSettings = await AiSetting.findOne().lean();
-        if (aiSettings && aiSettings.blockedPhoneNumbers) {
+        if (waId && aiSettings && aiSettings.blockedPhoneNumbers) {
             const blockedNumbers = aiSettings.blockedPhoneNumbers.split(',').map(n => n.trim()).filter(Boolean);
             if (blockedNumbers.includes(waId)) {
                 logger.info(`Webhook: Message from globally blocked customer number ${waId} ignored early (AI settings blocklist).`);
@@ -164,43 +185,24 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
         logger.error('Error checking global blocked numbers in webhook:', err);
     }
 
-    const contactData = contacts.find(c => c.wa_id === waId);
-    const profileName = contactData?.profile?.name || waId;
+    const profileName = identity.profileName || '';
+    const fallbackName = displayIdentity({ waId, username: identity.username, bsuid });
 
-    // Contact handling
-    let contact = await Contact.findOne({ waId });
-    if (!contact) {
-        contact = await Contact.create({
-            phoneNumber: waId,
-            waId,
-            nameOnWhatsApp: profileName,
-            name: profileName !== waId ? profileName : '',
-        });
-    } else {
-        let updated = false;
-        if (profileName !== waId && contact.nameOnWhatsApp !== profileName) {
-            contact.nameOnWhatsApp = profileName;
-            updated = true;
-        }
-        if (profileName !== waId && !contact.name) {
-            contact.name = profileName;
-            updated = true;
-        }
-        if (updated) {
-            await contact.save();
-        }
-    }
+    // Contact handling (matches phone OR BSUID; adds newly learned identities; no duplicates)
+    const contact = await resolveContact(identity);
 
-    // waId is NOT unique, so duplicate Contact docs can exist for the same number — the chat
-    // (and the UI badge) may point to one document while this webhook loaded another. Match by
-    // waId OR phoneNumber so block/opt-out state on ANY matching contact is honoured.
-    const sanitizedWaId = String(waId).replace(/\D/g, '');
-    const numberMatch = { $or: [{ waId: sanitizedWaId }, { phoneNumber: sanitizedWaId }] };
+    // Duplicate Contact docs can exist for the same customer — the chat (and the UI badge) may point to
+    // one document while this webhook loaded another. Match by every known identity so block/opt-out
+    // state on ANY matching contact is honoured.
+    const idOr = [];
+    if (waId) idOr.push({ waId }, { phoneNumber: waId });
+    if (bsuid) idOr.push({ bsuid });
+    const numberMatch = { $or: idOr };
 
-    // Block logic: discard inbound messages if this number is blocked.
+    // Block logic: discard inbound messages if this customer is blocked.
     const isContactBlocked = contact.isBlocked || await Contact.exists({ ...numberMatch, isBlocked: true });
     if (isContactBlocked) {
-        logger.info(`Message from blocked contact ${waId} ignored.`);
+        logger.info(`Message from blocked contact ${senderKey} ignored.`);
         return;
     }
 
@@ -210,11 +212,11 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
     if (wasOptedOut) {
         await Contact.updateMany(numberMatch, { $set: { isOptedOut: false }, $unset: { optedOutAt: '' } });
         contact.isOptedOut = false;
-        logger.info(`Auto opted-in contact ${waId} after inbound message.`);
+        logger.info(`Auto opted-in contact ${senderKey} after inbound message.`);
     }
 
-    // Find or create chat
-    let chat = await Chat.findOne({ wabaId: waba._id, waId });
+    // Find or create chat (by phone OR BSUID)
+    let chat = await resolveChat(waba._id, identity);
     const isNewChat = !chat;
 
     if (!chat) {
@@ -223,6 +225,7 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
             phoneNumberId,
             phoneNumber: waId,
             waId,
+            bsuid,
             contactId: contact._id,
             status: 'open',
             isUnread: true,
@@ -230,6 +233,13 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
         });
     } else if (!chat.contactId) {
         chat.contactId = contact._id;
+    }
+
+    // The customer's BSUID changed (system notice): move the new one onto this customer.
+    if (parsed.isSystemEvent && parsed.metadata?.systemType === 'user_changed_user_id' && isBsuid(parsed.metadata.user_id)) {
+        const newId = parsed.metadata.user_id;
+        await applyUserIdChange({ previous: bsuid, current: newId, waId });
+        if (!(await Chat.exists({ wabaId: waba._id, bsuid: newId, _id: { $ne: chat._id } }))) chat.bsuid = newId;
     }
 
     // Auto-assign new chat to the least-loaded active staff member on this WABA (round-robin by open chat count)
@@ -260,7 +270,7 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
                 const leastLoaded = chatCounts[0];
                 chat.assignedTo = leastLoaded.staffId;
                 logger.info(
-                    `Auto-assigned new chat (waId: ${waId}) to staff ${leastLoaded.staffId} (open chats: ${leastLoaded.count})`
+                    `Auto-assigned new chat (${senderKey}) to staff ${leastLoaded.staffId} (open chats: ${leastLoaded.count})`
                 );
             }
         } catch (err) {
@@ -293,6 +303,7 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
         phoneNumberId,
         messageId: msg.id,
         waId,
+        bsuid,
         direction: 'inbound',
         type: parsed.type,
         status: 'delivered',
@@ -320,7 +331,7 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
                 senderName = parentWithSender.sentBy?.name || 'Staff';
             } else {
                 // Customer-sent message
-                senderName = profileName || waId;
+                senderName = profileName || fallbackName;
             }
             
             // Build the quoted message preview data
@@ -350,9 +361,9 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
 
         const targetMsg = await Message.findOne({ messageId: targetMessageId });
         if (targetMsg) {
-            targetMsg.reactions = targetMsg.reactions.filter(r => r.by !== waId);
+            targetMsg.reactions = targetMsg.reactions.filter(r => r.by !== senderKey && !(bsuid && r.by === bsuid));
             if (emoji) {
-                targetMsg.reactions.push({ emoji, by: waId });
+                targetMsg.reactions.push({ emoji, by: senderKey });
             }
             await targetMsg.save();
 
@@ -435,7 +446,7 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
         // The content did not fit our schema: never lose the message, store a readable placeholder.
         logger.error(`[webhook] ${msg.type} message ${msg.id} failed validation (${Object.keys(createErr.errors || {}).join(', ')}); stored as placeholder`);
         message = await Message.create({
-            chatId: messageData.chatId, wabaId: messageData.wabaId, phoneNumberId, messageId: msg.id, waId,
+            chatId: messageData.chatId, wabaId: messageData.wabaId, phoneNumberId, messageId: msg.id, waId, bsuid,
             direction: 'inbound', type: 'unsupported', status: 'delivered',
             text: messageData.text || '⚠️ The customer sent a message that could not be stored. Please check WhatsApp on the phone.',
             metadata: { kind: 'unsupported', originalType: msg.type, reason: 'validation' },
@@ -466,7 +477,7 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
             }
 
             if (userIdsToNotify.length > 0) {
-                const displayName = profileName || waId;
+                const displayName = profileName || contact.name || fallbackName;
                 const notificationType = isNewChat ? 'new_chat' : 'unread_reminder';
                 
                 // Construct WhatsApp-like title and body
@@ -501,7 +512,7 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
     let isCallGenerated = callEvents.isCallGeneratedMessage({
         msg,
         messageData,
-        recentInboundCall: (msg.type === 'unsupported' || msg.type === 'system')
+        recentInboundCall: (msg.type === 'unsupported' || msg.type === 'system') && waId
             ? await callEvents.hasRecentInboundCall({ phoneNumberId, waId })
             : false,
     });
@@ -565,7 +576,7 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
     }
 
     // Trigger on_open_conversation for brand new chats AND for chats reopened after being closed
-    logger.info(`[bot] open-conversation check for chat ${chat._id} (waId: ${waId}): isNewChat=${isNewChat}, wasReopened=${wasReopened}`);
+    logger.info(`[bot] open-conversation check for chat ${chat._id} (${senderKey}): isNewChat=${isNewChat}, wasReopened=${wasReopened}`);
     if ((isNewChat || wasReopened) && !isCallGenerated) {
         botService.processOpenConversation({
             waba, phoneNumberId, chat, message, text: msgText || '',
@@ -1060,7 +1071,7 @@ async function handleProductCodeReply(waba, phoneNumberId, chat, message, text, 
         const waResult = await whatsappService.sendTextMessage(
             waba._id,
             phoneNumberId,
-            chat.waId,
+            addressOf(chat),
             lines,
             message.messageId  // reply to the original message
         );
@@ -1073,6 +1084,7 @@ async function handleProductCodeReply(waba, phoneNumberId, chat, message, text, 
             phoneNumberId,
             messageId: msgId,
             waId: chat.waId,
+            bsuid: chat.bsuid,
             direction: 'outbound',
             type: 'text',
             text: lines,
@@ -1097,7 +1109,7 @@ async function handleProductCodeReply(waba, phoneNumberId, chat, message, text, 
             logger.warn('Socket emit failed for product auto-reply:', e.message);
         }
 
-        logger.info(`Product code auto-reply sent for code "${code}" (${source}) to ${chat.waId}`);
+        logger.info(`Product code auto-reply sent for code "${code}" (${source}) to chat ${chat._id}`);
     } catch (err) {
         replyStatus = 'error';
         replyError = err.message;

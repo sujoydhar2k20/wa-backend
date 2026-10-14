@@ -329,7 +329,7 @@ async function checkAndNudgeUnreadChats() {
             }
 
             if (userIdsToNotify.length > 0) {
-                const profileName = chat.contactId?.name || chat.contactId?.nameOnWhatsApp || chat.waId;
+                const profileName = chat.contactId?.name || chat.contactId?.nameOnWhatsApp || require('../utils/waIdentity').displayIdentity({ waId: chat.waId, bsuid: chat.bsuid });
                 const notificationService = require('./notification.service');
                 
                 const isRepeated = !!chat.lastNotificationAt;

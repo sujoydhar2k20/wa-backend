@@ -1,4 +1,5 @@
 const { logger } = require('../utils/logger');
+const { addressOf } = require('../utils/waIdentity');
 
 /**
  * Background job: processes bulk product image sends to WhatsApp sequentially
@@ -90,7 +91,7 @@ module.exports = function (agenda) {
         // Send via WhatsApp API with retry
         const waResult = await retryWithBackoff(
           () => whatsappService.sendMediaMessage(
-            chat.wabaId, chat.phoneNumberId, chat.waId,
+            chat.wabaId, chat.phoneNumberId, addressOf(chat),
             type, mediaIdToSend, message.caption || ''
           )
         );
