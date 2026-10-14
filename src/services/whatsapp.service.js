@@ -7,6 +7,8 @@ const { logger } = require('../utils/logger');
 const { recipientFields, isBsuid, phoneDigits } = require('../utils/waIdentity');
 
 const BASE_URL = `https://graph.facebook.com/${config.meta.apiVersion}`;
+const META_SEND_TIMEOUT_MS = parseInt(process.env.META_SEND_TIMEOUT_MS, 10) || 30000;
+const META_UPLOAD_TIMEOUT_MS = parseInt(process.env.META_UPLOAD_TIMEOUT_MS, 10) || 180000;
 
 async function getWaba(wabaId) {
   const waba = await Waba.findById(wabaId);
@@ -43,11 +45,12 @@ async function checkContactBlockedOrOptedOut(to) {
   }
 }
 
-async function request(wabaId, method, path, data = null) {
+async function request(wabaId, method, path, data = null, extra = {}) {
   const token = await getAccessToken(wabaId);
   const url = `${BASE_URL}${path}`;
   const opts = { method, url, headers: { Authorization: `Bearer ${token}` } };
   if (data) opts.data = data;
+  if (extra.timeout) opts.timeout = extra.timeout;
   let res;
   try {
     res = await axios(opts);
@@ -88,13 +91,17 @@ async function sendTextMessage(wabaId, phoneNumberId, to, text, replyToMessageId
   if (replyToMessageId) {
     body.context = { message_id: replyToMessageId };
   }
-  return request(wabaId, 'POST', path, body);
+  // Finite timeout: a hung Meta connection must not hold the request forever.
+  return request(wabaId, 'POST', path, body, { timeout: META_SEND_TIMEOUT_MS });
 }
 
 /**
  * @param {object} [options]
  * @param {boolean} [options.voice] audio only: send as a WhatsApp voice message (`audio.voice: true`).
  *   Meta requires an OGG/OPUS file for this; callers must upload one (see convertVoiceNoteForMeta).
+ * @param {string} [options.bizOpaque] echoed back by Meta in status webhooks (biz_opaque_callback_data);
+ *   used to match a send whose HTTP response was lost (timeout) to our message.
+ * @param {number} [options.timeout] request timeout in ms (default META_SEND_TIMEOUT_MS).
  */
 async function sendMediaMessage(wabaId, phoneNumberId, to, type, urlOrId, caption = '', replyToMessageId = null, options = {}) {
   await checkContactBlockedOrOptedOut(to);
@@ -121,7 +128,8 @@ async function sendMediaMessage(wabaId, phoneNumberId, to, type, urlOrId, captio
   if (replyToMessageId) {
     body.context = { message_id: replyToMessageId };
   }
-  return request(wabaId, 'POST', path, body);
+  if (options.bizOpaque) body.biz_opaque_callback_data = String(options.bizOpaque).slice(0, 512);
+  return request(wabaId, 'POST', path, body, { timeout: options.timeout || META_SEND_TIMEOUT_MS });
 }
 
 // Meta keeps uploaded media for 30 days. Re-upload well before that.
@@ -579,6 +587,7 @@ async function uploadMedia(wabaId, phoneNumberId, fileBuffer, mimeType) {
   try {
     res = await axios.post(path, form, {
       headers: { ...form.getHeaders(), Authorization: `Bearer ${token}` },
+      timeout: META_UPLOAD_TIMEOUT_MS,
     });
   } catch (error) {
     if (error.response) {
@@ -588,6 +597,50 @@ async function uploadMedia(wabaId, phoneNumberId, fileBuffer, mimeType) {
     throw error;
   }
   return res.data.id;
+}
+
+const MEDIA_EXT = {
+  'audio/ogg': 'ogg', 'audio/mp4': 'm4a', 'audio/mpeg': 'mp3', 'audio/aac': 'aac', 'audio/amr': 'amr',
+  'image/jpeg': 'jpg', 'image/png': 'png', 'video/mp4': 'mp4', 'video/3gpp': '3gp',
+};
+
+/**
+ * Upload a file to Meta by streaming it from disk (never loaded whole into memory).
+ * The multipart body has a known Content-Length (file size passed as knownLength), so a short read
+ * fails the request instead of silently truncating it. Returns the Meta media id.
+ */
+async function uploadMediaFile(wabaId, phoneNumberId, filePath, mimeType, size, { fileName } = {}) {
+  const FormData = require('form-data');
+  const fs = require('fs');
+  const form = new FormData();
+  const ext = MEDIA_EXT[mimeType] || mimeType.split('/')[1] || 'bin';
+  form.append('messaging_product', 'whatsapp');
+  form.append('type', mimeType);
+  form.append('file', fs.createReadStream(filePath), {
+    filename: fileName || `upload.${ext}`, contentType: mimeType, knownLength: size,
+  });
+  const token = await getAccessToken(wabaId);
+  const url = `${BASE_URL}/${phoneNumberId}/media`;
+  try {
+    const res = await axios.post(url, form, {
+      headers: { ...form.getHeaders(), 'Content-Length': form.getLengthSync(), Authorization: `Bearer ${token}` },
+      timeout: META_UPLOAD_TIMEOUT_MS,
+      maxBodyLength: Infinity,
+      maxContentLength: Infinity,
+      // No redirect support: follow-redirects would keep a copy of the whole request body in memory.
+      maxRedirects: 0,
+    });
+    if (!res.data || !res.data.id) throw new Error('Meta did not return a media id');
+    return res.data.id;
+  } catch (error) {
+    if (error.response) {
+      const metaErr = error.response.data?.error;
+      logger.error(`Media Upload Error: ${error.response.status} code=${metaErr?.code ?? '-'} ${String(metaErr?.message || '').slice(0, 200)}`);
+      if (metaErr?.message) error.message = `Meta API Error: ${metaErr.message}`;
+      if (metaErr?.code) error.metaCode = metaErr.code;
+    }
+    throw error;
+  }
 }
 
 // Fields we own locally on a header component. Meta's payload never contains them, so a sync
@@ -929,6 +982,7 @@ module.exports = {
   reactToMessage,
   downloadMedia,
   uploadMedia,
+  uploadMediaFile,
   syncTemplates,
   verifyWebhook,
   request,

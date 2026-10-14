@@ -3,14 +3,14 @@ const { addressOf } = require('../utils/waIdentity');
 
 /**
  * Background job: processes bulk product image sends to WhatsApp sequentially
- * with rate-limit-safe delays. Each image is downloaded, converted to JPEG,
- * uploaded to Meta, then sent. Status updates are emitted via socket in real-time.
+ * with rate-limit-safe delays (pacing unchanged). Each file goes through the shared media pipeline
+ * (same preparation rules as normal sends: pass-through when acceptable), is uploaded to Meta, then sent.
+ * Stage + status updates are persisted on the message and emitted via socket.
  */
 module.exports = function (agenda) {
   agenda.define('send-bulk-messages', async (job) => {
     const { chatId, messageIds } = job.attrs.data;
     const { Message, Chat } = require('../models');
-    const whatsappService = require('../services/whatsapp.service');
     const { getIO } = require('../websocket/socket.server');
 
     const chat = await Chat.findById(chatId).populate('contactId', 'isBlocked isOptedOut');
@@ -57,75 +57,18 @@ module.exports = function (agenda) {
         logger.info(`[BulkSend] Message ${msgId} already has status '${message.status}', skipping`);
         continue;
       }
+      // A re-run after a crash must never send a message twice: one that reached the send step
+      // without a confirmed result is left to the webhook / recovery sweep.
+      if (['sending', 'unconfirmed', 'sent'].includes(message.pipeline?.stage)) {
+        logger.warn(`[BulkSend] Message ${msgId} was already at '${message.pipeline.stage}', not re-sending`);
+        continue;
+      }
 
       try {
-        const type = message.type;
-        const mediaUrl = message.mediaUrl;
-        let mediaIdToSend = mediaUrl;
-
-        // Download, convert, and upload to Meta
-        if (mediaUrl && mediaUrl.startsWith('http')) {
-          const axios = require('axios');
-          const response = await axios.get(mediaUrl, {
-            responseType: 'arraybuffer',
-            timeout: 30000,
-            headers: { 'User-Agent': 'Mozilla/5.0 (compatible; WhatsApp-Bot/1.0)' }
-          });
-          let buffer = Buffer.from(response.data, 'binary');
-          let mimeType = response.headers['content-type'] || 'image/jpeg';
-          mimeType = mimeType.split(';')[0].trim();
-
-          // Always convert images to JPEG for WhatsApp compatibility
-          if (type === 'image') {
-            const sharp = require('sharp');
-            buffer = await sharp(buffer).jpeg({ quality: 90 }).toBuffer();
-            mimeType = 'image/jpeg';
-          }
-
-          // Upload to Meta with retry
-          mediaIdToSend = await retryWithBackoff(
-            () => whatsappService.uploadMedia(chat.wabaId, chat.phoneNumberId, buffer, mimeType)
-          );
-        }
-
-        // Send via WhatsApp API with retry
-        const waResult = await retryWithBackoff(
-          () => whatsappService.sendMediaMessage(
-            chat.wabaId, chat.phoneNumberId, addressOf(chat),
-            type, mediaIdToSend, message.caption || ''
-          )
-        );
-
-        // Update message in DB with WhatsApp message ID and 'sent' status
-        const waMsgId = waResult?.messages?.[0]?.id;
-        message.messageId = waMsgId;
-        message.status = 'sent';
-        await message.save();
-
-        // Emit status update via socket so frontend updates in real-time
-        getIO().emit('message:status', {
-          chatId: chat._id.toString(),
-          messageId: message._id.toString(),
-          waMessageId: waMsgId,
-          status: 'sent'
-        });
-
-        logger.info(`[BulkSend] Message ${i + 1}/${messageIds.length} sent successfully (${waMsgId})`);
+        await sendOneBulkMessage(message, chat);
       } catch (err) {
         logger.error(`[BulkSend] Failed to send message ${msgId}: ${err.message}`);
-
-        // Mark as failed in DB
-        message.status = 'failed';
-        message.errorMessage = err.message;
-        await message.save();
-
-        // Emit failure status
-        getIO().emit('message:status', {
-          chatId: chat._id.toString(),
-          messageId: message._id.toString(),
-          status: 'failed',
-          errorMessage: err.message
-        });
+        await markFailed(message, err);
       }
 
       // Rate limiting delay between sends: 1.5s for first 5, 2.5s after
@@ -139,23 +82,95 @@ module.exports = function (agenda) {
   });
 };
 
-/**
- * Retry a function with exponential backoff (same logic as messages.controller).
- */
-async function retryWithBackoff(fn, maxRetries = 3, baseDelayMs = 1500) {
-  let lastError;
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+const iso = () => new Date().toISOString();
+
+function emit(message) {
+  try {
+    require('../services/media/mediaMessageService').emitPipeline(message);
+  } catch (e) {
+    logger.warn(`[BulkSend] socket emit failed: ${e.message}`);
+  }
+}
+
+/** Same preparation, Meta upload and safe-send rules as normal sends (services/media/mediaPipeline). */
+async function sendOneBulkMessage(message, chat) {
+  const media = require('../services/media/mediaPipeline');
+  const { Message } = require('../models');
+  const timings = { ...(message.pipeline?.timings || {}), prepareStartedAt: iso() };
+  message.pipeline = { ...(message.pipeline || {}), mode: 'bulk', stage: 'preparing', active: false, version: (message.pipeline?.version || 0) + 1, timings };
+  message.markModified('pipeline');
+  await message.save();
+  emit(message);
+
+  let mediaIdToSend = message.mediaUrl;
+  let prepared;
+  if (message.mediaUrl && message.mediaUrl.startsWith('http')) {
     try {
-      return await fn();
-    } catch (err) {
-      lastError = err;
-      const status = err.response?.status;
-      const isRetryable = status === 429 || (status >= 500 && status < 600) || !status;
-      if (!isRetryable || attempt === maxRetries) throw err;
-      const delay = baseDelayMs * Math.pow(2, attempt - 1);
-      logger.warn(`[BulkSend] API call failed (attempt ${attempt}/${maxRetries}), retrying in ${delay}ms...`);
-      await new Promise(resolve => setTimeout(resolve, delay));
+      prepared = await media.prepareMedia({ type: message.type, mediaUrl: message.mediaUrl });
+      const up = await media.uploadToMeta(chat, prepared.file);
+      mediaIdToSend = up.mediaId;
+      Object.assign(timings, {
+        prepareEndedAt: iso(), sourceMs: prepared.timings.sourceMs, sourceLocal: prepared.timings.sourceLocal,
+        prepareMs: prepared.timings.prepareMs, inputBytes: prepared.details.inputBytes, outputBytes: prepared.file.size,
+        metaUploadMs: up.ms, metaUploadedAt: iso(),
+      });
+      message.pipeline.prepareAction = prepared.action;
+    } finally {
+      if (prepared) await prepared.cleanup();
     }
   }
-  throw lastError;
+  timings.sendStartedAt = iso();
+  message.pipeline = { ...message.pipeline, stage: 'sending', stageAt: new Date(), version: message.pipeline.version + 1, timings };
+  message.markModified('pipeline');
+  await message.save();
+  emit(message);
+  const result = await media.sendOnce({
+    chat, to: addressOf(chat), type: message.type, mediaIdOrUrl: mediaIdToSend, caption: message.caption || '',
+    bizOpaque: `bjs:${message._id}:${(message.pipeline.sendAttempts || 0) + 1}`,
+  });
+  timings.sendMs = result.ms;
+  message.pipeline.sendAttempts = (message.pipeline.sendAttempts || 0) + 1;
+  if (result.ok) {
+    timings.sentAt = iso();
+    // Re-read: a fast webhook may already have moved the status forward.
+    const fresh = await Message.findById(message._id);
+    fresh.messageId = fresh.messageId || result.wamid;
+    if (['queued', 'failed'].includes(fresh.status)) fresh.status = 'sent';
+    fresh.errorCode = undefined;
+    fresh.errorMessage = undefined;
+    fresh.pipeline = { ...message.pipeline, stage: 'sent', version: message.pipeline.version + 1, timings, error: null };
+    fresh.markModified('pipeline');
+    await fresh.save();
+    emit(fresh);
+    logger.info(`[BulkSend] Message ${message._id} sent (${result.wamid})`);
+    return;
+  }
+  if (result.kind === 'ambiguous') {
+    // Never re-sent automatically: the recovery sweep marks it failed if no webhook confirms it.
+    message.pipeline = {
+      ...message.pipeline, stage: 'unconfirmed', stageAt: new Date(), version: message.pipeline.version + 1,
+      timings: { ...timings, unconfirmedAt: iso() },
+      error: { stage: 'send', message: 'WhatsApp did not confirm the send. Checking...', at: iso(), willRetry: false },
+    };
+    message.markModified('pipeline');
+    await message.save();
+    emit(message);
+    return;
+  }
+  throw result.error;
+}
+
+async function markFailed(message, err) {
+  message.status = 'failed';
+  message.errorMessage = String(err?.message || 'Send failed').slice(0, 300);
+  if (err?.metaCode != null) message.errorCode = err.metaCode;
+  message.pipeline = {
+    ...(message.pipeline || {}), mode: 'bulk', stage: 'failed', active: false,
+    version: (message.pipeline?.version || 0) + 1,
+    timings: { ...(message.pipeline?.timings || {}), failedAt: iso() },
+    error: { stage: 'send', message: message.errorMessage, at: iso(), willRetry: false },
+  };
+  message.markModified('pipeline');
+  await message.save();
+  emit(message);
 }

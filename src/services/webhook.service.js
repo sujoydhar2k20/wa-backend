@@ -657,6 +657,8 @@ async function handleStatusUpdate(statusObj) {
             status: status,
             statusTimestamp: timestamp,
         };
+        // Per-status time (shown in the message timing details). Only known statuses reach the update below.
+        if (/^[a-z]+$/.test(String(status))) updatePayload[`statusTimes.${status}`] = timestamp;
         // Only overwrite error fields when status is 'failed'
         if (status === 'failed') {
             updatePayload.errorCode = errorCode;
@@ -675,6 +677,15 @@ async function handleStatusUpdate(statusObj) {
             if (attempt < MAX_RETRIES) {
                 logger.warn(`Status update: message not found for Meta ID ${messageId} (attempt ${attempt}/${MAX_RETRIES}), retrying in ${RETRY_DELAY_MS}ms...`);
                 await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS));
+            }
+        }
+        if (!exists && statusObj.biz_opaque_callback_data) {
+            // A media send whose HTTP response was lost (timeout): Meta echoes our message id back.
+            try {
+                const { reconcileFromWebhook } = require('./media/mediaMessageService');
+                if (await reconcileFromWebhook(statusObj)) exists = await Message.exists({ messageId });
+            } catch (recErr) {
+                logger.warn(`Status update: callback-data reconciliation failed for ${messageId}: ${recErr.message}`);
             }
         }
         if (exists) {

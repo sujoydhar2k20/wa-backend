@@ -4,9 +4,10 @@ const crypto = require('crypto');
 const { logger } = require('./logger');
 
 // Base directory where files are stored on the VPS
-const UPLOAD_BASE_DIR = '/var/www/WhatsappUpload';
+// (VPS_UPLOAD_DIR / VPS_UPLOAD_URL override these only for tests or another server; production uses the defaults.)
+const UPLOAD_BASE_DIR = process.env.VPS_UPLOAD_DIR || '/var/www/WhatsappUpload';
 // Public URL base for the uploaded files
-const UPLOAD_BASE_URL = 'https://upload.biswakarmagold.com';
+const UPLOAD_BASE_URL = (process.env.VPS_UPLOAD_URL || 'https://upload.biswakarmagold.com').replace(/\/+$/, '');
 
 /**
  * Ensure a directory exists, creating it recursively if needed.
@@ -111,6 +112,9 @@ async function uploadToVPS(buffer, options = {}) {
 
 module.exports = {
     uploadToVPS,
+    generateFilename,
+    extensionFromMime,
+    ensureDir,
     UPLOAD_BASE_DIR,
     UPLOAD_BASE_URL,
 };

@@ -2,197 +2,62 @@ const { Message, Chat, Contact } = require('../models');
 const whatsappService = require('../services/whatsapp.service');
 const { logger } = require('../utils/logger');
 const { addressOf } = require('../utils/waIdentity');
-const { execFile } = require('child_process');
-const os = require('os');
-const path = require('path');
-const fs = require('fs');
 
 const { escapeRegex, phoneSearchTerm } = require('../utils/regex');
-/**
- * Convert any browser-recorded audio to AAC/M4A for Meta.
- * Uses ffmpeg's built-in AAC encoder — no libopus or libmp3lame required.
- * Meta supports audio/mp4 (AAC) natively for outbound audio messages.
- */
-async function convertAudioForMeta(buffer) {
-    const id = `${Date.now()}_${process.pid}_${Math.random().toString(36).slice(2)}`;
-    const tmpIn = path.join(os.tmpdir(), `wa_audio_in_${id}`);
-    const tmpOut = path.join(os.tmpdir(), `wa_audio_out_${id}.m4a`);
-    try {
-        await fs.promises.writeFile(tmpIn, buffer);
-        await new Promise((resolve, reject) => {
-            execFile('ffmpeg', [
-                '-y', '-i', tmpIn,
-                '-vn',                  // strip any video stream
-                '-c:a', 'aac',          // built-in AAC encoder, no extra library needed
-                '-b:a', '128k',
-                '-movflags', '+faststart',
-                tmpOut
-            ], { timeout: 60000 }, (err, _stdout, stderr) => {
-                if (err) {
-                    logger.error(`ffmpeg audio conversion failed: ${err.message}\nstderr: ${stderr}`);
-                    reject(new Error(`ffmpeg audio conversion failed: ${err.message}`));
-                } else {
-                    if (stderr) logger.info(`ffmpeg audio stderr: ${stderr.slice(-300)}`);
-                    resolve();
-                }
-            });
-        });
-        const result = await fs.promises.readFile(tmpOut);
-        if (result.length === 0) throw new Error('ffmpeg produced an empty audio output file');
-        logger.info(`Audio converted to AAC/M4A: ${buffer.length} → ${result.length} bytes`);
-        return result;
-    } finally {
-        fs.promises.unlink(tmpIn).catch(() => {});
-        fs.promises.unlink(tmpOut).catch(() => {});
-    }
-}
+const media = require('../services/media/mediaPipeline');
+const mediaMessages = require('../services/media/mediaMessageService');
+const { convertVoiceNoteForMeta, VOICE_PLAY_ICON_MAX_BYTES } = require('../services/media/audioPrep');
 
-// WhatsApp shows the voice-message play icon only for OGG/OPUS files up to 512 KB.
-const VOICE_PLAY_ICON_MAX_BYTES = 512 * 1024;
+/** A browser/app-local preview reference must never be treated as a server URL or a Meta media id. */
+const LOCAL_REF_RE = /^(blob|data|file|content|filesystem):/i;
 
-function runFfmpeg(args, timeout = 60000) {
-    return new Promise((resolve, reject) => {
-        execFile('ffmpeg', args, { timeout }, (err, _stdout, stderr) => {
-            if (err) reject(new Error(`ffmpeg failed: ${err.message} ${String(stderr || '').slice(-300)}`));
-            else resolve();
-        });
-    });
+function wantsAsync(body) {
+    return body?.async === true || body?.async === 'true';
 }
 
 /**
- * Convert a staff-recorded voice note to OGG/OPUS mono 48 kHz for a WhatsApp voice message.
- * libopus only: Meta rejected files from ffmpeg's built-in experimental opus encoder (error 131053,
- * "on processing it is of type application/octet-stream"). Metadata is stripped. Re-encodes at a lower
- * bitrate if the file is over 512 KB (the play-icon limit).
- * Returns { buffer, oversize } or throws when libopus is missing (the caller then sends an ordinary
- * audio attachment and says so).
+ * Prepare + upload + send one media message inline (the request waits). Used for clients that do not
+ * opt into background sending, and by the legacy retry. Same preparation rules as the background job.
+ * Returns { waResult, sentAsVoice, voiceNotice, pipeline } or throws.
  */
-async function convertVoiceNoteForMeta(buffer) {
-    const id = `${Date.now()}_${process.pid}_${Math.random().toString(36).slice(2)}`;
-    const tmpIn = path.join(os.tmpdir(), `wa_voice_in_${id}`);
-    const tmpOut = path.join(os.tmpdir(), `wa_voice_out_${id}.ogg`);
-    try {
-        await fs.promises.writeFile(tmpIn, buffer);
-        for (const bitrate of ['32k', '24k', '16k']) {
-            await runFfmpeg(['-y', '-i', tmpIn, '-vn', '-map_metadata', '-1', '-ac', '1', '-ar', '48000',
-                '-c:a', 'libopus', '-application', 'voip', '-b:a', bitrate, '-f', 'ogg', tmpOut]);
-            const out = await fs.promises.readFile(tmpOut);
-            if (!out.length) throw new Error('ffmpeg produced an empty voice file');
-            // "OggS" page header + "OpusHead": anything else is not a voice note Meta will accept.
-            if (out.subarray(0, 4).toString('latin1') !== 'OggS' || !out.subarray(0, 200).toString('latin1').includes('OpusHead')) {
-                throw new Error('ffmpeg output is not Ogg/Opus');
-            }
-            if (out.length <= VOICE_PLAY_ICON_MAX_BYTES || bitrate === '16k') {
-                logger.info(`Voice note converted to OGG/OPUS (libopus, ${bitrate}): ${buffer.length} -> ${out.length} bytes`);
-                return { buffer: out, oversize: out.length > VOICE_PLAY_ICON_MAX_BYTES };
-            }
-        }
-        throw new Error('unreachable');
-    } finally {
-        fs.promises.unlink(tmpIn).catch(() => {});
-        fs.promises.unlink(tmpOut).catch(() => {});
-    }
-}
-
-/**
- * Detect the real MIME type of a document from its binary magic bytes.
- * Server Content-Type headers are often wrong (guessed from extension).
- * Meta rejects uploads whose declared MIME type doesn't match the content.
- *
- * Supported by Meta for documents:
- *   PDF, DOC/DOCX, XLS/XLSX, PPT/PPTX, TXT, CSV, RTF, ZIP, RAR
- */
-function detectDocumentMimeType(buffer, fallback) {
-    if (buffer.length < 8) return fallback;
-
-    // PDF: %PDF
-    if (buffer[0] === 0x25 && buffer[1] === 0x50 && buffer[2] === 0x44 && buffer[3] === 0x46) {
-        return 'application/pdf';
-    }
-    // ZIP-based (DOCX, XLSX, PPTX — all use the Office Open XML / ZIP container)
-    if (buffer[0] === 0x50 && buffer[1] === 0x4B && buffer[2] === 0x03 && buffer[3] === 0x04) {
-        // Distinguish by the declared fallback/extension since all share PK magic
-        if (fallback.includes('word') || fallback.includes('docx') || fallback.includes('doc')) {
-            return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
-        }
-        if (fallback.includes('sheet') || fallback.includes('xlsx') || fallback.includes('xls')) {
-            return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
-        }
-        if (fallback.includes('presentation') || fallback.includes('pptx') || fallback.includes('ppt')) {
-            return 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
-        }
-        return 'application/zip';
-    }
-    // OLE2 compound document (old DOC, XLS, PPT)
-    if (buffer[0] === 0xD0 && buffer[1] === 0xCF && buffer[2] === 0x11 && buffer[3] === 0xE0) {
-        if (fallback.includes('xls')) return 'application/vnd.ms-excel';
-        if (fallback.includes('ppt')) return 'application/vnd.ms-powerpoint';
-        return 'application/msword';
-    }
-    // RAR: Rar!
-    if (buffer[0] === 0x52 && buffer[1] === 0x61 && buffer[2] === 0x72 && buffer[3] === 0x21) {
-        return 'application/vnd.rar';
-    }
-
-    return fallback;
-}
-
-/**
- * Re-encode a video to H.264/AAC MP4 using system ffmpeg.
- * Meta only accepts H.264 video + AAC audio in an MP4 container.
- * H.265/HEVC, VP9, AV1, and other codecs are rejected with error 131053.
- */
-async function convertVideoToH264(buffer) {
-    const tmpIn = path.join(os.tmpdir(), `wa_video_in_${Date.now()}_${process.pid}.mp4`);
-    const tmpOut = path.join(os.tmpdir(), `wa_video_out_${Date.now()}_${process.pid}.mp4`);
-    try {
-        await fs.promises.writeFile(tmpIn, buffer);
-        await new Promise((resolve, reject) => {
-            execFile('ffmpeg', [
-                '-y', '-i', tmpIn,
-                '-c:v', 'libx264', '-preset', 'fast', '-crf', '28',
-                '-c:a', 'aac', '-b:a', '128k',
-                '-movflags', '+faststart',
-                tmpOut
-            ], { timeout: 120000 }, (err) => {
-                if (err) reject(new Error(`ffmpeg video conversion failed: ${err.message}`));
-                else resolve();
-            });
-        });
-        return await fs.promises.readFile(tmpOut);
-    } finally {
-        fs.promises.unlink(tmpIn).catch(() => {});
-        fs.promises.unlink(tmpOut).catch(() => {});
-    }
-}
-
-/**
- * Retry a function with exponential backoff.
- * Handles transient Meta API errors (429 rate limits, 500 server errors, network timeouts).
- * @param {Function} fn - async function to retry
- * @param {number} maxRetries - maximum number of retry attempts (default 3)
- * @param {number} baseDelayMs - base delay in ms (default 1500, doubles each retry)
- * @returns {Promise<any>} - result of the function
- */
-async function retryWithBackoff(fn, maxRetries = 3, baseDelayMs = 1500) {
-    let lastError;
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+async function sendMediaInline({ chat, type, mediaUrl, caption, replyWamid, wantsVoice, voiceRejected, messageId }) {
+    const timings = { acceptedAt: new Date().toISOString() };
+    let mediaIdToSend = mediaUrl;
+    let sentAsVoice = false;
+    let voiceNotice;
+    let prepareAction;
+    if (mediaUrl.startsWith('http')) {
+        let prepared;
         try {
-            return await fn();
+            prepared = await media.prepareMedia({ type, mediaUrl, wantsVoice, voiceRejected });
+            const up = await media.uploadToMeta(chat, prepared.file);
+            mediaIdToSend = up.mediaId;
+            sentAsVoice = prepared.sentAsVoice;
+            voiceNotice = prepared.voiceNotice;
+            prepareAction = prepared.action;
+            Object.assign(timings, {
+                sourceMs: prepared.timings.sourceMs,
+                sourceLocal: prepared.timings.sourceLocal,
+                prepareMs: prepared.timings.prepareMs,
+                ...(prepared.timings.convertMs != null ? { convertMs: prepared.timings.convertMs } : {}),
+                inputBytes: prepared.details.inputBytes,
+                outputBytes: prepared.file.size,
+                metaUploadMs: up.ms,
+            });
+            logger.info(`[media] ${type} ${prepared.action} (${prepared.details.inputBytes} -> ${prepared.file.size} bytes) prepare ${prepared.timings.prepareMs}ms, meta upload ${up.ms}ms`);
         } catch (err) {
-            lastError = err;
-            const status = err.response?.status;
-            // Only retry on rate limits (429), server errors (5xx), or network/timeout errors
-            const isRetryable = status === 429 || (status >= 500 && status < 600) || !status;
-            if (!isRetryable || attempt === maxRetries) {
-                throw err;
-            }
-            const delay = baseDelayMs * Math.pow(2, attempt - 1);
-            logger.warn(`Meta API call failed (attempt ${attempt}/${maxRetries}, status: ${status || 'network error'}), retrying in ${delay}ms...`);
-            await new Promise(resolve => setTimeout(resolve, delay));
+            err.mediaStage = 'prepare';
+            throw err;
+        } finally {
+            if (prepared) await prepared.cleanup();
         }
     }
-    throw lastError;
+    const result = await media.sendOnce({
+        chat, to: addressOf(chat), type, mediaIdOrUrl: mediaIdToSend, caption, replyWamid, voice: sentAsVoice,
+        bizOpaque: messageId ? `bjs:${messageId}:1` : undefined,
+    });
+    timings.sendMs = result.ms;
+    return { result, sentAsVoice, voiceNotice, prepareAction, timings };
 }
 
 /**
@@ -245,6 +110,107 @@ async function send(req, res, next) {
         settle(false);
         next(err);
     });
+}
+
+/** quotedMessage for an outbound reply - same shape as the webhook builds for inbound. */
+async function buildQuotedMessage(replyToMessageId) {
+    let quotedMessage = null;
+    if (replyToMessageId) {
+        const parentMsg = await Message.findById(replyToMessageId).populate('sentBy', 'name');
+        if (parentMsg) {
+            let displayText = '';
+            switch (parentMsg.type) {
+                case 'text':
+                    displayText = parentMsg.text || '';
+                    break;
+                case 'image':
+                    displayText = '📷 Photo';
+                    break;
+                case 'video':
+                    displayText = '🎥 Video';
+                    break;
+                case 'audio':
+                    displayText = '🎙️ Voice Message';
+                    break;
+                case 'document':
+                    displayText = `📄 ${parentMsg.fileName || 'Document'}`;
+                    break;
+                case 'location':
+                    displayText = '📍 Location';
+                    break;
+                case 'sticker':
+                    displayText = '🖼️ Sticker';
+                    break;
+                default:
+                    displayText = parentMsg.text || `${parentMsg.type} message`;
+            }
+
+            // Determine sender name for quoted message
+            let senderName = '';
+            if (parentMsg.sentBy) {
+                senderName = typeof parentMsg.sentBy === 'object' ? parentMsg.sentBy.name : 'Staff';
+            } else {
+                // Customer-sent message - use their profile name or number
+                const contact = await Contact.findOne({ waId: parentMsg.waId }).select('name nameOnWhatsApp').lean();
+                senderName = contact?.name || contact?.nameOnWhatsApp || parentMsg.waId;
+            }
+
+            quotedMessage = {
+                messageId: parentMsg.messageId,
+                text: parentMsg.text || '',
+                type: parentMsg.type,
+                waId: parentMsg.waId,
+                senderName: senderName,
+                caption: parentMsg.caption || null,
+                mediaUrl: parentMsg.mediaUrl || null,
+            };
+        }
+    }
+    return quotedMessage;
+}
+
+/**
+ * Background media send (client sent async:true). Stores the message + its job, answers 202 at once;
+ * stages and the final result arrive via socket `message:pipeline` / `message:status` and are persisted.
+ */
+async function acceptAsyncMedia(req, res, { chat, type, mediaUrl, caption, replyToMessageId, wantsVoice }) {
+    try {
+        await mediaMessages.assertCapacity();
+    } catch (e) {
+        return res.status(e.statusCode || 503).json({ success: false, code: e.code || 'MEDIA_QUEUE_FULL', message: e.message });
+    }
+    const quotedMessage = await buildQuotedMessage(replyToMessageId);
+    const message = await Message.create({
+        chatId: chat._id,
+        wabaId: chat.wabaId,
+        phoneNumberId: chat.phoneNumberId,
+        waId: chat.waId, bsuid: chat.bsuid,
+        direction: 'outbound',
+        type,
+        mediaUrl,
+        caption: caption || undefined,
+        status: 'queued',
+        sentBy: req.user._id,
+        clientMessageId: req._clientMessageId || undefined,
+        replyToMessageId: replyToMessageId || undefined,
+        quotedMessage: quotedMessage || undefined,
+        metadata: type === 'audio' ? { voice: wantsVoice } : undefined,
+        pipeline: mediaMessages.newPipeline({ wantsVoice, clientTimings: req.body.clientTimings }),
+    });
+    try {
+        await mediaMessages.enqueueProcess(message._id);
+    } catch (e) {
+        // Not durably queued: say so on the message and to the caller (never a fake acceptance).
+        logger.error(`[media] could not queue message ${message._id}: ${e.message}`);
+        await mediaMessages.failMessage(message._id, 'queue', new Error('The server could not queue this file. Please retry.'));
+        return res.status(503).json({ success: false, code: 'MEDIA_QUEUE_UNAVAILABLE', message: 'The server could not queue this file. Please retry.', messageId: String(message._id) });
+    }
+    await Chat.findByIdAndUpdate(chat._id, { lastMessageAt: new Date(), lastStaffMessageAt: new Date() });
+    await message.populate('sentBy', 'name phone');
+    await message.populate({ path: 'replyToMessageId', select: '_id text type mediaUrl caption waId sentBy', populate: { path: 'sentBy', select: 'name' } });
+    const { getIO } = require('../websocket/socket.server');
+    getIO().emit('message:new', { chatId: chat._id, message });
+    return res.status(202).json(message);
 }
 
 async function sendInner(req, res, next) {
@@ -359,96 +325,35 @@ async function sendInner(req, res, next) {
                     req._templateData.templateImageUrl = imageUrl;
                 }
             }
-        } else if (['image', 'video', 'audio', 'document'].includes(type)) {
+        } else if (media.MEDIA_TYPES.includes(type)) {
             if (!mediaUrl) return res.status(400).json({ success: false, message: 'mediaUrl is required for media messages' });
-
-            let mediaIdToSend = mediaUrl;
-
-            // WhatsApp only supports JPEG/PNG as image type messages.
-            // WebP and other formats MUST be converted to JPEG before uploading to Meta.
-            // So we download the file, convert if needed, then re-upload to get a Meta media ID.
-            if (mediaUrl.startsWith('http')) {
-                try {
-                    const axios = require('axios');
-                    const response = await axios.get(mediaUrl, {
-                        responseType: 'arraybuffer',
-                        timeout: 30000,
-                        headers: {
-                            'User-Agent': 'Mozilla/5.0 (compatible; WhatsApp-Bot/1.0)',
-                        }
-                    });
-                    let buffer = Buffer.from(response.data, 'binary');
-                    let mimeType = response.headers['content-type'] || 'image/jpeg';
-                    mimeType = mimeType.split(';')[0].trim();
-
-                    // Always re-encode audio to OGG/Opus via ffmpeg.
-                    // Browsers record in WebM, MP4, or other formats depending on platform.
-                    // Magic-byte detection is unreliable when the VPS serves wrong Content-Type.
-                    // ffmpeg accepts any valid input and always produces clean OGG/Opus for Meta.
-                    if (type === 'audio' && wantsVoice) {
-                        try {
-                            const voice = await convertVoiceNoteForMeta(buffer);
-                            buffer = voice.buffer;
-                            mimeType = 'audio/ogg';
-                            sentAsVoice = true;
-                            if (voice.oversize) voiceNotice = 'oversize';
-                        } catch (err) {
-                            // Never pretend: send it as an ordinary audio file and record why.
-                            logger.warn(`Voice note could not be converted to OGG/OPUS, sending as audio file: ${err.message}`);
-                            voiceNotice = 'opus_unavailable';
-                            buffer = await convertAudioForMeta(buffer);
-                            mimeType = 'audio/mp4';
-                        }
-                    } else if (type === 'audio') {
-                        buffer = await convertAudioForMeta(buffer);
-                        mimeType = 'audio/mp4';
-                    }
-
-                    // Always re-encode video to H.264/AAC MP4 — Meta rejects H.265/HEVC,
-                    // VP9, AV1, and any other codec with error 131053.
-                    if (type === 'video') {
-                        buffer = await convertVideoToH264(buffer);
-                        mimeType = 'video/mp4';
-                        logger.info(`Video re-encoded to H.264/AAC MP4 (${buffer.length} bytes)`);
-                    }
-
-                    // Always convert ALL images to JPEG — CDN headers and file extensions
-                    // are unreliable (e.g. WebP served as image/jpeg with .jpg extension).
-                    // Running every image through sharp guarantees a valid JPEG for Meta.
-                    if (type === 'image') {
-                        const sharp = require('sharp');
-                        buffer = await sharp(buffer).jpeg({ quality: 90 }).toBuffer();
-                        mimeType = 'image/jpeg';
-                        logger.info(`Image converted to JPEG (${buffer.length} bytes) from ${mediaUrl.substring(0, 80)}`);
-                    }
-
-                    // Correct document MIME type from magic bytes — servers often serve
-                    // wrong Content-Type for documents (e.g. application/octet-stream).
-                    if (type === 'document') {
-                        const corrected = detectDocumentMimeType(buffer, mimeType);
-                        if (corrected !== mimeType) {
-                            logger.info(`Document MIME corrected: ${mimeType} → ${corrected}`);
-                            mimeType = corrected;
-                        }
-                    }
-
-                    // Retry upload to Meta with exponential backoff (handles 429 rate limits)
-                    mediaIdToSend = await retryWithBackoff(
-                        () => whatsappService.uploadMedia(chat.wabaId, chat.phoneNumberId, buffer, mimeType)
-                    );
-                } catch (err) {
-                    logger.error(`Error processing/uploading media to Meta: ${err.message}`);
-                    return res.status(500).json({
-                        success: false,
-                        message: `Failed to upload media to WhatsApp: ${err.message}`
-                    });
-                }
+            if (LOCAL_REF_RE.test(String(mediaUrl))) {
+                return res.status(400).json({ success: false, code: 'LOCAL_MEDIA_REF', message: 'mediaUrl is a local preview link, not an uploaded file. Upload the file first.' });
             }
-
-            // Retry send with exponential backoff (handles 429 rate limits when sending multiple images)
-            waResult = await retryWithBackoff(
-                () => whatsappService.sendMediaMessage(chat.wabaId, chat.phoneNumberId, addressOf(chat), type, mediaIdToSend, caption || '', metaMessageIdToReply, { voice: sentAsVoice })
-            );
+            if (wantsAsync(req.body)) {
+                return acceptAsyncMedia(req, res, { chat, type, mediaUrl, caption, replyToMessageId, wantsVoice });
+            }
+            const syncId = new (require('mongoose').Types.ObjectId)();
+            let inline;
+            try {
+                inline = await sendMediaInline({ chat, type, mediaUrl, caption, replyWamid: metaMessageIdToReply, wantsVoice, voiceRejected: false, messageId: syncId });
+            } catch (err) {
+                if (err.mediaStage === 'prepare') {
+                    logger.error(`Error processing/uploading media to Meta: ${err.message}`);
+                    return res.status(500).json({ success: false, message: `Failed to upload media to WhatsApp: ${err.message}` });
+                }
+                throw err;
+            }
+            sentAsVoice = inline.sentAsVoice;
+            voiceNotice = inline.voiceNotice;
+            req._mediaSync = { id: syncId, timings: inline.timings, prepareAction: inline.prepareAction };
+            if (!inline.result.ok) {
+                if (inline.result.kind !== 'ambiguous') throw inline.result.error;
+                // Meta may have accepted it: keep the message (unconfirmed) so the webhook can still match it.
+                req._mediaSync.unconfirmed = true;
+            } else {
+                waResult = inline.result.raw;
+            }
         } else {
             return res.status(400).json({ success: false, message: `Unsupported message type: ${type}` });
         }
@@ -465,60 +370,11 @@ async function sendInner(req, res, next) {
         }
 
         // Build quotedMessage for outbound replies - same as webhook does for inbound
-        let quotedMessage = null;
-        if (replyToMessageId) {
-            const parentMsg = await Message.findById(replyToMessageId).populate('sentBy', 'name');
-            if (parentMsg) {
-                let displayText = '';
-                switch (parentMsg.type) {
-                    case 'text':
-                        displayText = parentMsg.text || '';
-                        break;
-                    case 'image':
-                        displayText = '📷 Photo';
-                        break;
-                    case 'video':
-                        displayText = '🎥 Video';
-                        break;
-                    case 'audio':
-                        displayText = '🎙️ Voice Message';
-                        break;
-                    case 'document':
-                        displayText = `📄 ${parentMsg.fileName || 'Document'}`;
-                        break;
-                    case 'location':
-                        displayText = '📍 Location';
-                        break;
-                    case 'sticker':
-                        displayText = '🖼️ Sticker';
-                        break;
-                    default:
-                        displayText = parentMsg.text || `${parentMsg.type} message`;
-                }
+        const quotedMessage = await buildQuotedMessage(replyToMessageId);
 
-                // Determine sender name for quoted message
-                let senderName = '';
-                if (parentMsg.sentBy) {
-                    senderName = typeof parentMsg.sentBy === 'object' ? parentMsg.sentBy.name : 'Staff';
-                } else {
-                    // Customer-sent message - use their profile name or number
-                    const contact = await Contact.findOne({ waId: parentMsg.waId }).select('name nameOnWhatsApp').lean();
-                    senderName = contact?.name || contact?.nameOnWhatsApp || parentMsg.waId;
-                }
-
-                quotedMessage = {
-                    messageId: parentMsg.messageId,
-                    text: parentMsg.text || '',
-                    type: parentMsg.type,
-                    waId: parentMsg.waId,
-                    senderName: senderName,
-                    caption: parentMsg.caption || null,
-                    mediaUrl: parentMsg.mediaUrl || null,
-                };
-            }
-        }
-
+        const ms = req._mediaSync;
         const message = await Message.create({
+            ...(ms ? { _id: ms.id } : {}),
             chatId,
             wabaId: chat.wabaId,
             phoneNumberId: chat.phoneNumberId,
@@ -529,9 +385,21 @@ async function sendInner(req, res, next) {
             text: messageText,
             mediaUrl: mediaUrl || undefined,
             caption: caption || undefined,
-            status: 'sent',
+            status: ms?.unconfirmed ? 'queued' : 'sent',
             sentBy: req.user._id,
             clientMessageId: req._clientMessageId || undefined,
+            ...(ms ? {
+                pipeline: {
+                    mode: 'sync',
+                    stage: ms.unconfirmed ? 'unconfirmed' : 'sent',
+                    active: false,
+                    version: 1,
+                    prepareAction: ms.prepareAction,
+                    stageAt: new Date(),
+                    timings: { ...ms.timings, ...(ms.unconfirmed ? { unconfirmedAt: new Date().toISOString() } : { sentAt: new Date().toISOString() }) },
+                    ...(ms.unconfirmed ? { error: { stage: 'send', message: 'WhatsApp did not confirm the send. Checking...', at: new Date().toISOString(), willRetry: false } } : {}),
+                },
+            } : {}),
             replyToMessageId: replyToMessageId || undefined,
             quotedMessage: quotedMessage || undefined,
             metadata: type === 'template' && req._templateData ? {
@@ -735,67 +603,47 @@ async function retry(req, res, next) {
         let waResult;
         if (type === 'text') {
             waResult = await whatsappService.sendTextMessage(chat.wabaId, chat.phoneNumberId, addressOf(chat), text);
-        } else if (['image', 'video', 'audio', 'document'].includes(type)) {
-            let mediaIdToSend = mediaUrl;
-
-            if (mediaUrl && mediaUrl.startsWith('http')) {
-                try {
-                    const axios = require('axios');
-                    const response = await axios.get(mediaUrl, {
-                        responseType: 'arraybuffer',
-                        timeout: 30000,
-                        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; WhatsApp-Bot/1.0)' }
-                    });
-                    let buffer = Buffer.from(response.data, 'binary');
-                    let mimeType = response.headers['content-type'] || 'image/jpeg';
-                    mimeType = mimeType.split(';')[0].trim();
-
-                    // WhatsApp refused the voice file (131053 media processing): retry as a normal audio file.
-                    const voiceRejected = Number(message.errorCode) === 131053;
-                    if (type === 'audio' && message.metadata?.voice === true && !voiceRejected) {
-                        try {
-                            buffer = (await convertVoiceNoteForMeta(buffer)).buffer;
-                            mimeType = 'audio/ogg';
-                            retryAsVoice = true;
-                        } catch (err) {
-                            logger.warn(`Voice note retry: OGG/OPUS conversion failed, sending as audio file: ${err.message}`);
-                            buffer = await convertAudioForMeta(buffer);
-                            mimeType = 'audio/mp4';
-                        }
-                    } else if (type === 'audio') {
-                        buffer = await convertAudioForMeta(buffer);
-                        mimeType = 'audio/mp4'; // convertAudioForMeta produces AAC/M4A
-                    }
-
-                    if (type === 'video') {
-                        buffer = await convertVideoToH264(buffer);
-                        mimeType = 'video/mp4';
-                    }
-
-                    // Always convert images to JPEG for WhatsApp compatibility
-                    if (type === 'image') {
-                        const sharp = require('sharp');
-                        buffer = await sharp(buffer).jpeg({ quality: 90 }).toBuffer();
-                        mimeType = 'image/jpeg';
-                    }
-
-                    if (type === 'document') {
-                        const corrected = detectDocumentMimeType(buffer, mimeType);
-                        if (corrected !== mimeType) mimeType = corrected;
-                    }
-
-                    mediaIdToSend = await retryWithBackoff(
-                        () => whatsappService.uploadMedia(chat.wabaId, chat.phoneNumberId, buffer, mimeType)
-                    );
-                } catch (err) {
+        } else if (media.MEDIA_TYPES.includes(type)) {
+            if (message.pipeline?.active) {
+                return res.status(409).json({ success: false, code: 'SEND_IN_PROGRESS', message: 'This file is still being sent.' });
+            }
+            if (wantsAsync(req.body)) {
+                // Background retry: only the failed stage is redone (see mediaMessageService.retryAsync).
+                const r = await mediaMessages.retryAsync(message._id);
+                if (r.error === 409) return res.status(409).json({ success: false, code: 'NOT_FAILED', message: 'Only a failed message can be retried.' });
+                if (r.error) return res.status(r.error).json({ success: false, message: 'This message cannot be retried.' });
+                await r.message.populate('sentBy', 'name phone');
+                return res.status(202).json(r.message);
+            }
+            if (!mediaUrl || LOCAL_REF_RE.test(mediaUrl)) {
+                return res.status(400).json({ success: false, code: 'LOCAL_MEDIA_REF', message: 'This message has no uploaded file to send. Attach the file again.' });
+            }
+            // WhatsApp refused the voice file (131053 media processing): retry as a normal audio file.
+            const voiceRejected = Number(message.errorCode) === 131053;
+            let inline;
+            try {
+                inline = await sendMediaInline({
+                    chat, type, mediaUrl, caption, replyWamid: null,
+                    wantsVoice: type === 'audio' && message.metadata?.voice === true, voiceRejected,
+                    messageId: message._id,
+                });
+            } catch (err) {
+                if (err.mediaStage === 'prepare') {
                     logger.error(`Retry: Error processing/uploading media: ${err.message}`);
                     return res.status(500).json({ success: false, message: `Failed to upload media: ${err.message}` });
                 }
+                throw err;
             }
-
-            waResult = await retryWithBackoff(
-                () => whatsappService.sendMediaMessage(chat.wabaId, chat.phoneNumberId, addressOf(chat), type, mediaIdToSend, caption || '', null, { voice: retryAsVoice })
-            );
+            if (!inline.result.ok) throw inline.result.error;
+            retryAsVoice = inline.sentAsVoice;
+            waResult = inline.result.raw;
+            message.pipeline = {
+                ...(message.pipeline || {}), mode: 'sync', stage: 'sent', active: false,
+                version: (message.pipeline?.version || 0) + 1, retries: (message.pipeline?.retries || 0) + 1,
+                prepareAction: inline.prepareAction, error: null,
+                timings: { ...inline.timings, retriedAt: inline.timings.acceptedAt, sentAt: new Date().toISOString() },
+            };
+            message.markModified('pipeline');
         } else {
             return res.status(400).json({ success: false, message: `Cannot retry message type: ${type}` });
         }
@@ -872,6 +720,7 @@ async function sendBulk(req, res, next) {
                 caption: item.caption || undefined,
                 status: 'queued',
                 sentBy: req.user._id,
+                pipeline: { mode: 'bulk', stage: 'queued', active: false, version: 1, timings: { acceptedAt: new Date().toISOString() } },
             });
             await msg.populate('sentBy', 'name phone');
             messages.push(msg);

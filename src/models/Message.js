@@ -55,12 +55,30 @@ const messageSchema = new mongoose.Schema(
     metadata: { type: mongoose.Schema.Types.Mixed },
     replyToMessageId: { type: mongoose.Schema.Types.ObjectId, ref: 'Message' },
     quotedMessage: quotedMessageSchema,
+    /**
+     * Outgoing media pipeline state + measured stage timings (see services/media/mediaPipeline.js).
+     * Absent on older messages; clients must treat a missing pipeline as "no stage information".
+     *   mode: 'async' | 'sync' | 'bulk'
+     *   stage: 'queued' | 'preparing' | 'uploading_media' | 'ready' | 'sending' | 'sent' | 'failed' | 'unconfirmed'
+     *   active: true while unfinished (used for ordered dispatch + recovery), version: incremented on
+     *   every change so clients can drop late socket events; timings: ISO dates + *Ms durations.
+     */
+    pipeline: { type: mongoose.Schema.Types.Mixed },
+    /** Server-only working data for the media pipeline (prepared file, Meta media id). Never sent to clients. */
+    mediaWork: { type: mongoose.Schema.Types.Mixed, select: false },
+    /** When each webhook status was reached, e.g. { delivered: Date, read: Date } (newer messages only). */
+    statusTimes: { type: mongoose.Schema.Types.Mixed },
   },
   { timestamps: true }
 );
 
 messageSchema.index({ chatId: 1, createdAt: -1 });
 messageSchema.index({ chatId: 1, clientMessageId: 1 }, { sparse: true });
+// Ordered dispatch / recovery of unfinished media sends (partial: only active pipelines are indexed).
+messageSchema.index(
+  { chatId: 1, 'pipeline.active': 1, createdAt: 1 },
+  { partialFilterExpression: { 'pipeline.active': true }, name: 'pipeline_active_by_chat' },
+);
 
 messageSchema.post('save', async function(doc) {
   try {

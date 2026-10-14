@@ -1,27 +1,34 @@
-const axios = require('axios');
+const fs = require('fs');
+const path = require('path');
 const mediaService = require('../services/media.service');
 const { logger } = require('../utils/logger');
-const { uploadToVPS } = require('../utils/vpsUpload');
+const vps = require('../utils/vpsUpload');
+const { UPLOAD_FOLDER } = require('../middleware/mediaUpload.middleware');
 
+/**
+ * POST /upload/file — the file has already been streamed to disk by multer (".part").
+ * Response contract unchanged: { success, url, mediaId, type } (+ size).
+ */
 async function uploadFile(req, res, next) {
+  const partPath = req.file?.path;
   try {
     if (!req.file) {
       return res.status(400).json({ success: false, error: 'No file uploaded' });
     }
-
-    const fileType = req.body.type || 'image';
-    const buffer = req.file.buffer;
     const mimeType = req.file.mimetype;
     const originalName = req.file.originalname;
+    const size = req.file.size;
+    if (!size) {
+      await fs.promises.unlink(partPath).catch(() => {});
+      return res.status(400).json({ success: false, error: 'The file is empty' });
+    }
 
-    // Upload to VPS instead of Cloudinary
-    const uploadedUrl = await uploadToVPS(buffer, {
-      folder: 'uploads',
-      fileName: originalName,
-      mimeType: mimeType,
-    });
+    const finalName = req.file.finalName || path.basename(partPath).replace(/\.part$/, '');
+    const finalPath = path.join(path.dirname(partPath), finalName);
+    await fs.promises.rename(partPath, finalPath);
+    const uploadedUrl = `${vps.UPLOAD_BASE_URL}/${UPLOAD_FOLDER}/${finalName}`;
+    logger.info(`File uploaded to VPS: ${uploadedUrl} (${size} bytes)`);
 
-    // Save media metadata to database
     const expiresAt = new Date();
     expiresAt.setFullYear(expiresAt.getFullYear() + 3);
     const type = (mimeType && mimeType.split('/')[0]) || 'application';
@@ -32,7 +39,7 @@ async function uploadFile(req, res, next) {
       type: mediaType,
       mimeType,
       fileName: originalName,
-      fileSize: buffer.length,
+      fileSize: size,
       expiresAt,
     });
 
@@ -41,15 +48,11 @@ async function uploadFile(req, res, next) {
       url: uploadedUrl,
       mediaId: media._id,
       type: media.type,
+      size,
     });
   } catch (error) {
+    if (partPath) await fs.promises.unlink(partPath).catch(() => {});
     logger.error('Upload error', { error: error.message, stack: error.stack });
-    if (error.response) {
-      return res.status(error.response.status || 500).json({
-        success: false,
-        error: error.response.data?.error || error.message || 'Upload failed',
-      });
-    }
     next(error);
   }
 }

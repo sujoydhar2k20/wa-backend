@@ -1,10 +1,10 @@
 const express = require('express');
 const router = express.Router();
 const uploadController = require('../controllers/upload.controller');
-const upload = require('../middleware/upload.middleware');
+const { uploader, ensureDiskSpace } = require('../middleware/mediaUpload.middleware');
 const { authenticate } = require('../middleware/auth.middleware');
 
-router.post('/file', authenticate, upload.single('file'), uploadController.uploadFile);
+router.post('/file', authenticate, ensureDiskSpace, uploader.single('file'), uploadController.uploadFile);
 
 // Upload limit the app checks before uploading (so oversized files fail early with the real limit).
 router.get('/limits', authenticate, (req, res) => {

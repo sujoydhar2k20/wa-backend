@@ -43,6 +43,8 @@ async function initAgenda() {
   require('./mediaCleanup.jobs')(agenda);
   require('./bot.jobs')(agenda);
   require('./calls.jobs')(agenda);
+  require('../services/media/mediaMessageService').defineJobs(agenda);
+  require('./preparedMediaCleanup.jobs')(agenda);
 
   // 2. Start agenda processing queue
   await agenda.start();
@@ -51,6 +53,9 @@ async function initAgenda() {
   await agenda.every('24 hours', 'cleanup-expired-media');
   await agenda.every('24 hours', 'cleanup-old-calls');
   await agenda.every('2 minutes', 'retry-failed-webhook-messages');
+  // Background media sends: recover after restarts, finish unconfirmed sends (see mediaMessageService).
+  await agenda.every('1 minute', 'media-message:sweep');
+  await agenda.every('6 hours', 'cleanup-prepared-media');
 
   return agenda;
 }
