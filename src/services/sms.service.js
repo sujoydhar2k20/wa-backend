@@ -6,22 +6,67 @@ const BHS_USER = process.env.BHASHSMS_USER;
 const BHS_PASS = process.env.BHASHSMS_PASS;
 const BHS_SENDER = process.env.BHASHSMS_SENDER || 'BJSBIL';
 
-const OTP_TTL_MS = 30 * 1000; // OTP valid for 30 seconds
-const otpStore = new Map();
+const OtpCode = require('../models/OtpCode');
+
+// An OTP stays valid for 10 minutes. Requesting / resending within those 10 minutes re-sends the
+// SAME code (so an SMS that arrives late is still usable); after that a new code is generated.
+const OTP_TTL_MS = 10 * 60 * 1000;
+// Minimum gap between two SMS to the same number (stops accidental double taps / SMS spam).
+const RESEND_COOLDOWN_MS = 30 * 1000;
+// Wrong guesses allowed before the code is thrown away and a new one must be requested.
+const MAX_FAILED_ATTEMPTS = 5;
 
 function generateOtp() {
-  return String(Math.floor(100000 + Math.random() * 900000));
+  return String(require('crypto').randomInt(100000, 1000000));
 }
 
-function setOtp(phone, otp) {
-  otpStore.set(phone, { otp, expiresAt: Date.now() + OTP_TTL_MS });
+/**
+ * Returns the code to send for this phone: the still-valid existing one, or a fresh one.
+ * { otp, expiresAt, shouldSend, retryAfterSec }
+ */
+async function issueOtp(phone) {
+  const now = Date.now();
+  const existing = await OtpCode.findOne({ phone });
+
+  if (existing && existing.expiresAt.getTime() > now && existing.failedAttempts < MAX_FAILED_ATTEMPTS) {
+    const sinceLast = now - existing.lastSentAt.getTime();
+    if (sinceLast < RESEND_COOLDOWN_MS) {
+      return {
+        otp: existing.otp,
+        expiresAt: existing.expiresAt,
+        shouldSend: false,
+        retryAfterSec: Math.ceil((RESEND_COOLDOWN_MS - sinceLast) / 1000),
+      };
+    }
+    existing.lastSentAt = new Date(now);
+    existing.sendCount += 1;
+    await existing.save();
+    return { otp: existing.otp, expiresAt: existing.expiresAt, shouldSend: true, retryAfterSec: 0 };
+  }
+
+  const otp = generateOtp();
+  const expiresAt = new Date(now + OTP_TTL_MS);
+  await OtpCode.findOneAndUpdate(
+    { phone },
+    { $set: { otp, expiresAt, lastSentAt: new Date(now), sendCount: 1, failedAttempts: 0 } },
+    { upsert: true, new: true }
+  );
+  return { otp, expiresAt, shouldSend: true, retryAfterSec: 0 };
 }
 
-function verifyOtp(phone, otp) {
-  const stored = otpStore.get(phone);
-  if (!stored || stored.otp !== otp || Date.now() > stored.expiresAt) return false;
-  otpStore.delete(phone);
-  return true;
+/** Returns 'ok' | 'invalid' | 'expired'. A correct code is consumed (single use). */
+async function verifyOtp(phone, otp) {
+  const stored = await OtpCode.findOne({ phone });
+  if (!stored || stored.expiresAt.getTime() <= Date.now() || stored.failedAttempts >= MAX_FAILED_ATTEMPTS) {
+    if (stored) await OtpCode.deleteOne({ _id: stored._id });
+    return 'expired';
+  }
+  if (stored.otp !== String(otp || '').trim()) {
+    await OtpCode.updateOne({ _id: stored._id }, { $inc: { failedAttempts: 1 } });
+    return 'invalid';
+  }
+  await OtpCode.deleteOne({ _id: stored._id });
+  return 'ok';
 }
 
 async function sendOtp(phone, otp) {
@@ -51,4 +96,4 @@ async function sendOtp(phone, otp) {
   }
 }
 
-module.exports = { generateOtp, setOtp, verifyOtp, sendOtp };
+module.exports = { generateOtp, issueOtp, verifyOtp, sendOtp, OTP_TTL_MS };

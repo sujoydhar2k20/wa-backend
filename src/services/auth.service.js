@@ -30,10 +30,19 @@ async function sendOtp(phone) {
     throw Object.assign(new Error('Account not found. Please ask an administrator to register your number.'), { statusCode: 404 });
   }
 
-  const otp = smsService.generateOtp();
-  smsService.setOtp(normalized, otp);
-  await smsService.sendOtp(normalized, otp);
-  return { success: true, message: 'OTP sent' };
+  // Same code is re-sent for 10 minutes; a new one is generated only after it expires.
+  const issued = await smsService.issueOtp(normalized);
+  const expiresIn = Math.max(0, Math.round((issued.expiresAt.getTime() - Date.now()) / 1000));
+  if (!issued.shouldSend) {
+    return {
+      success: true,
+      message: `OTP already sent. You can resend in ${issued.retryAfterSec}s`,
+      expiresIn,
+      retryAfter: issued.retryAfterSec,
+    };
+  }
+  await smsService.sendOtp(normalized, issued.otp);
+  return { success: true, message: 'OTP sent', expiresIn, retryAfter: 30 };
 }
 
 async function verifyOtp(phone, otp, deviceType = 'web', deviceId = '') {
@@ -44,8 +53,12 @@ async function verifyOtp(phone, otp, deviceType = 'web', deviceId = '') {
   }
 
   // OTP verification is mandatory for every role (no bypass of any kind).
-  if (!smsService.verifyOtp(normalized, otp)) {
-    throw Object.assign(new Error('Invalid or expired OTP'), { statusCode: 400 });
+  const otpResult = await smsService.verifyOtp(normalized, otp);
+  if (otpResult === 'expired') {
+    throw Object.assign(new Error('OTP expired. Please request a new OTP'), { statusCode: 400 });
+  }
+  if (otpResult !== 'ok') {
+    throw Object.assign(new Error('Incorrect OTP. Please check and try again'), { statusCode: 400 });
   }
 
   // Accounts are never created or promoted at login. Users (and their roles) are managed by

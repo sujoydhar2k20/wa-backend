@@ -32,4 +32,5 @@ module.exports = {
   Notification: require('./Notification'),
   SendRequest: require('./SendRequest'),
   WebhookFailure: require('./WebhookFailure'),
+  OtpCode: require('./OtpCode'),
 };
