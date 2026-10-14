@@ -7,7 +7,7 @@ const mediaService = require('./media.service');
 const ocrService = require('./ocr.service');
 const { uploadToVPS } = require('../utils/vpsUpload');
 const aiFallbackService = require('./aiFallback.service');
-const { parseInboundContent, previewText } = require('./inboundMessage');
+const { parseInboundContent, previewText, parseReferral } = require('./inboundMessage');
 const { isKnownStatus, statusGuard } = require('./messageStatus');
 const { senderIdentity, resolveContact, resolveChat, applyUserIdChange } = require('./customerIdentity');
 const { isBsuid, displayIdentity, addressOf, phoneDigits } = require('../utils/waIdentity');
@@ -294,6 +294,17 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
         if (chat.status === 'closed') chat.status = 'open';
     }
 
+    // Click-to-WhatsApp ad / post the customer came from. The first one is kept for good; later ones
+    // (the customer tapped another ad) update lastReferral and the count. Each message keeps its own.
+    const referral = parseReferral(msg.referral);
+    if (referral) {
+        const stamped = { ...referral, messageId: msg.id, receivedAt: new Date(msg.timestamp * 1000) };
+        if (!chat.firstReferral?.receivedAt) chat.firstReferral = stamped;
+        chat.lastReferral = stamped;
+        chat.referralCount = (chat.referralCount || 0) + 1;
+        logger.info(`[webhook] referral ${referral.sourceType || 'unknown'} ${referral.sourceId || ''} on ${msg.id}`);
+    }
+
     await chat.save();
 
     // Create message
@@ -311,6 +322,7 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
     };
     if (parsed.text) messageData.text = parsed.text;
     if (parsed.metadata) messageData.metadata = { ...parsed.metadata };
+    if (referral) messageData.metadata = { ...(messageData.metadata || {}), referral };
     if (parsed.location) messageData.location = parsed.location;
 
     // Preserve reply threading for inbound customer replies.

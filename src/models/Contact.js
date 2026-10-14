@@ -11,6 +11,16 @@ const contactSchema = new mongoose.Schema(
     username: { type: String },
     previousBsuids: [{ type: String }],
     mergedInto: { type: mongoose.Schema.Types.ObjectId, ref: 'Contact' },
+    // Result of the last block/unblock on WhatsApp itself (Meta Block Users API). isBlocked is the
+    // local (BJS Connect) block, which always applies even when WhatsApp refuses or is unreachable.
+    remoteBlock: {
+      status: { type: String, enum: ['blocked', 'unblocked', 'failed', 'not_attempted'] },
+      action: { type: String, enum: ['block', 'unblock'] },
+      errorCode: Number,
+      errorMessage: String,
+      phoneNumberId: String,
+      at: Date,
+    },
     name: { type: String },
     nickname: { type: String },
     nameOnWhatsApp: { type: String },

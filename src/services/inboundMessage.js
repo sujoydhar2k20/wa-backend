@@ -37,6 +37,33 @@ function parseLocation(loc) {
   return out;
 }
 
+const httpUrl = (v, max = 1000) => (typeof v === 'string' && /^https?:\/\//i.test(v.trim()) ? v.trim().slice(0, max) : undefined);
+
+/**
+ * Click-to-WhatsApp ad / post referral (webhook `messages[].referral`). Meta sends it on the first
+ * message after the customer taps an ad. There is no campaign name in the payload: `source_id` is the ad
+ * (or post) id. `ctwa_clid` is omitted for Status ads. Returns null when absent or empty.
+ */
+function parseReferral(ref) {
+  if (!ref || typeof ref !== 'object') return null;
+  const out = {
+    sourceType: str(ref.source_type, 40) || undefined,
+    sourceId: str(ref.source_id, 100) || undefined,
+    sourceUrl: httpUrl(ref.source_url),
+    headline: str(ref.headline, 300) || undefined,
+    body: str(ref.body, 1000) || undefined,
+    mediaType: ['image', 'video'].includes(ref.media_type) ? ref.media_type : undefined,
+    imageUrl: httpUrl(ref.image_url),
+    videoUrl: httpUrl(ref.video_url),
+    thumbnailUrl: httpUrl(ref.thumbnail_url),
+    ctwaClid: str(ref.ctwa_clid, 300) || undefined,
+    welcomeMessage: str(ref.welcome_message?.text, 1000) || undefined,
+  };
+  Object.keys(out).forEach((k) => out[k] === undefined && delete out[k]);
+  if (!out.sourceId && !out.sourceUrl && !out.headline && !out.ctwaClid) return null;
+  return out;
+}
+
 /** Shared contact cards: only the fields WhatsApp documents, bounded in size. */
 function parseContactCards(cards) {
   if (!Array.isArray(cards)) return [];
@@ -261,4 +288,4 @@ function previewText(parsed) {
   return parsed.text || 'New message';
 }
 
-module.exports = { parseInboundContent, previewText, parseLocation, parseContactCards, parseOrder, MEDIA_TYPES, STORED_TYPES };
+module.exports = { parseInboundContent, previewText, parseReferral, parseLocation, parseContactCards, parseOrder, MEDIA_TYPES, STORED_TYPES };

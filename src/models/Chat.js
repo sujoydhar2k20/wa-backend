@@ -1,5 +1,24 @@
 const mongoose = require('mongoose');
 
+const referralSchema = new mongoose.Schema(
+  {
+    sourceType: String, // "ad" or "post"
+    sourceId: String, // ad id / post id (Meta does not send the campaign name)
+    sourceUrl: String,
+    headline: String,
+    body: String,
+    mediaType: String,
+    imageUrl: String,
+    videoUrl: String,
+    thumbnailUrl: String,
+    ctwaClid: String,
+    welcomeMessage: String,
+    messageId: String,
+    receivedAt: Date,
+  },
+  { _id: false }
+);
+
 const chatSchema = new mongoose.Schema(
   {
     wabaId: { type: mongoose.Schema.Types.ObjectId, ref: 'Waba', required: true, index: true },
@@ -12,6 +31,11 @@ const chatSchema = new mongoose.Schema(
     bsuid: { type: String, index: true },
     // Set when this chat was folded into another chat of the same customer (phone + BSUID identities).
     mergedInto: { type: mongoose.Schema.Types.ObjectId, ref: 'Chat' },
+    // Click-to-WhatsApp ad / post referrals (webhook messages[].referral). firstReferral never changes
+    // once set; lastReferral is the most recent one; each message also stores its own in metadata.
+    firstReferral: { type: referralSchema, default: undefined },
+    lastReferral: { type: referralSchema, default: undefined },
+    referralCount: { type: Number, default: 0 },
     status: { type: String, enum: ['open', 'closed', 'awaiting_reply'], default: 'open', index: true },
     isUnread: { type: Boolean, default: true },
     isManuallyUnread: { type: Boolean, default: false },
@@ -44,4 +68,5 @@ chatSchema.pre('validate', function requireIdentity(next) {
 chatSchema.index({ wabaId: 1, waId: 1 }, { unique: true, name: 'wabaId_waId_unique_partial', partialFilterExpression: { waId: { $type: 'string' } } });
 chatSchema.index({ wabaId: 1, bsuid: 1 }, { unique: true, name: 'wabaId_bsuid_unique_partial', partialFilterExpression: { bsuid: { $type: 'string' } } });
 chatSchema.index({ assignedTo: 1, status: 1 });
+chatSchema.index({ 'firstReferral.sourceId': 1 }, { sparse: true });
 module.exports = mongoose.model('Chat', chatSchema);

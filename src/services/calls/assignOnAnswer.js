@@ -116,7 +116,7 @@ async function assignChatToAnswerer(callLog, deps = {}) {
     let populated = updated;
     try {
       populated = await models.Chat.findById(chat._id)
-        .populate('contactId', 'name nameOnWhatsApp nickname profilePicture isOptedOut isBlocked customFields')
+        .populate('contactId', 'name nameOnWhatsApp nickname username bsuid profilePicture isOptedOut isBlocked remoteBlock customFields')
         .populate('assignedTo', 'name phone')
         .populate('wabaId', 'businessName phoneNumbers')
         .populate('collaborators', 'name phone')

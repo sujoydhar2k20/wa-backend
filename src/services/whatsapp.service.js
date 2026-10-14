@@ -53,8 +53,9 @@ async function request(wabaId, method, path, data = null) {
     res = await axios(opts);
   } catch (error) {
     if (error.response) {
-      logger.error(`WhatsApp API Error: ${JSON.stringify(error.response.data)}`);
       const metaErr = error.response.data?.error;
+      // Code and title only: the full body can echo customer phone numbers (e.g. block_users).
+      logger.error(`WhatsApp API Error: ${method} ${path.split('?')[0]} -> ${error.response.status} code=${metaErr?.code ?? '-'} ${String(metaErr?.message || '').slice(0, 200)}`);
       const metaMsg = metaErr?.message;
       if (metaMsg) {
         error.message = `Meta API Error: ${metaMsg}`;
@@ -477,6 +478,54 @@ async function sendInteractiveMessage(wabaId, phoneNumberId, to, interactivePayl
   return request(wabaId, 'POST', path, body);
 }
 
+/**
+ * Meta Block Users API: POST (block) / DELETE (unblock) /{phone-number-id}/block_users.
+ * `user` is a phone number or a business-scoped user ID (parent ".ENT." IDs are not accepted).
+ * Meta only allows blocking customers who messaged in the last 24 hours (error 131047).
+ * Resolves to { ok, code?, message? } — ok is true ONLY when Meta lists the user as added/removed.
+ * Never throws for Meta refusals (they are reported); throws only for programming errors.
+ */
+async function setUserBlocked(wabaId, phoneNumberId, user, blocked) {
+  const value = String(user || '').trim();
+  let entry;
+  if (isBsuid(value)) {
+    if (/\.ENT\./.test(value)) return { ok: false, code: 'PARENT_ID', message: 'WhatsApp does not allow blocking by a parent user ID.' };
+    entry = { user_id: value };
+  } else {
+    const digits = phoneDigits(value);
+    if (!digits) return { ok: false, code: 'NO_RECIPIENT', message: 'This customer has no phone number or WhatsApp user ID.' };
+    entry = { user: `+${digits}` };
+  }
+  const body = { messaging_product: 'whatsapp', block_users: [entry] };
+  let data;
+  try {
+    data = await request(wabaId, blocked ? 'POST' : 'DELETE', `/${phoneNumberId}/block_users`, body);
+  } catch (err) {
+    data = err.response?.data;
+    if (!data?.block_users) {
+      return { ok: false, code: err.metaCode || err.response?.status || 'NETWORK', message: describeBlockError(err.metaCode, err.message) };
+    }
+  }
+  const result = data?.block_users || {};
+  const okList = blocked ? result.added_users : result.removed_users;
+  if (Array.isArray(okList) && okList.length > 0) return { ok: true };
+  const failed = Array.isArray(result.failed_users) ? result.failed_users[0] : null;
+  const e = failed?.errors?.[0];
+  if (e) return { ok: false, code: e.code, message: describeBlockError(e.code, e.error_data?.details || e.message) };
+  return { ok: false, code: 'UNCONFIRMED', message: 'WhatsApp did not confirm the change.' };
+}
+
+function describeBlockError(code, fallback) {
+  switch (Number(code)) {
+    case 131047: return 'WhatsApp only allows blocking customers who messaged in the last 24 hours.';
+    case 139101: return 'The WhatsApp block list is full (64,000 users).';
+    case 130429: return 'WhatsApp rate limit reached. Try again in a few minutes.';
+    case 139103: return 'WhatsApp had an internal error. Try again.';
+    case 131021: return 'You cannot block your own business number.';
+    default: return String(fallback || 'WhatsApp refused the request.').replace(/^Meta API Error: /, '').slice(0, 300);
+  }
+}
+
 async function markMessageAsRead(wabaId, messageId) {
   const waba = await getWaba(wabaId);
   const phoneNumberId = waba.phoneNumbers?.[0]?.phoneNumberId;
@@ -862,6 +911,7 @@ async function getPhoneNumberMessagingLimit(wabaId, phoneNumberId) {
 }
 
 module.exports = {
+  setUserBlocked,
   syncTemplatesWithSummary,
   hostTemplateHeaderImage,
   getTemplateHeaderImageUrl,

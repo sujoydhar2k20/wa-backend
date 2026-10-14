@@ -6,7 +6,7 @@ const { escapeRegex, phoneSearchTerm } = require('../utils/regex');
 async function list(req, res, next) {
     try {
         const {
-            page = 1, limit = 20, wabaId, status, assignedTo, tag, tags, tagId, isUnread, isWaiting
+            page = 1, limit = 20, wabaId, status, assignedTo, tag, tags, tagId, isUnread, isWaiting, source, adId
         } = req.query;
         const skip = (parseInt(page, 10) - 1) * parseInt(limit, 10);
         // Chats folded into another chat of the same customer (phone + WhatsApp user ID) are hidden.
@@ -16,6 +16,9 @@ async function list(req, res, next) {
         const filterTag = tag || tags || tagId;
         if (filterTag) filter.tags = filterTag;
         if (isUnread !== undefined) filter.isUnread = isUnread === 'true';
+        // Customers who came from a Click-to-WhatsApp ad (any, or one ad/post id).
+        if (adId) filter.$and = [...(filter.$and || []), { $or: [{ 'firstReferral.sourceId': String(adId) }, { 'lastReferral.sourceId': String(adId) }] }];
+        else if (source === 'ad') filter['firstReferral.receivedAt'] = { $exists: true };
         if (isWaiting === 'true') {
             filter.$or = [
                 { lastStaffMessageAt: null },
@@ -37,7 +40,7 @@ async function list(req, res, next) {
                 .sort({ lastMessageAt: -1 })
                 .skip(skip)
                 .limit(parseInt(limit, 10))
-                .populate('contactId', 'name nameOnWhatsApp nickname username profilePicture isOptedOut isBlocked remoteBlock')
+                .populate('contactId', 'name nameOnWhatsApp nickname username bsuid profilePicture isOptedOut isBlocked remoteBlock')
                 .populate('assignedTo', 'name phone')
                 .populate('wabaId', 'businessName phoneNumbers')
                 .populate('tags', 'name color'),
@@ -189,7 +192,7 @@ async function search(req, res, next) {
 async function get(req, res, next) {
     try {
         const chat = await Chat.findById(req.params.id)
-            .populate('contactId', 'name nameOnWhatsApp nickname profilePicture isOptedOut isBlocked customFields')
+            .populate('contactId', 'name nameOnWhatsApp nickname username bsuid profilePicture isOptedOut isBlocked remoteBlock customFields')
             .populate('assignedTo', 'name phone')
             .populate('wabaId', 'businessName phoneNumbers')
             .populate('collaborators', 'name phone')
@@ -225,7 +228,7 @@ async function assign(req, res, next) {
 
         // Re-fetch with full population so the response matches GET /chats/:id
         const populated = await Chat.findById(chat._id)
-            .populate('contactId', 'name nameOnWhatsApp nickname profilePicture isOptedOut isBlocked customFields')
+            .populate('contactId', 'name nameOnWhatsApp nickname username bsuid profilePicture isOptedOut isBlocked remoteBlock customFields')
             .populate('assignedTo', 'name phone')
             .populate('wabaId', 'businessName phoneNumbers')
             .populate('collaborators', 'name phone')
@@ -334,7 +337,7 @@ async function transfer(req, res, next) {
 
         // Re-fetch with full population so the response matches GET /chats/:id
         const populated = await Chat.findById(chat._id)
-            .populate('contactId', 'name nameOnWhatsApp nickname profilePicture isOptedOut isBlocked customFields')
+            .populate('contactId', 'name nameOnWhatsApp nickname username bsuid profilePicture isOptedOut isBlocked remoteBlock customFields')
             .populate('assignedTo', 'name phone')
             .populate('wabaId', 'businessName phoneNumbers')
             .populate('collaborators', 'name phone')
@@ -447,7 +450,7 @@ async function close(req, res, next) {
 
         // Re-fetch with full population so the frontend keeps contact info, assignment, and tags
         const populated = await Chat.findById(chat._id)
-            .populate('contactId', 'name nameOnWhatsApp nickname profilePicture isOptedOut isBlocked customFields')
+            .populate('contactId', 'name nameOnWhatsApp nickname username bsuid profilePicture isOptedOut isBlocked remoteBlock customFields')
             .populate('assignedTo', 'name phone')
             .populate('wabaId', 'businessName phoneNumbers')
             .populate('collaborators', 'name phone')
@@ -521,7 +524,7 @@ async function reopen(req, res, next) {
 
         // Re-fetch with full population so the frontend keeps contact info, assignment, and tags
         const populated = await Chat.findById(chat._id)
-            .populate('contactId', 'name nameOnWhatsApp nickname profilePicture isOptedOut isBlocked customFields')
+            .populate('contactId', 'name nameOnWhatsApp nickname username bsuid profilePicture isOptedOut isBlocked remoteBlock customFields')
             .populate('assignedTo', 'name phone')
             .populate('wabaId', 'businessName phoneNumbers')
             .populate('collaborators', 'name phone')
@@ -998,7 +1001,7 @@ async function startWithPhone(req, res, next) {
         let chat = await Chat.findOne({
             wabaId: selectedWabaId,
             phoneNumber: normalizedPhone
-        }).populate('contactId', 'name nameOnWhatsApp nickname username profilePicture isOptedOut isBlocked remoteBlock')
+        }).populate('contactId', 'name nameOnWhatsApp nickname username bsuid profilePicture isOptedOut isBlocked remoteBlock')
           .populate('wabaId', 'businessName phoneNumbers')
           .populate('assignedTo', 'name phone')
           .populate('tags', 'name color');
@@ -1018,7 +1021,7 @@ async function startWithPhone(req, res, next) {
 
             // Populate the newly created chat
             chat = await Chat.findById(chat._id)
-                .populate('contactId', 'name nameOnWhatsApp nickname username profilePicture isOptedOut isBlocked remoteBlock')
+                .populate('contactId', 'name nameOnWhatsApp nickname username bsuid profilePicture isOptedOut isBlocked remoteBlock')
                 .populate('wabaId', 'businessName phoneNumbers')
                 .populate('assignedTo', 'name phone')
                 .populate('tags', 'name color');

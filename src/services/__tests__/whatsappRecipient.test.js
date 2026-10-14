@@ -77,3 +77,32 @@ describe('send requests', () => {
     await expect(wa.sendTextMessage('w1', 'pn1', BSUID, 'x')).rejects.toMatchObject({ statusCode: 400, metaCode: 131062, message: expect.stringMatching(/share their phone number/) });
   });
 });
+
+describe('Meta Block Users API', () => {
+  test('block by phone: POST with user "+digits"; ok only when Meta lists it as added', async () => {
+    axios.mockResolvedValue({ data: { messaging_product: 'whatsapp', block_users: { added_users: [{ input: '+919800000001', wa_id: '919800000001' }] } } });
+    await expect(wa.setUserBlocked('w1', 'pn1', '919800000001', true)).resolves.toEqual({ ok: true });
+    expect(axios.mock.calls[0][0]).toMatchObject({ method: 'POST', url: expect.stringMatching(/\/pn1\/block_users$/), data: { messaging_product: 'whatsapp', block_users: [{ user: '+919800000001' }] } });
+  });
+  test('unblock by BSUID: DELETE with user_id', async () => {
+    axios.mockResolvedValue({ data: { block_users: { removed_users: [{ input: BSUID }] } } });
+    await expect(wa.setUserBlocked('w1', 'pn1', BSUID, false)).resolves.toEqual({ ok: true });
+    expect(axios.mock.calls[0][0]).toMatchObject({ method: 'DELETE', data: { block_users: [{ user_id: BSUID }] } });
+  });
+  test('parent BSUID refused without calling Meta', async () => {
+    await expect(wa.setUserBlocked('w1', 'pn1', 'US.ENT.11815799212886844830', true)).resolves.toMatchObject({ ok: false, code: 'PARENT_ID' });
+    expect(axios).not.toHaveBeenCalled();
+  });
+  test('failed_users (131047) reported, not success', async () => {
+    axios.mockRejectedValue({ response: { status: 400, data: { block_users: { failed_users: [{ input: '+919800000001', errors: [{ code: 131047, message: 'Re-engagement message', error_data: { details: 'x' } }] }] }, error: { code: 139100, message: 'Failed to block/unblock users' } } } });
+    await expect(wa.setUserBlocked('w1', 'pn1', '919800000001', true)).resolves.toMatchObject({ ok: false, code: 131047, message: expect.stringMatching(/24 hours/) });
+  });
+  test('network failure reported', async () => {
+    axios.mockRejectedValue(new Error('connect ETIMEDOUT'));
+    await expect(wa.setUserBlocked('w1', 'pn1', '919800000001', true)).resolves.toMatchObject({ ok: false, code: 'NETWORK' });
+  });
+  test('200 without added_users is NOT success', async () => {
+    axios.mockResolvedValue({ data: { block_users: { added_users: [] } } });
+    await expect(wa.setUserBlocked('w1', 'pn1', '919800000001', true)).resolves.toMatchObject({ ok: false, code: 'UNCONFIRMED' });
+  });
+});
