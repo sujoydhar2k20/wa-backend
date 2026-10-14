@@ -60,40 +60,34 @@ function runFfmpeg(args, timeout = 60000) {
 }
 
 /**
- * Convert a staff-recorded voice note to OGG/OPUS mono for a WhatsApp voice message.
- * Tries libopus first, then ffmpeg's built-in (experimental) opus encoder for servers built without
- * libopus. Re-encodes at a lower bitrate if the file is over 512 KB (the play-icon limit).
- * Returns { buffer, oversize } or throws when no OPUS encoder works (the caller then falls back to an
- * ordinary audio attachment and says so).
+ * Convert a staff-recorded voice note to OGG/OPUS mono 48 kHz for a WhatsApp voice message.
+ * libopus only: Meta rejected files from ffmpeg's built-in experimental opus encoder (error 131053,
+ * "on processing it is of type application/octet-stream"). Metadata is stripped. Re-encodes at a lower
+ * bitrate if the file is over 512 KB (the play-icon limit).
+ * Returns { buffer, oversize } or throws when libopus is missing (the caller then sends an ordinary
+ * audio attachment and says so).
  */
 async function convertVoiceNoteForMeta(buffer) {
     const id = `${Date.now()}_${process.pid}_${Math.random().toString(36).slice(2)}`;
     const tmpIn = path.join(os.tmpdir(), `wa_voice_in_${id}`);
     const tmpOut = path.join(os.tmpdir(), `wa_voice_out_${id}.ogg`);
-    const encoders = [
-        ['-c:a', 'libopus', '-application', 'voip'],
-        ['-c:a', 'opus', '-strict', '-2', '-ar', '48000'],
-    ];
     try {
         await fs.promises.writeFile(tmpIn, buffer);
-        let lastErr;
-        for (const enc of encoders) {
-            for (const bitrate of ['32k', '16k', '12k']) {
-                try {
-                    await runFfmpeg(['-y', '-i', tmpIn, '-vn', '-ac', '1', ...enc, '-b:a', bitrate, '-f', 'ogg', tmpOut]);
-                    const out = await fs.promises.readFile(tmpOut);
-                    if (!out.length) throw new Error('ffmpeg produced an empty voice file');
-                    if (out.length <= VOICE_PLAY_ICON_MAX_BYTES || bitrate === '12k') {
-                        logger.info(`Voice note converted to OGG/OPUS (${enc[1]}, ${bitrate}): ${buffer.length} -> ${out.length} bytes`);
-                        return { buffer: out, oversize: out.length > VOICE_PLAY_ICON_MAX_BYTES };
-                    }
-                } catch (e) {
-                    lastErr = e;
-                    break; // this encoder is unavailable/broken: try the next one
-                }
+        for (const bitrate of ['32k', '24k', '16k']) {
+            await runFfmpeg(['-y', '-i', tmpIn, '-vn', '-map_metadata', '-1', '-ac', '1', '-ar', '48000',
+                '-c:a', 'libopus', '-application', 'voip', '-b:a', bitrate, '-f', 'ogg', tmpOut]);
+            const out = await fs.promises.readFile(tmpOut);
+            if (!out.length) throw new Error('ffmpeg produced an empty voice file');
+            // "OggS" page header + "OpusHead": anything else is not a voice note Meta will accept.
+            if (out.subarray(0, 4).toString('latin1') !== 'OggS' || !out.subarray(0, 200).toString('latin1').includes('OpusHead')) {
+                throw new Error('ffmpeg output is not Ogg/Opus');
+            }
+            if (out.length <= VOICE_PLAY_ICON_MAX_BYTES || bitrate === '16k') {
+                logger.info(`Voice note converted to OGG/OPUS (libopus, ${bitrate}): ${buffer.length} -> ${out.length} bytes`);
+                return { buffer: out, oversize: out.length > VOICE_PLAY_ICON_MAX_BYTES };
             }
         }
-        throw lastErr || new Error('No OPUS encoder available');
+        throw new Error('unreachable');
     } finally {
         fs.promises.unlink(tmpIn).catch(() => {});
         fs.promises.unlink(tmpOut).catch(() => {});
@@ -756,7 +750,9 @@ async function retry(req, res, next) {
                     let mimeType = response.headers['content-type'] || 'image/jpeg';
                     mimeType = mimeType.split(';')[0].trim();
 
-                    if (type === 'audio' && message.metadata?.voice === true) {
+                    // WhatsApp refused the voice file (131053 media processing): retry as a normal audio file.
+                    const voiceRejected = Number(message.errorCode) === 131053;
+                    if (type === 'audio' && message.metadata?.voice === true && !voiceRejected) {
                         try {
                             buffer = (await convertVoiceNoteForMeta(buffer)).buffer;
                             mimeType = 'audio/ogg';
@@ -808,6 +804,11 @@ async function retry(req, res, next) {
         const newMsgId = waResult?.messages?.[0]?.id;
         message.messageId = newMsgId;
         message.status = 'sent';
+        if (type === 'audio' && message.metadata?.voice === true && !retryAsVoice) {
+            // Went out as an ordinary audio file this time: say so in the chat.
+            message.metadata = { ...message.metadata, voice: false, voiceNotice: 'sent_as_audio_after_rejection' };
+            message.markModified('metadata');
+        }
         message.errorCode = undefined;
         message.errorMessage = undefined;
         await message.save();
