@@ -133,4 +133,34 @@ describe('voice notes (F7)', () => {
     expect(uploads[0].contentType).toBe('audio/ogg');
     expect(sends[0].audio).toEqual({ id: 'MEDIA1', voice: true });
   });
+
+  test('voice note WhatsApp refused (131053) is retried as an ordinary audio file and labelled so', async () => {
+    const failed = await Message.create({ chatId: chat._id, direction: 'outbound', type: 'audio', mediaUrl: 'https://cdn.example/rec.m4a', status: 'failed', errorCode: 131053, metadata: { voice: true } });
+    const res = { statusCode: 200, status(c) { this.statusCode = c; return this; }, json(b) { this.body = b; return this; } };
+    let err;
+    await messages.retry({ params: { id: String(failed._id) }, user: { _id: chat._id } }, res, (e) => { err = e; });
+    expect(err).toBeUndefined();
+    const up = uploads[uploads.length - 1];
+    const sent = sends[sends.length - 1];
+    expect(up.contentType).toBe('audio/mp4');
+    expect(sent.audio.voice).toBeUndefined();
+    const saved = await Message.findById(failed._id).lean();
+    expect(saved.metadata).toMatchObject({ voice: false, voiceNotice: 'sent_as_audio_after_rejection' });
+    expect(saved.status).toBe('sent');
+  });
+
+  test('voice output is real Ogg/Opus, mono, without metadata', async () => {
+    const { execFileSync } = require('child_process');
+    const fsx = require('fs'); const osx = require('os'); const px = require('path');
+    const src = px.join(osx.tmpdir(), `vt_${Date.now()}.m4a`);
+    execFileSync('ffmpeg', ['-y', '-loglevel', 'error', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=3', '-metadata', 'title=secret', '-c:a', 'aac', src]);
+    const { buffer } = await messages.convertVoiceNoteForMeta(fsx.readFileSync(src));
+    const out = px.join(osx.tmpdir(), `vt_${Date.now()}.ogg`);
+    fsx.writeFileSync(out, buffer);
+    const probe = execFileSync('ffprobe', ['-v', 'error', '-show_entries', 'stream=codec_name,channels,sample_rate:format_tags', '-of', 'json', out]).toString();
+    const j = JSON.parse(probe);
+    expect(j.streams[0]).toMatchObject({ codec_name: 'opus', channels: 1, sample_rate: '48000' });
+    expect(JSON.stringify(j.format?.tags || {})).not.toContain('secret');
+    fsx.unlinkSync(src); fsx.unlinkSync(out);
+  });
 });
