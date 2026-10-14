@@ -8,7 +8,7 @@ const chatActivitySchema = new mongoose.Schema(
       enum: [
         'tag_added', 'tag_removed', 'assigned', 'unassigned', 'transferred', 
         'closed', 'reopened', 'opt_in', 'opt_out', 'note_added',
-        'auto_closed', 'auto_transferred'
+        'auto_closed', 'auto_transferred', 'blocked', 'unblocked'
       ],
       required: true,
     },

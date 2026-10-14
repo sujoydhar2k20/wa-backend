@@ -4,6 +4,7 @@ const Template = require('../models/Template');
 const Contact = require('../models/Contact');
 const config = require('../config');
 const { logger } = require('../utils/logger');
+const { recipientFields, isBsuid, phoneDigits } = require('../utils/waIdentity');
 
 const BASE_URL = `https://graph.facebook.com/${config.meta.apiVersion}`;
 
@@ -25,10 +26,15 @@ async function getAccessToken(wabaId) {
  * (e.g. first outbound to an unknown number).
  */
 async function checkContactBlockedOrOptedOut(to) {
-  const sanitized = to.replace(/\D/g, '');
-  const contact = await Contact.findOne({
-    $or: [{ waId: sanitized }, { phoneNumber: sanitized }]
-  }).select('isBlocked isOptedOut').lean();
+  const value = String(to || '').trim();
+  let query;
+  if (isBsuid(value)) query = { bsuid: value };
+  else {
+    const sanitized = phoneDigits(value);
+    if (!sanitized) return; // recipientFields() rejects it with a clear error
+    query = { $or: [{ waId: sanitized }, { phoneNumber: sanitized }] };
+  }
+  const contact = await Contact.findOne(query).select('isBlocked isOptedOut').lean();
   if (contact && (contact.isBlocked || contact.isOptedOut)) {
     const reason = contact.isBlocked ? 'blocked' : 'opted-out';
     const err = new Error(`Cannot send messages to ${reason} contacts.`);
@@ -47,11 +53,19 @@ async function request(wabaId, method, path, data = null) {
     res = await axios(opts);
   } catch (error) {
     if (error.response) {
-      logger.error(`WhatsApp API Error: ${JSON.stringify(error.response.data)}`);
-      const metaMsg = error.response.data?.error?.message;
+      const metaErr = error.response.data?.error;
+      // Code and title only: the full body can echo customer phone numbers (e.g. block_users).
+      logger.error(`WhatsApp API Error: ${method} ${path.split('?')[0]} -> ${error.response.status} code=${metaErr?.code ?? '-'} ${String(metaErr?.message || '').slice(0, 200)}`);
+      const metaMsg = metaErr?.message;
       if (metaMsg) {
         error.message = `Meta API Error: ${metaMsg}`;
         error.statusCode = error.response.status || 400;
+      }
+      if (metaErr?.code) error.metaCode = metaErr.code;
+      // 131062: this message type cannot be sent to a business-scoped user ID (username-only customer).
+      if (metaErr?.code === 131062) {
+        error.message = 'WhatsApp does not allow this message type for customers known only by their WhatsApp username/user ID (Meta error 131062). Ask the customer to share their phone number.';
+        error.statusCode = 400;
       }
     } else {
       logger.error(`WhatsApp API Request Error: ${error.message}`);
@@ -67,7 +81,7 @@ async function sendTextMessage(wabaId, phoneNumberId, to, text, replyToMessageId
   const body = {
     messaging_product: 'whatsapp',
     recipient_type: 'individual',
-    to: to.replace(/\D/g, ''),
+    ...recipientFields(to),
     type: 'text',
     text: { body: text },
   };
@@ -77,18 +91,30 @@ async function sendTextMessage(wabaId, phoneNumberId, to, text, replyToMessageId
   return request(wabaId, 'POST', path, body);
 }
 
-async function sendMediaMessage(wabaId, phoneNumberId, to, type, urlOrId, caption = '', replyToMessageId = null) {
+/**
+ * @param {object} [options]
+ * @param {boolean} [options.voice] audio only: send as a WhatsApp voice message (`audio.voice: true`).
+ *   Meta requires an OGG/OPUS file for this; callers must upload one (see convertVoiceNoteForMeta).
+ */
+async function sendMediaMessage(wabaId, phoneNumberId, to, type, urlOrId, caption = '', replyToMessageId = null, options = {}) {
   await checkContactBlockedOrOptedOut(to);
   const path = `/${phoneNumberId}/messages`;
   const key = type === 'document' ? 'document' : type;
   const isId = !urlOrId.startsWith('http');
-  const payload = type === 'document'
-    ? (isId ? { id: urlOrId, caption } : { link: urlOrId, caption })
-    : (isId ? { id: urlOrId, caption: caption || undefined } : { link: urlOrId, caption: caption || undefined });
+  let payload;
+  if (type === 'audio') {
+    // Audio messages have no caption on WhatsApp.
+    payload = isId ? { id: urlOrId } : { link: urlOrId };
+    if (options.voice) payload.voice = true;
+  } else {
+    payload = type === 'document'
+      ? (isId ? { id: urlOrId, caption } : { link: urlOrId, caption })
+      : (isId ? { id: urlOrId, caption: caption || undefined } : { link: urlOrId, caption: caption || undefined });
+  }
   const body = {
     messaging_product: 'whatsapp',
     recipient_type: 'individual',
-    to: to.replace(/\D/g, ''),
+    ...recipientFields(to),
     type,
     [key]: payload,
   };
@@ -413,7 +439,7 @@ async function sendTemplateMessage(wabaId, phoneNumberId, to, templateName, lang
   const body = {
     messaging_product: 'whatsapp',
     recipient_type: 'individual',
-    to: to.replace(/\D/g, ''),
+    ...recipientFields(to),
     type: 'template',
     template: { 
       name: templateName, 
@@ -445,11 +471,59 @@ async function sendInteractiveMessage(wabaId, phoneNumberId, to, interactivePayl
   const body = {
     messaging_product: 'whatsapp',
     recipient_type: 'individual',
-    to: to.replace(/\D/g, ''),
+    ...recipientFields(to),
     type: 'interactive',
     interactive: interactivePayload,
   };
   return request(wabaId, 'POST', path, body);
+}
+
+/**
+ * Meta Block Users API: POST (block) / DELETE (unblock) /{phone-number-id}/block_users.
+ * `user` is a phone number or a business-scoped user ID (parent ".ENT." IDs are not accepted).
+ * Meta only allows blocking customers who messaged in the last 24 hours (error 131047).
+ * Resolves to { ok, code?, message? } — ok is true ONLY when Meta lists the user as added/removed.
+ * Never throws for Meta refusals (they are reported); throws only for programming errors.
+ */
+async function setUserBlocked(wabaId, phoneNumberId, user, blocked) {
+  const value = String(user || '').trim();
+  let entry;
+  if (isBsuid(value)) {
+    if (/\.ENT\./.test(value)) return { ok: false, code: 'PARENT_ID', message: 'WhatsApp does not allow blocking by a parent user ID.' };
+    entry = { user_id: value };
+  } else {
+    const digits = phoneDigits(value);
+    if (!digits) return { ok: false, code: 'NO_RECIPIENT', message: 'This customer has no phone number or WhatsApp user ID.' };
+    entry = { user: `+${digits}` };
+  }
+  const body = { messaging_product: 'whatsapp', block_users: [entry] };
+  let data;
+  try {
+    data = await request(wabaId, blocked ? 'POST' : 'DELETE', `/${phoneNumberId}/block_users`, body);
+  } catch (err) {
+    data = err.response?.data;
+    if (!data?.block_users) {
+      return { ok: false, code: err.metaCode || err.response?.status || 'NETWORK', message: describeBlockError(err.metaCode, err.message) };
+    }
+  }
+  const result = data?.block_users || {};
+  const okList = blocked ? result.added_users : result.removed_users;
+  if (Array.isArray(okList) && okList.length > 0) return { ok: true };
+  const failed = Array.isArray(result.failed_users) ? result.failed_users[0] : null;
+  const e = failed?.errors?.[0];
+  if (e) return { ok: false, code: e.code, message: describeBlockError(e.code, e.error_data?.details || e.message) };
+  return { ok: false, code: 'UNCONFIRMED', message: 'WhatsApp did not confirm the change.' };
+}
+
+function describeBlockError(code, fallback) {
+  switch (Number(code)) {
+    case 131047: return 'WhatsApp only allows blocking customers who messaged in the last 24 hours.';
+    case 139101: return 'The WhatsApp block list is full (64,000 users).';
+    case 130429: return 'WhatsApp rate limit reached. Try again in a few minutes.';
+    case 139103: return 'WhatsApp had an internal error. Try again.';
+    case 131021: return 'You cannot block your own business number.';
+    default: return String(fallback || 'WhatsApp refused the request.').replace(/^Meta API Error: /, '').slice(0, 300);
+  }
 }
 
 async function markMessageAsRead(wabaId, messageId) {
@@ -470,7 +544,7 @@ async function reactToMessage(wabaId, phoneNumberId, to, messageId, emoji) {
   return request(wabaId, 'POST', path, {
     messaging_product: 'whatsapp',
     recipient_type: 'individual',
-    to: to.replace(/\D/g, ''),
+    ...recipientFields(to),
     type: 'reaction',
     reaction: { message_id: messageId, emoji: emoji || "" },
   });
@@ -837,6 +911,7 @@ async function getPhoneNumberMessagingLimit(wabaId, phoneNumberId) {
 }
 
 module.exports = {
+  setUserBlocked,
   syncTemplatesWithSummary,
   hostTemplateHeaderImage,
   getTemplateHeaderImageUrl,

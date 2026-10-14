@@ -50,6 +50,7 @@ async function initAgenda() {
   // 3. Schedule recurring/interval jobs
   await agenda.every('24 hours', 'cleanup-expired-media');
   await agenda.every('24 hours', 'cleanup-old-calls');
+  await agenda.every('2 minutes', 'retry-failed-webhook-messages');
 
   return agenda;
 }

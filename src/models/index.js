@@ -7,6 +7,7 @@ module.exports = {
   Chat: require('./Chat'),
   Message: require('./Message'),
   ChatActivity: require('./ChatActivity'),
+  BlockAudit: require('./BlockAudit'),
   Note: require('./Note'),
   Template: require('./Template'),
   BroadcastList: require('./BroadcastList'),
@@ -30,4 +31,5 @@ module.exports = {
   CallEvent: require('./CallEvent'),
   Notification: require('./Notification'),
   SendRequest: require('./SendRequest'),
+  WebhookFailure: require('./WebhookFailure'),
 };

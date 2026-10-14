@@ -231,7 +231,7 @@ describe('logout never deletes other users\' sessions', () => {
     await expect(auth.logout(undefined, undefined)).rejects.toThrow('Refresh token required');
     expect(deleteMany).not.toHaveBeenCalled();
     await auth.logout(undefined, 'rt-1');
-    expect(deleteOne).toHaveBeenCalledWith({ refreshToken: 'rt-1' });
+    expect(deleteOne).toHaveBeenCalledWith({ $or: [{ refreshToken: 'rt-1' }, { previousRefreshToken: 'rt-1' }] });
     await auth.logout('u1');
     expect(deleteMany).toHaveBeenCalledWith({ userId: 'u1' });
   });

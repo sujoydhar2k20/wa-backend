@@ -5,6 +5,7 @@ const locationSchema = new mongoose.Schema({
   longitude: Number,
   name: String,
   address: String,
+  url: String,
 }, { _id: false });
 
 const reactionSchema = new mongoose.Schema({
@@ -29,8 +30,9 @@ const messageSchema = new mongoose.Schema(
     phoneNumberId: { type: String },
     messageId: { type: String, index: true, unique: true, sparse: true },
     waId: { type: String },
+    bsuid: { type: String },
     direction: { type: String, enum: ['inbound', 'outbound', 'internal'], required: true },
-    type: { type: String, enum: ['text', 'image', 'video', 'audio', 'document', 'location', 'sticker', 'reaction', 'note', 'system', 'template', 'interactive'], default: 'text' },
+    type: { type: String, enum: ['text', 'image', 'video', 'audio', 'document', 'location', 'sticker', 'reaction', 'note', 'system', 'template', 'interactive', 'button', 'contacts', 'order', 'unsupported'], default: 'text' },
     text: { type: String },
     mediaUrl: { type: String },
     mediaId: { type: String },
@@ -43,7 +45,7 @@ const messageSchema = new mongoose.Schema(
       emoji: String,
       by: String // waId or Staff ID representing who reacted
     }],
-    status: { type: String, enum: ['queued', 'sent', 'delivered', 'read', 'failed'] },
+    status: { type: String, enum: ['queued', 'sent', 'delivered', 'read', 'played', 'failed'] },
     statusTimestamp: { type: Date },
     errorCode: { type: Number },
     errorMessage: { type: String },
@@ -88,7 +90,7 @@ messageSchema.post('save', async function(doc) {
           snippet = doc.caption || '🎥 Video';
           break;
         case 'audio':
-          snippet = '🎙️ Voice Message';
+          snippet = doc.metadata?.voice === false ? '🎵 Audio' : '🎙️ Voice Message';
           break;
         case 'document':
           snippet = doc.fileName ? `📄 ${doc.fileName}` : '📄 Document';

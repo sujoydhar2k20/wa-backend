@@ -7,6 +7,10 @@ const mediaService = require('./media.service');
 const ocrService = require('./ocr.service');
 const { uploadToVPS } = require('../utils/vpsUpload');
 const aiFallbackService = require('./aiFallback.service');
+const { parseInboundContent, previewText, parseReferral } = require('./inboundMessage');
+const { isKnownStatus, statusGuard } = require('./messageStatus');
+const { senderIdentity, resolveContact, resolveChat, applyUserIdChange } = require('./customerIdentity');
+const { isBsuid, displayIdentity, addressOf, phoneDigits } = require('../utils/waIdentity');
 
 const GST = 0.03;
 
@@ -52,6 +56,12 @@ async function processWebhook(entry) {
             const value = change?.value;
             if (!value) continue;
 
+            // A customer's business-scoped user ID changed.
+            if (change.field === 'user_id_update' || Array.isArray(value.user_id_update)) {
+                await require('./customerIdentity').processUserIdUpdate(value);
+                continue;
+            }
+
             if (value.statuses && value.statuses.length > 0) {
                 for (const statusObj of value.statuses) {
                     await handleStatusUpdate(statusObj);
@@ -64,12 +74,73 @@ async function processWebhook(entry) {
             const contacts = value.contacts || [];
 
             for (const msg of value.messages) {
-                await handleMessage(waba, phoneNumberId, msg, contacts);
+                // One failing message must not stop the others in the same webhook.
+                try {
+                    await handleMessage(waba, phoneNumberId, msg, contacts);
+                } catch (msgErr) {
+                    await recordFailure({ entryId: wabaIdMeta, phoneNumberId, msg, contacts, metadata, error: msgErr });
+                }
             }
         }
     } catch (error) {
         logger.error('Error processing webhook:', error);
     }
+}
+
+const RETRY_DELAYS_MIN = [1, 5, 15, 60, 180];
+
+/** Keep a message whose processing failed (temporary errors), so it is retried and can be diagnosed. */
+async function recordFailure({ entryId, phoneNumberId, msg, contacts, metadata, error }) {
+    const errText = `${error?.name || 'Error'}: ${String(error?.message || error).slice(0, 300)}`;
+    logger.error(`[webhook] processing failed for ${msg?.type} message ${msg?.id}: ${errText}`);
+    try {
+        const { WebhookFailure } = require('../models');
+        const sender = (contacts || []).filter((c) => (msg?.from && c.wa_id === msg.from) || (msg?.from_user_id && c.user_id === msg.from_user_id));
+        await WebhookFailure.updateOne(
+            { kind: 'message', messageId: msg?.id },
+            {
+                $setOnInsert: {
+                    kind: 'message', messageId: msg?.id, messageType: msg?.type, wabaMetaId: entryId, phoneNumberId,
+                    payload: { msg, contacts: sender, metadata: metadata || {} },
+                    attempts: 0, nextAttemptAt: new Date(Date.now() + RETRY_DELAYS_MIN[0] * 60e3),
+                },
+                $set: { error: errText },
+            },
+            { upsert: true },
+        );
+    } catch (e) {
+        logger.error(`[webhook] could not record failed message ${msg?.id}: ${e.message}`);
+    }
+}
+
+/** Agenda job: process failed messages again (safe: already-stored messages are skipped). */
+async function retryFailedMessages({ now = new Date(), limit = 50 } = {}) {
+    const { WebhookFailure } = require('../models');
+    const due = await WebhookFailure.find({ kind: 'message', resolvedAt: null, gaveUpAt: null, nextAttemptAt: { $lte: now } })
+        .sort({ nextAttemptAt: 1 }).limit(limit);
+    let resolved = 0;
+    for (const f of due) {
+        const { msg, contacts, metadata } = f.payload || {};
+        try {
+            const waba = await Waba.findOne({ wabaId: f.wabaMetaId });
+            if (!waba) throw new Error('WABA not found');
+            await handleMessage(waba, f.phoneNumberId || metadata?.phone_number_id, msg, contacts || []);
+            f.resolvedAt = new Date();
+            resolved++;
+            logger.info(`[webhook] retried message ${f.messageId}: processed`);
+        } catch (e) {
+            f.attempts += 1;
+            f.error = `${e.name || 'Error'}: ${String(e.message).slice(0, 300)}`;
+            if (f.attempts >= RETRY_DELAYS_MIN.length) {
+                f.gaveUpAt = new Date();
+                logger.error(`[webhook] giving up on message ${f.messageId} after ${f.attempts} retries: ${f.error}`);
+            } else {
+                f.nextAttemptAt = new Date(Date.now() + RETRY_DELAYS_MIN[f.attempts] * 60e3);
+            }
+        }
+        await f.save();
+    }
+    return { checked: due.length, resolved };
 }
 
 async function handleMessage(waba, phoneNumberId, msg, contacts) {
@@ -80,22 +151,30 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
         return;
     }
 
-    // DEBUG: Log full message structure to see what WhatsApp is sending
-    logger.info(`[WEBHOOK DEBUG] Incoming message structure:`, {
-        messageId: msg.id,
-        type: msg.type,
-        hasContext: !!msg.context,
-        context: msg.context,
-        fullMsg: JSON.stringify(msg, null, 2)
-    });
+    // Parse the content first (pure, see inboundMessage.js). Never log message content.
+    const parsed = parseInboundContent(msg);
+    logger.info(`[webhook] inbound ${msg.type}${parsed.type !== msg.type ? `->${parsed.type}` : ''} ${msg.id}${msg.context ? ' (reply)' : ''}`);
 
-    const waId = msg.from; // Sender's phone number
-    
-    // Check if the number is globally blocked in AI settings
+    // Sender identity: phone (wa_id) and/or business-scoped user ID (BSUID). Either may be missing
+    // since WhatsApp usernames; a BSUID is never treated as a phone number.
+    const identity = senderIdentity(msg, contacts);
+    // Reply to our "share your phone number" request: the shared card is the customer's own number.
+    // Only origin "contact_request" counts; a contact card forwarded by the customer is someone else.
+    if (!identity.waId && identity.bsuid && msg.type === 'contacts') {
+        const own = (msg.contacts || []).find((c) => c?.origin === 'contact_request');
+        const ownPhone = phoneDigits(own?.phones?.find((p) => p?.wa_id)?.wa_id || own?.phones?.[0]?.phone);
+        if (ownPhone) identity.waId = ownPhone;
+    }
+    const waId = identity.waId || undefined; // phone digits, when WhatsApp shared them
+    const bsuid = identity.bsuid || undefined;
+    const senderKey = waId || bsuid; // stable sender reference (reactions, logs)
+    if (!senderKey) throw new Error('Inbound message has no sender identity (no from / from_user_id)');
+
+    // Check if the number is globally blocked in AI settings (phone numbers only)
     try {
         const { AiSetting } = require('../models');
         const aiSettings = await AiSetting.findOne().lean();
-        if (aiSettings && aiSettings.blockedPhoneNumbers) {
+        if (waId && aiSettings && aiSettings.blockedPhoneNumbers) {
             const blockedNumbers = aiSettings.blockedPhoneNumbers.split(',').map(n => n.trim()).filter(Boolean);
             if (blockedNumbers.includes(waId)) {
                 logger.info(`Webhook: Message from globally blocked customer number ${waId} ignored early (AI settings blocklist).`);
@@ -106,43 +185,24 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
         logger.error('Error checking global blocked numbers in webhook:', err);
     }
 
-    const contactData = contacts.find(c => c.wa_id === waId);
-    const profileName = contactData?.profile?.name || waId;
+    const profileName = identity.profileName || '';
+    const fallbackName = displayIdentity({ waId, username: identity.username, bsuid });
 
-    // Contact handling
-    let contact = await Contact.findOne({ waId });
-    if (!contact) {
-        contact = await Contact.create({
-            phoneNumber: waId,
-            waId,
-            nameOnWhatsApp: profileName,
-            name: profileName !== waId ? profileName : '',
-        });
-    } else {
-        let updated = false;
-        if (profileName !== waId && contact.nameOnWhatsApp !== profileName) {
-            contact.nameOnWhatsApp = profileName;
-            updated = true;
-        }
-        if (profileName !== waId && !contact.name) {
-            contact.name = profileName;
-            updated = true;
-        }
-        if (updated) {
-            await contact.save();
-        }
-    }
+    // Contact handling (matches phone OR BSUID; adds newly learned identities; no duplicates)
+    const contact = await resolveContact(identity);
 
-    // waId is NOT unique, so duplicate Contact docs can exist for the same number — the chat
-    // (and the UI badge) may point to one document while this webhook loaded another. Match by
-    // waId OR phoneNumber so block/opt-out state on ANY matching contact is honoured.
-    const sanitizedWaId = String(waId).replace(/\D/g, '');
-    const numberMatch = { $or: [{ waId: sanitizedWaId }, { phoneNumber: sanitizedWaId }] };
+    // Duplicate Contact docs can exist for the same customer — the chat (and the UI badge) may point to
+    // one document while this webhook loaded another. Match by every known identity so block/opt-out
+    // state on ANY matching contact is honoured.
+    const idOr = [];
+    if (waId) idOr.push({ waId }, { phoneNumber: waId });
+    if (bsuid) idOr.push({ bsuid });
+    const numberMatch = { $or: idOr };
 
-    // Block logic: discard inbound messages if this number is blocked.
+    // Block logic: discard inbound messages if this customer is blocked.
     const isContactBlocked = contact.isBlocked || await Contact.exists({ ...numberMatch, isBlocked: true });
     if (isContactBlocked) {
-        logger.info(`Message from blocked contact ${waId} ignored.`);
+        logger.info(`Message from blocked contact ${senderKey} ignored.`);
         return;
     }
 
@@ -152,11 +212,11 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
     if (wasOptedOut) {
         await Contact.updateMany(numberMatch, { $set: { isOptedOut: false }, $unset: { optedOutAt: '' } });
         contact.isOptedOut = false;
-        logger.info(`Auto opted-in contact ${waId} after inbound message.`);
+        logger.info(`Auto opted-in contact ${senderKey} after inbound message.`);
     }
 
-    // Find or create chat
-    let chat = await Chat.findOne({ wabaId: waba._id, waId });
+    // Find or create chat (by phone OR BSUID)
+    let chat = await resolveChat(waba._id, identity);
     const isNewChat = !chat;
 
     if (!chat) {
@@ -165,6 +225,7 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
             phoneNumberId,
             phoneNumber: waId,
             waId,
+            bsuid,
             contactId: contact._id,
             status: 'open',
             isUnread: true,
@@ -172,6 +233,13 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
         });
     } else if (!chat.contactId) {
         chat.contactId = contact._id;
+    }
+
+    // The customer's BSUID changed (system notice): move the new one onto this customer.
+    if (parsed.isSystemEvent && parsed.metadata?.systemType === 'user_changed_user_id' && isBsuid(parsed.metadata.user_id)) {
+        const newId = parsed.metadata.user_id;
+        await applyUserIdChange({ previous: bsuid, current: newId, waId });
+        if (!(await Chat.exists({ wabaId: waba._id, bsuid: newId, _id: { $ne: chat._id } }))) chat.bsuid = newId;
     }
 
     // Auto-assign new chat to the least-loaded active staff member on this WABA (round-robin by open chat count)
@@ -202,7 +270,7 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
                 const leastLoaded = chatCounts[0];
                 chat.assignedTo = leastLoaded.staffId;
                 logger.info(
-                    `Auto-assigned new chat (waId: ${waId}) to staff ${leastLoaded.staffId} (open chats: ${leastLoaded.count})`
+                    `Auto-assigned new chat (${senderKey}) to staff ${leastLoaded.staffId} (open chats: ${leastLoaded.count})`
                 );
             }
         } catch (err) {
@@ -210,17 +278,32 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
         }
     }
 
-    // Update chat metadata
+    // Update chat metadata. WhatsApp system notices (number/ID changes) are not customer messages:
+    // they neither open the 24-hour window nor reopen or mark the chat unread.
     chat.lastMessageAt = new Date();
-    chat.lastCustomerMessageAt = new Date();
-    chat.isUnread = true;
+    let wasReopened = false;
+    if (!parsed.isSystemEvent) {
+        chat.lastCustomerMessageAt = new Date();
+        chat.isUnread = true;
 
-    // Set WhatsApp Session Expiry exactly 24 hours from the incoming message timestamp
-    chat.sessionExpiresAt = new Date((msg.timestamp * 1000) + (24 * 60 * 60 * 1000));
+        // Set WhatsApp Session Expiry exactly 24 hours from the incoming message timestamp
+        chat.sessionExpiresAt = new Date((msg.timestamp * 1000) + (24 * 60 * 60 * 1000));
 
-    // Detect a reopen: an existing chat that was closed and is now receiving a new customer message.
-    const wasReopened = !isNewChat && chat.status === 'closed';
-    if (chat.status === 'closed') chat.status = 'open';
+        // Detect a reopen: an existing chat that was closed and is now receiving a new customer message.
+        wasReopened = !isNewChat && chat.status === 'closed';
+        if (chat.status === 'closed') chat.status = 'open';
+    }
+
+    // Click-to-WhatsApp ad / post the customer came from. The first one is kept for good; later ones
+    // (the customer tapped another ad) update lastReferral and the count. Each message keeps its own.
+    const referral = parseReferral(msg.referral);
+    if (referral) {
+        const stamped = { ...referral, messageId: msg.id, receivedAt: new Date(msg.timestamp * 1000) };
+        if (!chat.firstReferral?.receivedAt) chat.firstReferral = stamped;
+        chat.lastReferral = stamped;
+        chat.referralCount = (chat.referralCount || 0) + 1;
+        logger.info(`[webhook] referral ${referral.sourceType || 'unknown'} ${referral.sourceId || ''} on ${msg.id}`);
+    }
 
     await chat.save();
 
@@ -231,34 +314,23 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
         phoneNumberId,
         messageId: msg.id,
         waId,
+        bsuid,
         direction: 'inbound',
-        type: msg.type,
+        type: parsed.type,
         status: 'delivered',
         timestamp: new Date(msg.timestamp * 1000),
     };
+    if (parsed.text) messageData.text = parsed.text;
+    if (parsed.metadata) messageData.metadata = { ...parsed.metadata };
+    if (referral) messageData.metadata = { ...(messageData.metadata || {}), referral };
+    if (parsed.location) messageData.location = parsed.location;
 
     // Preserve reply threading for inbound customer replies.
     // WhatsApp provides the parent wa message ID in context.id (NOT context.message_id).
     // We also capture the quoted message preview details for display in the UI.
     const repliedWaMessageId = msg.context?.id;
-    logger.info(`[WEBHOOK DEBUG] Quoted message check:`, {
-        repliedWaMessageId,
-        hasQuotedMessage: !!repliedWaMessageId
-    });
-    
     if (repliedWaMessageId) {
-        logger.info(`[WEBHOOK DEBUG] Looking up parent message with messageId: ${repliedWaMessageId}`);
         const parentMessage = await Message.findOne({ messageId: repliedWaMessageId }).select('_id text type caption waId sentBy mediaUrl fileName');
-        
-        logger.info(`[WEBHOOK DEBUG] Parent message lookup result:`, {
-            found: !!parentMessage,
-            parentMessageId: parentMessage?._id,
-            parentText: parentMessage?.text,
-            parentType: parentMessage?.type,
-            parentWaId: parentMessage?.waId,
-            parentCaption: parentMessage?.caption,
-            parentMediaUrl: parentMessage?.mediaUrl
-        });
         
         if (parentMessage?._id) {
             messageData.replyToMessageId = parentMessage._id;
@@ -271,7 +343,7 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
                 senderName = parentWithSender.sentBy?.name || 'Staff';
             } else {
                 // Customer-sent message
-                senderName = profileName || waId;
+                senderName = profileName || fallbackName;
             }
             
             // Build the quoted message preview data
@@ -291,25 +363,19 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
                 fileName: parentMessage.fileName || null,
             };
             
-            logger.info(`[WEBHOOK DEBUG] QuotedMessage built:`, {
-                quotedMessage: messageData.quotedMessage,
-                messageDataReplyToId: messageData.replyToMessageId
-            });
         }
     }
 
     // Handle message types
-    if (msg.type === 'text') {
-        messageData.text = msg.text.body;
-    } else if (msg.type === 'reaction') {
+    if (msg.type === 'reaction') {
         const targetMessageId = msg.reaction.message_id;
         const emoji = msg.reaction.emoji;
 
         const targetMsg = await Message.findOne({ messageId: targetMessageId });
         if (targetMsg) {
-            targetMsg.reactions = targetMsg.reactions.filter(r => r.by !== waId);
+            targetMsg.reactions = targetMsg.reactions.filter(r => r.by !== senderKey && !(bsuid && r.by === bsuid));
             if (emoji) {
-                targetMsg.reactions.push({ emoji, by: waId });
+                targetMsg.reactions.push({ emoji, by: senderKey });
             }
             await targetMsg.save();
 
@@ -327,20 +393,22 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
 
         // Reactions are attached to existing messages, not saved as standalone messages
         return;
-    } else if (['image', 'video', 'audio', 'document'].includes(msg.type)) {
-        const mediaField = msg[msg.type];
-        messageData.mediaId = mediaField.id;
-        messageData.mimeType = mediaField.mime_type;
-        messageData.caption = mediaField.caption || null;
-        if (msg.type === 'document') {
-            messageData.fileName = mediaField.filename;
+    } else if (parsed.media) {
+        messageData.mediaId = parsed.media.id;
+        messageData.mimeType = parsed.media.mimeType;
+        messageData.caption = parsed.media.caption;
+        if (parsed.media.fileName) {
+            messageData.fileName = parsed.media.fileName;
         }
 
         // Process media download/upload synchronously before saving the message
         try {
-            const mediaResult = await processMediaAsync(chat, messageData, msg.type);
+            const mediaResult = await processMediaAsync(chat, messageData, parsed.media.field);
             if (mediaResult?.mediaUrl) {
                 messageData.mediaUrl = mediaResult.mediaUrl;
+            } else {
+                // Download/upload failed: keep the media id so staff can retry later (Meta keeps it ~7 days).
+                messageData.metadata = { ...(messageData.metadata || {}), mediaPending: true };
             }
             if (mediaResult?.metadata) {
                 messageData.metadata = {
@@ -349,42 +417,20 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
                 };
             }
         } catch (err) {
-            logger.error(`Failed to process media ${msg.type} for message ${msg.id}:`, err);
+            logger.error(`Failed to process media ${msg.type} for message ${msg.id}: ${err.message}`);
+            messageData.metadata = { ...(messageData.metadata || {}), mediaPending: true };
         }
-    } else if (msg.type === 'interactive') {
-        const interactive = msg.interactive;
-        if (interactive) {
-            if (interactive.type === 'button_reply' && interactive.button_reply) {
-                messageData.text = interactive.button_reply.title;
-                messageData.metadata = {
-                    button_reply: {
-                        id: interactive.button_reply.id,
-                        title: interactive.button_reply.title
-                    }
-                };
-            } else if (interactive.type === 'call_permission_reply' && interactive.call_permission_reply) {
-                // Customer allowed/declined WhatsApp calls from the business (or allowed automatically by calling us)
-                const reply = interactive.call_permission_reply;
-                const accepted = String(reply.response).toLowerCase() === 'accept';
-                messageData.text = accepted
-                    ? `📞 Customer allowed WhatsApp calls${reply.is_permanent ? ' (permanently)' : ''}`
-                    : '📞 Customer declined WhatsApp calls';
-                messageData.metadata = { kind: 'call_permission_reply', call_permission_reply: reply };
-                try {
-                    await require('./calls/permissions').recordReply({ wabaId: waba._id, phoneNumberId, waId, reply });
-                } catch (permErr) {
-                    logger.error(`Failed to record call permission reply from ${waId}: ${permErr.message}`);
-                }
-            } else if (interactive.type === 'list_reply' && interactive.list_reply) {
-                messageData.text = interactive.list_reply.title;
-                messageData.metadata = {
-                    list_reply: {
-                        id: interactive.list_reply.id,
-                        title: interactive.list_reply.title,
-                        description: interactive.list_reply.description
-                    }
-                };
-            }
+    } else if (parsed.metadata?.kind === 'call_permission_reply') {
+        // Customer allowed/declined WhatsApp calls from the business (or allowed automatically by calling us)
+        const reply = parsed.metadata.call_permission_reply;
+        const accepted = String(reply.response).toLowerCase() === 'accept';
+        messageData.text = accepted
+            ? `📞 Customer allowed WhatsApp calls${reply.is_permanent ? ' (permanently)' : ''}`
+            : '📞 Customer declined WhatsApp calls';
+        try {
+            await require('./calls/permissions').recordReply({ wabaId: waba._id, phoneNumberId, waId, reply });
+        } catch (permErr) {
+            logger.error(`Failed to record call permission reply for message ${msg.id}: ${permErr.message}`);
         }
     }
     // Add other types as needed
@@ -400,22 +446,7 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
 
     let message;
     try {
-        logger.info(`[WEBHOOK DEBUG] About to save message with data:`, {
-            hasQuotedMessage: !!messageData.quotedMessage,
-            quotedMessage: messageData.quotedMessage,
-            replyToMessageId: messageData.replyToMessageId,
-            messageType: messageData.type,
-            messageText: messageData.text
-        });
-        
         message = await Message.create(messageData);
-        
-        logger.info(`[WEBHOOK DEBUG] Message saved successfully:`, {
-            messageId: message._id,
-            hasQuotedMessage: !!message.quotedMessage,
-            quotedMessage: message.quotedMessage,
-            replyToMessageId: message.replyToMessageId
-        });
     } catch (createErr) {
         // E11000 = duplicate key error: two simultaneous webhook retries raced past
         // the findOne check above. The first insert won — just bail out silently.
@@ -423,13 +454,23 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
             logger.warn(`Concurrent duplicate inbound webhook for messageId ${msg.id}, skipping.`);
             return;
         }
-        throw createErr;
+        if (createErr.name !== 'ValidationError') throw createErr; // DB down etc.: recorded and retried by processWebhook
+        // The content did not fit our schema: never lose the message, store a readable placeholder.
+        logger.error(`[webhook] ${msg.type} message ${msg.id} failed validation (${Object.keys(createErr.errors || {}).join(', ')}); stored as placeholder`);
+        message = await Message.create({
+            chatId: messageData.chatId, wabaId: messageData.wabaId, phoneNumberId, messageId: msg.id, waId, bsuid,
+            direction: 'inbound', type: 'unsupported', status: 'delivered',
+            text: messageData.text || '⚠️ The customer sent a message that could not be stored. Please check WhatsApp on the phone.',
+            metadata: { kind: 'unsupported', originalType: msg.type, reason: 'validation' },
+        });
     }
 
     // Send push notification & save to Notification Center
     try {
-        // Skip if Chat DND is enabled
-        if (chat.isDnd) {
+        // Skip if Chat DND is enabled; WhatsApp system notices never notify
+        if (parsed.isSystemEvent) {
+            // nothing
+        } else if (chat.isDnd) {
             logger.info(`Notification skipped for DND chat ${chat._id}`);
         } else {
             const notificationService = require('./notification.service');
@@ -448,25 +489,12 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
             }
 
             if (userIdsToNotify.length > 0) {
-                const displayName = profileName || waId;
+                const displayName = profileName || contact.name || fallbackName;
                 const notificationType = isNewChat ? 'new_chat' : 'unread_reminder';
                 
                 // Construct WhatsApp-like title and body
                 const title = displayName;
-                let body = '';
-                if (msg.type === 'text') {
-                    body = msg.text?.body || '';
-                } else if (msg.type === 'image') {
-                    body = msg.image?.caption ? `📷 Image: ${msg.image.caption}` : '📷 Image';
-                } else if (msg.type === 'video') {
-                    body = msg.video?.caption ? `🎥 Video: ${msg.video.caption}` : '🎥 Video';
-                } else if (msg.type === 'audio') {
-                    body = '🎵 Audio';
-                } else if (msg.type === 'document') {
-                    body = msg.document?.filename ? `📄 ${msg.document.filename}` : '📄 Document';
-                } else {
-                    body = `Sent a ${msg.type}`;
-                }
+                let body = message.type === 'text' ? (message.text || '') : previewText({ ...parsed, text: message.text });
 
                 // Truncate body if it is too long
                 const maxLen = 300;
@@ -493,15 +521,18 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
     // A message WhatsApp generated because the customer is calling (e.g. the automatic call permission):
     // keep it in the chat, but no auto-replies or bot flows - a staff member is taking the call.
     const callEvents = require('./calls/callEvents');
-    const isCallGenerated = callEvents.isCallGeneratedMessage({
+    let isCallGenerated = callEvents.isCallGeneratedMessage({
         msg,
         messageData,
-        recentInboundCall: (msg.type === 'unsupported' || msg.type === 'system')
+        recentInboundCall: (msg.type === 'unsupported' || msg.type === 'system') && waId
             ? await callEvents.hasRecentInboundCall({ phoneNumberId, waId })
             : false,
     });
+    if (parsed.isSystemEvent) {
+        isCallGenerated = true; // same treatment: stored, no bot / auto replies
+    }
     if (isCallGenerated) {
-        logger.info(`[bot] skipped for call-generated ${msg.type} message ${msg.id} (chat ${chat._id})`);
+        logger.info(`[bot] skipped for call-generated/system ${msg.type} message ${msg.id} (chat ${chat._id})`);
     }
 
     // Product code auto-reply + AI fallback
@@ -538,7 +569,7 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
         }
     }
     // Bot flow execution (fire-and-forget)
-    const msgText = msg.type === 'text' ? msg.text?.body : (msg.type === 'interactive' ? messageData.text : '');
+    const msgText = parsed.botText || (msg.type === 'interactive' ? messageData.text : '');
 
     // When a chat is reopened, cancel any stale bot executions left from previous flows
     // (e.g., close-conversation delay timers) BEFORE processing new flows.
@@ -557,7 +588,7 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
     }
 
     // Trigger on_open_conversation for brand new chats AND for chats reopened after being closed
-    logger.info(`[bot] open-conversation check for chat ${chat._id} (waId: ${waId}): isNewChat=${isNewChat}, wasReopened=${wasReopened}`);
+    logger.info(`[bot] open-conversation check for chat ${chat._id} (${senderKey}): isNewChat=${isNewChat}, wasReopened=${wasReopened}`);
     if ((isNewChat || wasReopened) && !isCallGenerated) {
         botService.processOpenConversation({
             waba, phoneNumberId, chat, message, text: msgText || '',
@@ -632,18 +663,30 @@ async function handleStatusUpdate(statusObj) {
             updatePayload.errorMessage = errorMessage;
         }
 
+        if (!isKnownStatus(status)) {
+            logger.warn(`Status update: unknown status "${status}" for ${messageId}, ignored`);
+            return;
+        }
+        // The message may not be stored yet (status can arrive before our own write completes).
+        let exists = null;
         for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-            message = await Message.findOneAndUpdate(
-                { messageId },
-                { $set: updatePayload },
-                { new: true }
-            );
-
-            if (message) break;
-
+            exists = await Message.exists({ messageId });
+            if (exists) break;
             if (attempt < MAX_RETRIES) {
                 logger.warn(`Status update: message not found for Meta ID ${messageId} (attempt ${attempt}/${MAX_RETRIES}), retrying in ${RETRY_DELAY_MS}ms...`);
                 await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS));
+            }
+        }
+        if (exists) {
+            // Only move forward: a late "delivered" never replaces "read"/"played", duplicates are no-ops.
+            message = await Message.findOneAndUpdate(
+                { messageId, ...statusGuard(status) },
+                { $set: updatePayload },
+                { new: true }
+            );
+            if (!message) {
+                logger.info(`Status update: ${messageId} already past "${status}", ignored`);
+                return;
             }
         }
 
@@ -653,7 +696,7 @@ async function handleStatusUpdate(statusObj) {
             // IMPORTANT: Also update the corresponding BroadcastMessage if this is from a broadcast
             try {
                 const { BroadcastMessage, Broadcast, BroadcastListMember } = require('../models');
-                const broadcastMessage = await BroadcastMessage.findOne({ messageId });
+                const broadcastMessage = status === 'played' ? null : await BroadcastMessage.findOne({ messageId });
                 if (broadcastMessage) {
                     const broadcastUpdatePayload = { status: status };
                     if (status === 'failed') {
@@ -1040,7 +1083,7 @@ async function handleProductCodeReply(waba, phoneNumberId, chat, message, text, 
         const waResult = await whatsappService.sendTextMessage(
             waba._id,
             phoneNumberId,
-            chat.waId,
+            addressOf(chat),
             lines,
             message.messageId  // reply to the original message
         );
@@ -1053,6 +1096,7 @@ async function handleProductCodeReply(waba, phoneNumberId, chat, message, text, 
             phoneNumberId,
             messageId: msgId,
             waId: chat.waId,
+            bsuid: chat.bsuid,
             direction: 'outbound',
             type: 'text',
             text: lines,
@@ -1077,7 +1121,7 @@ async function handleProductCodeReply(waba, phoneNumberId, chat, message, text, 
             logger.warn('Socket emit failed for product auto-reply:', e.message);
         }
 
-        logger.info(`Product code auto-reply sent for code "${code}" (${source}) to ${chat.waId}`);
+        logger.info(`Product code auto-reply sent for code "${code}" (${source}) to chat ${chat._id}`);
     } catch (err) {
         replyStatus = 'error';
         replyError = err.message;
@@ -1254,6 +1298,10 @@ async function processTemplateStatusWebhook(entry) {
 }
 
 module.exports = {
+    processMediaAsync,
+    retryFailedMessages,
+    recordFailure,
+    handleMessage,
     processWebhook,
     handleStatusUpdate,
     processTemplateStatusWebhook,

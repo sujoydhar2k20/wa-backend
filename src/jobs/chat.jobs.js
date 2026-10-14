@@ -1,4 +1,14 @@
 module.exports = function (agenda) {
+  // Inbound WhatsApp messages whose processing hit a temporary error (see WebhookFailure).
+  agenda.define('retry-failed-webhook-messages', async () => {
+    try {
+      const res = await require('../services/webhook.service').retryFailedMessages();
+      if (res.checked) require('../utils/logger').logger.info(`[webhook] retry job: ${res.resolved}/${res.checked} processed`);
+    } catch (e) {
+      require('../utils/logger').logger.error(`[webhook] retry job failed: ${e.message}`);
+    }
+  });
+
   agenda.define('auto-close-expired-chats', async () => {
     const chatService = require('../services/chat.service');
     await chatService.checkAndCloseExpiredChats();

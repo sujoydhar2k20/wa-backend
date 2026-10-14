@@ -7,6 +7,7 @@ router.use(authenticate);
 router.get('/', chatsController.list);
 router.get('/stats', chatsController.stats);
 router.get('/search', chatsController.search);
+router.get('/referrals/report', requireAdmin, require('../controllers/referrals.controller').report);
 router.post('/start-with-phone', chatsController.startWithPhone);
 router.get('/all-auto-messages', chatsController.getAllAutoMessages);
 router.delete('/all-auto-messages', chatsController.deleteAllAutoMessages);
@@ -20,6 +21,8 @@ router.post('/:id/read', chatsController.markRead);
 router.post('/:id/unread', chatsController.markUnread);
 router.get('/:id/messages', chatsController.getMessages);
 router.get('/:id/activities', chatsController.getActivities);
+router.post('/:id/block', require('../controllers/block.controller').blockChat);
+router.get('/:id/block', require('../controllers/block.controller').blockStatus);
 router.get('/:id/auto-messages', chatsController.getAutoMessages);
 router.patch('/:id/dnd', chatsController.toggleDnd);
 

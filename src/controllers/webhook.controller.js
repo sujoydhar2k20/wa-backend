@@ -24,9 +24,7 @@ async function handle(req, res, next) {
     try {
         const body = req.body;
 
-        // Log incoming webhook for debugging (winston doesn't support %o)
-        logger.info(`Incoming WhatsApp Webhook: ${JSON.stringify(body).substring(0, 500)}`);
-
+        // Never log the payload: it contains customer messages, names and phone numbers.
         if (body.object) {
             const changes = body.entry?.[0]?.changes?.[0];
             const value = changes?.value;
@@ -51,7 +49,8 @@ async function handle(req, res, next) {
 
             if (value && (
                 (value.messages && value.messages.length > 0) ||
-                (value.statuses && value.statuses.length > 0)
+                (value.statuses && value.statuses.length > 0) ||
+                field === 'user_id_update'
             )) {
                 // Process the webhook asynchronously
                 require('../services/webhook.service').processWebhook(body.entry[0])

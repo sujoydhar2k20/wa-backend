@@ -120,16 +120,25 @@ async function optIn(req, res, next) {
     }
 }
 
+/**
+ * POST /contacts/:id/block { blocked = true, whatsapp = true } — same action as POST /chats/:id/block
+ * (local block always, WhatsApp block via Meta, audit). Response stays the contact document for older
+ * clients, plus `blockResult`. Staff may only block customers whose chat is assigned to them.
+ */
 async function block(req, res, next) {
     try {
-        const { blocked = true } = req.body;
-        const contact = await Contact.findByIdAndUpdate(
-            req.params.id,
-            { isBlocked: blocked, blockedAt: blocked ? new Date() : null },
-            { new: true }
-        );
+        const blocked = req.body?.blocked !== false;
+        const contact = await Contact.findById(req.params.id);
         if (!contact) return res.status(404).json({ success: false, message: 'Contact not found' });
-        res.json(contact);
+        const { Chat } = require('../models');
+        if (!['admin', 'superadmin'].includes(req.user?.role)) {
+            const mine = await Chat.exists({ contactId: contact._id, assignedTo: req.user?._id });
+            if (!mine) return res.status(403).json({ success: false, message: 'Only an admin or the assigned staff member can block this customer.' });
+        }
+        const { applyBlock } = require('./block.controller');
+        const result = await applyBlock({ contact, chat: null, blocked, user: req.user, source: 'contacts', remote: req.body?.whatsapp !== false });
+        const updated = await Contact.findById(contact._id).lean();
+        res.json({ ...updated, blockResult: result });
     } catch (e) {
         next(e);
     }
