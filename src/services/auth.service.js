@@ -86,13 +86,23 @@ async function verifyOtp(phone, otp, deviceType = 'web', deviceId = '') {
   };
 }
 
+/** How long a rotated-away refresh token is still accepted (lost-response retries). */
+const REFRESH_GRACE_MS = 10 * 60 * 1000;
+
 async function refresh(refreshToken) {
   if (!refreshToken) throw Object.assign(new Error('Refresh token required'), { statusCode: 400 });
-  const session = await Session.findOne({ refreshToken }).populate('userId');
+  const token = String(refreshToken);
+  let session = await Session.findOne({ refreshToken: token }).populate('userId');
+  if (!session) {
+    // Grace: the token this session rotated away from a moment ago (lost response, retry).
+    session = await Session.findOne({ previousRefreshToken: token, previousValidUntil: { $gt: new Date() } }).populate('userId');
+  }
   if (!session || !session.userId) throw Object.assign(new Error('Invalid refresh token'), { statusCode: 401 });
   const user = session.userId;
   if (!user.isActive) throw Object.assign(new Error('Account disabled'), { statusCode: 403 });
   const { accessToken, refreshToken: newRefresh } = generateTokens(user._id);
+  session.previousRefreshToken = token;
+  session.previousValidUntil = new Date(Date.now() + REFRESH_GRACE_MS);
   session.refreshToken = newRefresh;
   await session.save();
   return { accessToken, refreshToken: newRefresh, expiresIn: 365 * 24 * 3600 };
@@ -100,7 +110,7 @@ async function refresh(refreshToken) {
 
 async function logout(userId, refreshToken) {
   if (refreshToken) {
-    await Session.deleteOne({ refreshToken: String(refreshToken) });
+    await Session.deleteOne({ $or: [{ refreshToken: String(refreshToken) }, { previousRefreshToken: String(refreshToken) }] });
     return { success: true };
   }
   // Without a refresh token only an authenticated user's own sessions may be removed.
