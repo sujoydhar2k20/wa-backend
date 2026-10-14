@@ -567,8 +567,11 @@ async function uploadMedia(wabaId, phoneNumberId, fileBuffer, mimeType) {
     'image/jpeg': 'jpg', 'image/png': 'png', 'video/mp4': 'mp4',
   };
   const ext = extMap[mimeType] || mimeType.split('/')[1] || 'bin';
-  form.append('file', fileBuffer, { filename: `upload.${ext}`, contentType: mimeType, knownLength: fileBuffer.length });
   form.append('messaging_product', 'whatsapp');
+  // Meta's upload API takes the MIME type as its own `type` field. Without it Meta sniffs the file and
+  // Ogg/Opus voice notes come back as "application/octet-stream" (error 131053).
+  form.append('type', mimeType);
+  form.append('file', fileBuffer, { filename: `upload.${ext}`, contentType: mimeType, knownLength: fileBuffer.length });
   const token = await getAccessToken(wabaId);
   const path = `${BASE_URL}/${phoneNumberId}/media`;
 

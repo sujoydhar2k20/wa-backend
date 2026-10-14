@@ -106,3 +106,17 @@ describe('Meta Block Users API', () => {
     await expect(wa.setUserBlocked('w1', 'pn1', '919800000001', true)).resolves.toMatchObject({ ok: false, code: 'UNCONFIRMED' });
   });
 });
+
+describe('media upload', () => {
+  test('sends messaging_product, the MIME type as "type", and the file with a matching extension', async () => {
+    axios.post = jest.fn(async () => ({ data: { id: 'MEDIA9' } }));
+    const id = await wa.uploadMedia('w1', 'pn1', Buffer.from('OggS....OpusHead'), 'audio/ogg');
+    expect(id).toBe('MEDIA9');
+    const [url, form] = axios.post.mock.calls[0];
+    expect(url).toMatch(/\/pn1\/media$/);
+    const body = form.getBuffer().toString('latin1');
+    expect(body).toMatch(/name="messaging_product"\r\n\r\nwhatsapp/);
+    expect(body).toMatch(/name="type"\r\n\r\naudio\/ogg\r\n/);
+    expect(body).toMatch(/name="file"; filename="upload.ogg"\r\nContent-Type: audio\/ogg\r\n\r\nOggS/);
+  });
+});
