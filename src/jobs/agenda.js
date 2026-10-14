@@ -45,6 +45,7 @@ async function initAgenda() {
   require('./calls.jobs')(agenda);
   require('../services/media/mediaMessageService').defineJobs(agenda);
   require('./preparedMediaCleanup.jobs')(agenda);
+  require('../services/appUpdate/announcer').defineJobs(agenda);
 
   // 2. Start agenda processing queue
   await agenda.start();
@@ -56,6 +57,8 @@ async function initAgenda() {
   // Background media sends: recover after restarts, finish unconfirmed sends (see mediaMessageService).
   await agenda.every('1 minute', 'media-message:sweep');
   await agenda.every('6 hours', 'cleanup-prepared-media');
+  // "New app version available" push to the Android app (services/appUpdate/announcer.js).
+  await agenda.every('5 minutes', 'app-update:announce');
 
   return agenda;
 }

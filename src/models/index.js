@@ -33,4 +33,5 @@ module.exports = {
   SendRequest: require('./SendRequest'),
   WebhookFailure: require('./WebhookFailure'),
   OtpCode: require('./OtpCode'),
+  AppRelease: require('./AppRelease'),
 };

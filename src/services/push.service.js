@@ -161,7 +161,29 @@ async function sendPushNotificationToUsers(userIds, payload) {
     }
 }
 
+/**
+ * Sends a data-only FCM message to every device subscribed to `topic` (e.g. the Android app's
+ * 'bjs_app_updates'). Values are converted to strings (FCM data must be strings).
+ * Returns the FCM message id, or null when Firebase is not configured.
+ */
+async function sendDataToTopic(topic, data, { ttlMs = 3 * 24 * 3600 * 1000 } = {}) {
+    if (!isInitialized) {
+        logger.info(`FCM not initialized. Not sending to topic ${topic}.`);
+        return null;
+    }
+    const stringData = {};
+    for (const [k, v] of Object.entries(data || {})) {
+        if (v !== undefined && v !== null) stringData[k] = String(v);
+    }
+    return admin.messaging().send({
+        topic,
+        data: stringData,
+        android: { priority: 'high', ttl: ttlMs },
+    });
+}
+
 module.exports = {
     configureFirebase,
-    sendPushNotificationToUsers
+    sendPushNotificationToUsers,
+    sendDataToTopic,
 };
