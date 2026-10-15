@@ -146,8 +146,20 @@ function buildCategoryLinks(aiResponse, categories, settings) {
     for (const item of items) {
         // Normalize keys: OpenAI may return "Main Category", "mainCategory", "main_category", etc.
         const normalized = {};
-        for (const [key, value] of Object.entries(item)) {
-            normalized[key.toLowerCase().replace(/[\s_-]+/g, '')] = value;
+        const normalizeKey = (key) => key.toLowerCase().replace(/[\s_-]+/g, '');
+        for (const [key, value] of Object.entries(item || {})) {
+            normalized[normalizeKey(key)] = value;
+        }
+        // The model may also nest the filters, e.g. { "filters": { "weightMax": 5 } }.
+        // Lift them to the top level (a top-level value wins if both are present).
+        const nestedFilters = normalized.filters;
+        if (nestedFilters && typeof nestedFilters === 'object' && !Array.isArray(nestedFilters)) {
+            for (const [key, value] of Object.entries(nestedFilters)) {
+                const nk = normalizeKey(key);
+                if (normalized[nk] == null || normalized[nk] === '' || normalized[nk] === 'null') {
+                    normalized[nk] = value;
+                }
+            }
         }
 
         let mainCatNames = normalized.maincategory || normalized.category || '';
