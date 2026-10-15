@@ -14,11 +14,17 @@ const botExecutionSchema = new mongoose.Schema(
     currentNodeId: { type: String },
     matchedKeyword: { type: String, default: '' }, // The keyword that triggered this execution (for per-keyword cooldown)
     status: { type: String, enum: ['running', 'waiting', 'completed', 'failed', 'stopped'], default: 'running', index: true },
+    // true while paused on a buttons / list message waiting for the customer's tap;
+    // set to false atomically when a reply claims it, so a double tap resumes only once.
+    awaitingReply: { type: Boolean },
     executionLog: [executionLogSchema],
     startedAt: { type: Date, default: Date.now },
     completedAt: { type: Date },
   },
   { timestamps: true }
 );
+
+// Lookups for "is this flow already running / in cooldown for this chat".
+botExecutionSchema.index({ chatId: 1, flowId: 1, status: 1 });
 
 module.exports = mongoose.model('BotExecution', botExecutionSchema);

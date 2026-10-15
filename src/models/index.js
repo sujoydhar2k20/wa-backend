@@ -17,6 +17,7 @@ module.exports = {
   BroadcastBatch: require('./BroadcastBatch'),
   BotFlow: require('./BotFlow'),
   BotExecution: require('./BotExecution'),
+  BotChatLock: require('./BotChatLock'),
   Product: require('./Product'),
   ProductImport: require('./ProductImport'),
   Rate: require('./Rate'),

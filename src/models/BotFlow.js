@@ -81,6 +81,8 @@ const botFlowSchema = new mongoose.Schema(
     edges: [edgeSchema],
     workingHours: { type: workingHoursSchema, default: () => ({}) },
     cooldownMinutes: { type: Number, default: 0 }, // 0 = no cooldown
+    // WhatsApp business account this flow runs on. null / missing = all numbers.
+    wabaId: { type: mongoose.Schema.Types.ObjectId, ref: 'Waba', default: null, index: true },
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   },
   { timestamps: true }

@@ -1,4 +1,32 @@
-const { BotFlow, BotExecution } = require('../models');
+const mongoose = require('mongoose');
+const { BotFlow, BotExecution, Waba } = require('../models');
+
+/**
+ * Clean a flow body from the editor: never let the client overwrite ownership/ids, and
+ * normalise the WhatsApp number (wabaId): '', 'all' or null = all numbers.
+ * Throws a 400-style error for an unknown account.
+ */
+async function sanitizeFlowBody(body = {}) {
+    const { _id, createdBy, createdAt, updatedAt, __v, ...clean } = body;
+    if (Object.prototype.hasOwnProperty.call(clean, 'wabaId')) {
+        const raw = clean.wabaId && typeof clean.wabaId === 'object' ? clean.wabaId._id : clean.wabaId;
+        if (!raw || raw === 'all') {
+            clean.wabaId = null;
+        } else {
+            if (!mongoose.isValidObjectId(raw) || !(await Waba.exists({ _id: raw }))) {
+                const err = new Error('Unknown WhatsApp account for this bot');
+                err.status = 400;
+                throw err;
+            }
+            clean.wabaId = raw;
+        }
+    }
+    return clean;
+}
+
+function sendBadRequest(res, e) {
+    return res.status(400).json({ success: false, message: e.message });
+}
 
 async function listFlows(req, res, next) {
     try {
@@ -16,7 +44,9 @@ async function listFlows(req, res, next) {
 
 async function createFlow(req, res, next) {
     try {
-        const flow = new BotFlow({ ...req.body, createdBy: req.user._id });
+        let body;
+        try { body = await sanitizeFlowBody(req.body); } catch (e) { return sendBadRequest(res, e); }
+        const flow = new BotFlow({ ...body, createdBy: req.user._id });
         await flow.save();
         res.status(201).json(flow);
     } catch (e) {
@@ -36,9 +66,11 @@ async function getFlow(req, res, next) {
 
 async function updateFlow(req, res, next) {
     try {
+        let body;
+        try { body = await sanitizeFlowBody(req.body); } catch (e) { return sendBadRequest(res, e); }
         const flow = await BotFlow.findByIdAndUpdate(
             req.params.id,
-            req.body,
+            body,
             { new: true, runValidators: true }
         );
         if (!flow) return res.status(404).json({ success: false, message: 'Flow not found' });

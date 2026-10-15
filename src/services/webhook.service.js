@@ -218,6 +218,9 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
     // Find or create chat (by phone OR BSUID)
     let chat = await resolveChat(waba._id, identity);
     const isNewChat = !chat;
+    // When the customer last wrote BEFORE this message (read before it is overwritten below).
+    // The bot's "first message of the day" trigger needs it.
+    const previousCustomerMessageAt = chat?.lastCustomerMessageAt || null;
 
     if (!chat) {
         chat = new Chat({
@@ -581,18 +584,14 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
         }
     }
 
+    // One bot decision per customer message. For a brand-new or reopened chat this also
+    // covers "open conversation" flows, so the customer never gets two welcome flows.
+    logger.info(`[bot] incoming message for chat ${chat._id} (${senderKey}): isNewChat=${isNewChat}, wasReopened=${wasReopened}`);
     if (!isCallGenerated) {
         botService.processIncomingMessage({
-            waba, phoneNumberId, chat, message, text: msgText || '', isNewChat
-        }).catch(e => logger.error('Bot execution error:', e.message));
-    }
-
-    // Trigger on_open_conversation for brand new chats AND for chats reopened after being closed
-    logger.info(`[bot] open-conversation check for chat ${chat._id} (${senderKey}): isNewChat=${isNewChat}, wasReopened=${wasReopened}`);
-    if ((isNewChat || wasReopened) && !isCallGenerated) {
-        botService.processOpenConversation({
             waba, phoneNumberId, chat, message, text: msgText || '',
-        }).catch(e => logger.error('Bot on_open_conversation error:', e.message));
+            isNewChat, wasReopened, previousCustomerMessageAt,
+        }).catch(e => logger.error('Bot execution error:', e.message));
     }
 
     // Emit socket event

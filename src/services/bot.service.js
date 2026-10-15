@@ -5,68 +5,232 @@
  * When a trigger matches, executes action nodes in sequence.
  */
 
-const { BotFlow, BotExecution, Chat, User, Message, Contact, Waba } = require('../models');
+const crypto = require('crypto');
+const { BotFlow, BotExecution, BotChatLock, Chat, User, Message, Contact, Waba } = require('../models');
 const whatsappService = require('./whatsapp.service');
 const { logger } = require('../utils/logger');
 const { addressOf } = require('../utils/waIdentity');
+const { optionIds, optionIdForText } = require('../utils/botOptionIds');
+
+// An execution in one of these states is still "in progress" for its chat.
+const ACTIVE_STATUSES = ['running', 'waiting'];
+// Executions that count toward a flow's cooldown window.
+const COOLDOWN_STATUSES = ['completed', 'running', 'waiting'];
+// A 'running' execution not touched for this long is treated as stuck (e.g. the server
+// restarted mid-flow) and no longer blocks the same flow from starting again.
+const RUNNING_STALE_MS = 10 * 60 * 1000;
+
+// Nodes whose failure must stop the flow: following "all arrows" after they fail would
+// send every button branch / both Yes and No branches to the customer at once.
+const STOP_FLOW_ON_ERROR = new Set([
+    'send_interactive',
+    'send_interactive_list',
+    'condition',
+    'working_hours_condition',
+]);
+
+/* ───────────────────────── per-chat lock ─────────────────────────
+ * Only one bot decision (resume a paused flow / start a new flow) runs per chat at a time,
+ * across every server process. Two messages that arrive together are handled one after
+ * the other, so the second one sees the execution the first one created.
+ */
+const CHAT_LOCK_MS = 15 * 1000;      // lock auto-expires if a process dies while holding it
+const CHAT_LOCK_WAIT_MS = 12 * 1000; // how long a second message waits for its turn
+
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+async function acquireChatLock(chatId) {
+    const token = crypto.randomUUID();
+    const deadline = Date.now() + CHAT_LOCK_WAIT_MS;
+    for (;;) {
+        const now = new Date();
+        try {
+            // Takes the lock if it is free or expired. If another holder has it, the upsert
+            // tries to insert a second document with the same _id and fails with E11000.
+            await BotChatLock.findOneAndUpdate(
+                { _id: chatId, lockedUntil: { $lt: now } },
+                { $set: { lockedUntil: new Date(now.getTime() + CHAT_LOCK_MS), token } },
+                { upsert: true }
+            );
+            return token;
+        } catch (err) {
+            if (err.code !== 11000) throw err;
+        }
+        if (Date.now() >= deadline) return null;
+        await sleep(200);
+    }
+}
+
+async function releaseChatLock(chatId, token) {
+    if (!token) return;
+    try {
+        await BotChatLock.deleteOne({ _id: chatId, token });
+    } catch (err) {
+        logger.warn(`[bot] failed to release chat lock for ${chatId}: ${err.message}`);
+    }
+}
+
+async function withChatLock(chatId, label, fn) {
+    const token = await acquireChatLock(chatId);
+    if (!token) {
+        logger.warn(`[bot] ${label}: chat ${chatId} is busy with another bot step, skipped`);
+        return undefined;
+    }
+    try {
+        return await fn();
+    } finally {
+        await releaseChatLock(chatId, token);
+    }
+}
+
+/* ───────────────────────── flow selection helpers ───────────────────────── */
 
 /**
- * Main entry: evaluate all enabled bot flows against incoming message context.
- * Called from webhook.service.js after a message is saved.
+ * Enabled flows that apply to the WhatsApp account (WABA) the chat belongs to.
+ * A flow with no wabaId is "All numbers".
  */
-async function processIncomingMessage({ waba, phoneNumberId, chat, message, text, isNewChat }) {
-    try {
-        // Check for active running execution for this chat
-        const activeExecution = await BotExecution.findOne({
+function findFlowsForWaba(waba, extraFilter = {}) {
+    const filter = { isEnabled: true, ...extraFilter };
+    if (waba?._id) {
+        filter.$or = [{ wabaId: null }, { wabaId: waba._id }];
+    }
+    return BotFlow.find(filter).lean();
+}
+
+/**
+ * Whether this flow may start now for this chat: it must not already be in progress
+ * for the chat, and must be outside its cooldown window.
+ */
+async function canStartFlow(flow, chat, cooldownMinutes, label) {
+    const runningSince = new Date(Date.now() - RUNNING_STALE_MS);
+    const inProgress = await BotExecution.exists({
+        flowId: flow._id,
+        chatId: chat._id,
+        $or: [
+            { status: 'waiting' },
+            { status: 'running', updatedAt: { $gte: runningSince } },
+        ],
+    });
+    if (inProgress) {
+        logger.info(`Bot flow "${flow.name}" skipped for chat ${chat._id} (${label}) — already in progress for this chat.`);
+        return false;
+    }
+
+    if (cooldownMinutes > 0) {
+        const cooldownSince = new Date(Date.now() - cooldownMinutes * 60 * 1000);
+        const recentExecution = await BotExecution.exists({
+            flowId: flow._id,
             chatId: chat._id,
-            status: 'running',
-            currentNodeId: { $ne: null }
+            status: { $in: COOLDOWN_STATUSES },
+            startedAt: { $gte: cooldownSince },
         });
+        if (recentExecution) {
+            logger.info(`Bot flow "${flow.name}" skipped for chat ${chat._id} (${label}) — cooldown active (${cooldownMinutes}min).`);
+            return false;
+        }
+    }
+    return true;
+}
 
-        if (activeExecution) {
-            const flow = await BotFlow.findById(activeExecution.flowId).lean();
-            if (flow && flow.isEnabled) {
-                const nodeMap = {};
-                for (const node of (flow.nodes || [])) {
-                    nodeMap[node.id] = node;
-                }
-                const currentNode = nodeMap[activeExecution.currentNodeId];
+/**
+ * Create the execution record now (while the chat lock is held, so a second message sees it)
+ * and run the flow in the background.
+ */
+async function startFlow(flow, context, label) {
+    const execution = await createExecution(flow, context);
+    logger.info(`Bot flow "${flow.name}" (${flow._id}) triggered (${label}) for chat ${context.chat._id} [keyword: "${context.matchedKeyword || 'none'}"]`);
+    executeFlow(flow, context, execution)
+        .catch(err => logger.error(`Bot flow execution error for "${flow.name}":`, err.message));
+    return execution;
+}
 
-                if (currentNode && (currentNode.type === 'send_interactive' || currentNode.type === 'send_interactive_list')) {
-                    let replyId = null;
+/**
+ * Start the first enabled flow of an event trigger type (open / close / agent assign).
+ * Returns true when a flow was started.
+ */
+async function startEventFlow(triggerType, label, context) {
+    const flows = await findFlowsForWaba(context.waba, { 'trigger.type': triggerType });
+    logger.info(`[bot] ${label} for chat ${context.chat._id}: found ${flows.length} enabled ${triggerType} flow(s)`);
+    for (const flow of flows) {
+        const cooldownMinutes = (flow.cooldownMinutes && flow.cooldownMinutes > 0) ? flow.cooldownMinutes : 0;
+        if (!(await canStartFlow(flow, context.chat, cooldownMinutes, label))) continue;
+        await startFlow(flow, context, label);
+        return true;
+    }
+    return false;
+}
 
-                    // Get reply ID from message metadata (button_reply or list_reply)
-                    if (message?.metadata?.button_reply) {
-                        replyId = message.metadata.button_reply.id;
-                    } else if (message?.metadata?.list_reply) {
-                        replyId = message.metadata.list_reply.id;
-                    }
+/* ───────────────────────── entry points ───────────────────────── */
 
-                    // Fallback to text matching
-                    if (!replyId && text) {
-                        const lowerText = text.toLowerCase().trim();
-                        if (currentNode.type === 'send_interactive') {
-                            const buttons = currentNode.config?.buttons || [];
-                            const btnIdx = buttons.findIndex(btn => btn.toLowerCase().trim() === lowerText);
-                            if (btnIdx !== -1) {
-                                replyId = `btn_${btnIdx}`;
-                            }
-                        } else if (currentNode.type === 'send_interactive_list') {
-                            const listItems = currentNode.config?.listItems || [];
-                            const itemIdx = listItems.findIndex(item => item.toLowerCase().trim() === lowerText);
-                            if (itemIdx !== -1) {
-                                replyId = `item_${itemIdx}`;
-                            }
+/**
+ * Main entry for every customer message (called once per message from webhook.service.js).
+ *
+ * Runs under a per-chat lock and starts at most ONE flow per message:
+ *   1. a button / list reply resumes the flow that is waiting for it;
+ *   2. for a brand-new or reopened chat, an "open conversation" flow (if one is enabled);
+ *   3. otherwise the first matching message flow (keyword / any message / first of day / new lead).
+ *
+ * previousCustomerMessageAt: when the customer last wrote BEFORE this message
+ * (null for a new chat). Needed for "first message of the day".
+ */
+async function processIncomingMessage({
+    waba, phoneNumberId, chat, message, text, isNewChat, wasReopened, previousCustomerMessageAt,
+}) {
+    try {
+        await withChatLock(chat._id, 'incoming message', async () => {
+            const context = { waba, phoneNumberId, chat, message, text };
+
+            // 1. Button / list reply for a flow that is paused on an interactive message.
+            const activeExecution = await BotExecution.findOne({
+                chatId: chat._id,
+                status: 'running',
+                currentNodeId: { $ne: null },
+            }).sort({ updatedAt: -1 });
+
+            if (activeExecution) {
+                const flow = await BotFlow.findById(activeExecution.flowId).lean();
+                if (flow && flow.isEnabled) {
+                    const currentNode = (flow.nodes || []).find(n => n.id === activeExecution.currentNodeId);
+
+                    if (currentNode && (currentNode.type === 'send_interactive' || currentNode.type === 'send_interactive_list')) {
+                        const kind = currentNode.type === 'send_interactive' ? 'button' : 'list';
+                        let replyId = null;
+
+                        // Get reply ID from message metadata (button_reply or list_reply)
+                        if (message?.metadata?.button_reply) {
+                            replyId = message.metadata.button_reply.id;
+                        } else if (message?.metadata?.list_reply) {
+                            replyId = message.metadata.list_reply.id;
                         }
-                    }
 
-                    if (replyId) {
-                        logger.info(`Resuming bot flow "${flow.name}" from node ${currentNode.id} on button/item reply "${replyId}"`);
-                        resumeFlow(flow, activeExecution, replyId, { waba, phoneNumberId, chat, message, text })
-                            .catch(err => logger.error(`Bot flow resume error for "${flow.name}":`, err.message));
-                        return; // Resumed successfully, stop processing further flows
-                    } else {
-                        // Customer sent something else: stop current flow execution so we don't lock future executions
+                        // Fallback: the customer typed the button / item title
+                        if (!replyId && text) {
+                            replyId = optionIdForText(currentNode.config || {}, kind, text);
+                        }
+
+                        if (replyId) {
+                            // Claim the paused execution so a double tap cannot resume it twice.
+                            const claimed = await BotExecution.findOneAndUpdate(
+                                {
+                                    _id: activeExecution._id,
+                                    status: 'running',
+                                    currentNodeId: currentNode.id,
+                                    awaitingReply: { $ne: false },
+                                },
+                                { $set: { awaitingReply: false } },
+                                { new: true }
+                            );
+                            if (!claimed) {
+                                logger.info(`Bot flow "${flow.name}": reply "${replyId}" ignored, node ${currentNode.id} was already answered`);
+                                return;
+                            }
+                            logger.info(`Resuming bot flow "${flow.name}" from node ${currentNode.id} on button/item reply "${replyId}"`);
+                            resumeFlow(flow, claimed, replyId, context)
+                                .catch(err => logger.error(`Bot flow resume error for "${flow.name}":`, err.message));
+                            return; // Resumed: no other flow for this message
+                        }
+
+                        // Customer sent something else: stop the paused flow so it does not block future runs
                         activeExecution.status = 'stopped';
                         activeExecution.completedAt = new Date();
                         await activeExecution.save();
@@ -74,81 +238,47 @@ async function processIncomingMessage({ waba, phoneNumberId, chat, message, text
                     }
                 }
             }
-        }
 
-        // Fetch all enabled flows
-        const flows = await BotFlow.find({ isEnabled: true }).lean();
-        if (!flows.length) return;
+            // 2. New or reopened chat: an "open conversation" flow takes priority, so the
+            //    customer does not also get a "new lead" / "any message" welcome.
+            if (isNewChat || wasReopened) {
+                const started = await startEventFlow('on_open_conversation', 'open conversation', context);
+                if (started) return;
+            }
 
-        for (const flow of flows) {
-            const triggerResult = evaluateTrigger(flow.trigger, { chat, message, text, isNewChat });
-            if (triggerResult.matched) {
+            // 3. Message-based flows
+            const flows = await findFlowsForWaba(waba);
+            for (const flow of flows) {
+                const triggerResult = evaluateTrigger(flow.trigger, {
+                    chat, message, text, isNewChat, previousCustomerMessageAt,
+                });
+                if (!triggerResult.matched) continue;
+
                 const matchedKeyword = triggerResult.matchedKeyword || '';
-
-                // Cooldown check: skip if this flow ran for this chat within the cooldown window
-                // For keyword-based triggers (on_message with keywords), we default to 1440 minutes (24 hours) if not specified.
+                // Keyword triggers default to a 24-hour cooldown when none is set.
                 const isKeywordTrigger = flow.trigger?.type === 'on_message' && flow.trigger?.keywords?.length > 0;
                 const cooldownMinutes = (flow.cooldownMinutes && flow.cooldownMinutes > 0) ? flow.cooldownMinutes : (isKeywordTrigger ? 1440 : 0);
-                
-                if (cooldownMinutes > 0) {
-                    const cooldownSince = new Date(Date.now() - cooldownMinutes * 60 * 1000);
-                    
-                    const recentExecution = await BotExecution.findOne({
-                        flowId: flow._id,
-                        chatId: chat._id,
-                        status: { $in: ['completed', 'running'] },
-                        startedAt: { $gte: cooldownSince },
-                    }).lean();
 
-                    if (recentExecution) {
-                        logger.info(`Bot flow "${flow.name}" skipped for chat ${chat._id} (ID: ${chat.waId}) — cooldown active (${cooldownMinutes}min).`);
-                        continue; // Try next flow instead of breaking
-                    }
-                }
+                if (!(await canStartFlow(flow, chat, cooldownMinutes, 'message'))) continue; // try the next flow
 
-                logger.info(`Bot flow "${flow.name}" (${flow._id}) triggered for chat ${chat._id} [keyword: "${matchedKeyword || 'none'}"]`);
-                // Execute flow asynchronously (fire-and-forget, but log errors)
-                executeFlow(flow, { waba, phoneNumberId, chat, message, text, matchedKeyword })
-                    .catch(err => logger.error(`Bot flow execution error for "${flow.name}":`, err.message));
-                // Only execute the first matching flow
-                break;
+                await startFlow(flow, { ...context, matchedKeyword }, 'message');
+                break; // only the first matching flow runs
             }
-        }
+        });
     } catch (err) {
         logger.error('Bot processIncomingMessage error:', err.message);
     }
 }
 
 /**
- * Evaluate trigger for open-conversation events.
- * Called from webhook when a new chat is opened.
+ * Open-conversation flows. The webhook now handles these inside processIncomingMessage
+ * (one decision per message); kept for any other caller.
  */
 async function processOpenConversation({ waba, phoneNumberId, chat, message, text }) {
     try {
-        const flows = await BotFlow.find({ isEnabled: true, 'trigger.type': 'on_open_conversation' }).lean();
-        logger.info(`[bot] processOpenConversation for chat ${chat._id}: found ${flows.length} enabled on_open_conversation flow(s)`);
-        if (!flows.length) return;
-        for (const flow of flows) {
-            // Cooldown check
-            const cooldownMinutes = (flow.cooldownMinutes && flow.cooldownMinutes > 0) ? flow.cooldownMinutes : 0;
-            if (cooldownMinutes > 0) {
-                const cooldownSince = new Date(Date.now() - cooldownMinutes * 60 * 1000);
-                const recentExecution = await BotExecution.findOne({
-                    flowId: flow._id,
-                    chatId: chat._id,
-                    status: { $in: ['completed', 'running'] },
-                    startedAt: { $gte: cooldownSince },
-                }).lean();
-                if (recentExecution) {
-                    logger.info(`Bot flow "${flow.name}" skipped for chat ${chat._id} (open conversation) — cooldown active (${cooldownMinutes}min).`);
-                    continue;
-                }
-            }
-            logger.info(`Bot flow "${flow.name}" triggered on open conversation for chat ${chat._id}`);
-            executeFlow(flow, { waba, phoneNumberId, chat, message, text })
-                .catch(err => logger.error(`Bot flow execution error:`, err.message));
-            break;
-        }
+        await withChatLock(chat._id, 'open conversation', () =>
+            startEventFlow('on_open_conversation', 'open conversation', { waba, phoneNumberId, chat, message, text })
+        );
     } catch (err) {
         logger.error('Bot processOpenConversation error:', err.message);
     }
@@ -159,28 +289,9 @@ async function processOpenConversation({ waba, phoneNumberId, chat, message, tex
  */
 async function processCloseConversation({ waba, phoneNumberId, chat }) {
     try {
-        const flows = await BotFlow.find({ isEnabled: true, 'trigger.type': 'on_close_conversation' }).lean();
-        for (const flow of flows) {
-            // Cooldown check
-            const cooldownMinutes = (flow.cooldownMinutes && flow.cooldownMinutes > 0) ? flow.cooldownMinutes : 0;
-            if (cooldownMinutes > 0) {
-                const cooldownSince = new Date(Date.now() - cooldownMinutes * 60 * 1000);
-                const recentExecution = await BotExecution.findOne({
-                    flowId: flow._id,
-                    chatId: chat._id,
-                    status: { $in: ['completed', 'running'] },
-                    startedAt: { $gte: cooldownSince },
-                }).lean();
-                if (recentExecution) {
-                    logger.info(`Bot flow "${flow.name}" skipped for chat ${chat._id} (close conversation) — cooldown active (${cooldownMinutes}min).`);
-                    continue;
-                }
-            }
-            logger.info(`Bot flow "${flow.name}" triggered on close conversation for chat ${chat._id}`);
-            executeFlow(flow, { waba, phoneNumberId, chat, message: null, text: '' })
-                .catch(err => logger.error(`Bot flow execution error:`, err.message));
-            break;
-        }
+        await withChatLock(chat._id, 'close conversation', () =>
+            startEventFlow('on_close_conversation', 'close conversation', { waba, phoneNumberId, chat, message: null, text: '' })
+        );
     } catch (err) {
         logger.error('Bot processCloseConversation error:', err.message);
     }
@@ -191,38 +302,24 @@ async function processCloseConversation({ waba, phoneNumberId, chat }) {
  */
 async function processAgentAssign({ waba, phoneNumberId, chat, agentId }) {
     try {
-        const flows = await BotFlow.find({ isEnabled: true, 'trigger.type': 'on_agent_assign' }).lean();
-        for (const flow of flows) {
-            // Cooldown check
-            const cooldownMinutes = (flow.cooldownMinutes && flow.cooldownMinutes > 0) ? flow.cooldownMinutes : 0;
-            if (cooldownMinutes > 0) {
-                const cooldownSince = new Date(Date.now() - cooldownMinutes * 60 * 1000);
-                const recentExecution = await BotExecution.findOne({
-                    flowId: flow._id,
-                    chatId: chat._id,
-                    status: { $in: ['completed', 'running'] },
-                    startedAt: { $gte: cooldownSince },
-                }).lean();
-                if (recentExecution) {
-                    logger.info(`Bot flow "${flow.name}" skipped for chat ${chat._id} (agent assign) — cooldown active (${cooldownMinutes}min).`);
-                    continue;
-                }
-            }
-            logger.info(`Bot flow "${flow.name}" triggered on agent assign for chat ${chat._id}`);
-            executeFlow(flow, { waba, phoneNumberId, chat, message: null, text: '', agentId })
-                .catch(err => logger.error(`Bot flow execution error:`, err.message));
-            break;
-        }
+        await withChatLock(chat._id, 'agent assign', () =>
+            startEventFlow('on_agent_assign', 'agent assign', { waba, phoneNumberId, chat, message: null, text: '', agentId })
+        );
     } catch (err) {
         logger.error('Bot processAgentAssign error:', err.message);
     }
+}
+
+/** Calendar day (YYYY-MM-DD) of a date in India Standard Time. */
+function istDayKey(date) {
+    return new Date(new Date(date).getTime() + IST_OFFSET_MS).toISOString().slice(0, 10);
 }
 
 /**
  * Check if a trigger matches the context.
  * Returns { matched: boolean, matchedKeyword?: string }
  */
-function evaluateTrigger(trigger, { chat, message, text, isNewChat }) {
+function evaluateTrigger(trigger, { chat, message, text, isNewChat, previousCustomerMessageAt }) {
     if (!trigger || !trigger.type) return { matched: false };
 
     switch (trigger.type) {
@@ -255,11 +352,14 @@ function evaluateTrigger(trigger, { chat, message, text, isNewChat }) {
             return { matched: false };
         }
         case 'on_first_daily_message': {
-            // Match if no message was sent by customer today
-            if (!chat.lastCustomerMessageAt) return { matched: true };
-            const today = new Date();
-            const lastMsg = new Date(chat.lastCustomerMessageAt);
-            return { matched: lastMsg.toDateString() !== today.toDateString() };
+            // Match if the customer had not written yet today (India time) before this message.
+            // previousCustomerMessageAt is captured by the webhook BEFORE it stamps this message;
+            // chat.lastCustomerMessageAt is already "now" by the time the bot runs.
+            const previous = previousCustomerMessageAt !== undefined
+                ? previousCustomerMessageAt
+                : chat.lastCustomerMessageAt;
+            if (!previous) return { matched: true };
+            return { matched: istDayKey(previous) !== istDayKey(new Date()) };
         }
         case 'on_new_lead': {
             // Triggered when chat is completely new (no previous messages)
@@ -384,8 +484,9 @@ async function scheduleFlowResume(executionId, ms) {
  * executing actions and following edges. Handles condition branching, interactive
  * pauses, and time_delay (inline for short delays, Agenda-scheduled for long ones).
  *
- * Returns { isPaused } — true when the flow paused on an interactive reply or a
- * scheduled time delay (execution state already saved); false when it ran to the end.
+ * Returns { isPaused, failed } — isPaused is true when the flow paused on an interactive
+ * reply or a scheduled time delay (execution state already saved); failed is true when a
+ * buttons / list / condition node failed and the flow was stopped.
  */
 async function walkFlowNodes(flow, execution, startNodeIds, context) {
     const { waba, phoneNumberId, chat, message, text } = context;
@@ -405,9 +506,10 @@ async function walkFlowNodes(flow, execution, startNodeIds, context) {
     let totalSteps = 0;
     const maxSteps = 50;
     let isPaused = false;
+    let failed = false; // set when a node that must not fall through (buttons, conditions) fails
 
     async function walkNode(nodeId) {
-        if (!nodeId || totalSteps >= maxSteps || isPaused) return;
+        if (!nodeId || totalSteps >= maxSteps || isPaused || failed) return;
         if (visited.has(nodeId)) {
             logger.warn(`Bot flow "${flow.name}": cycle detected at node ${nodeId}`);
             return;
@@ -494,7 +596,7 @@ async function walkFlowNodes(flow, execution, startNodeIds, context) {
                     const edgesToFollow = matchedEdges.length > 0 ? matchedEdges : (edges[0] ? [edges[0]] : []);
                     
                     for (const edge of edgesToFollow) {
-                        if (isPaused) break;
+                        if (isPaused || failed) break;
                         await walkNode(edge.target);
                     }
                     return;
@@ -505,6 +607,7 @@ async function walkFlowNodes(flow, execution, startNodeIds, context) {
                     isPaused = true;
                     execution.status = 'running';
                     execution.currentNodeId = node.id;
+                    execution.awaitingReply = true;
                     await execution.save();
                     return;
                 }
@@ -516,41 +619,52 @@ async function walkFlowNodes(flow, execution, startNodeIds, context) {
                     result: { error: nodeErr.message },
                     timestamp: new Date(),
                 });
-                // Continue to next branches even if this node fails.
+                if (STOP_FLOW_ON_ERROR.has(node.type)) {
+                    // Buttons / list / condition failed: we cannot know which branch is right,
+                    // so stop here instead of running every branch.
+                    execution.currentNodeId = node.id;
+                    failed = true;
+                    logger.warn(`Bot flow "${flow.name}" stopped: ${node.type} node ${node.id} failed`);
+                    return;
+                }
+                // Other nodes (plain message, assign, ...): continue with the next step.
             }
         }
 
         // Follow ALL edges from this node (supports branching).
         const edges = edgeMap[nodeId] || [];
         for (const edge of edges) {
-            if (isPaused) break;
+            if (isPaused || failed) break;
             await walkNode(edge.target);
         }
     }
 
     for (const startId of startNodeIds) {
-        if (isPaused) break;
+        if (isPaused || failed) break;
         await walkNode(startId);
     }
 
-    return { isPaused };
+    return { isPaused: isPaused && !failed, failed };
 }
 
 /**
  * Execute a full bot flow: walk through nodes via edges, starting from the trigger.
  */
-async function executeFlow(flow, context) {
-    const { chat, matchedKeyword } = context;
-
-    // Create execution record (with matched keyword for cooldown tracking)
-    const execution = await BotExecution.create({
+function createExecution(flow, context) {
+    // Execution record (with matched keyword for cooldown tracking)
+    return BotExecution.create({
         flowId: flow._id,
-        chatId: chat._id,
+        chatId: context.chat._id,
         status: 'running',
         startedAt: new Date(),
-        matchedKeyword: matchedKeyword || '',
+        matchedKeyword: context.matchedKeyword || '',
         executionLog: [],
     });
+}
+
+async function executeFlow(flow, context, existingExecution = null) {
+    const { chat } = context;
+    const execution = existingExecution || await createExecution(flow, context);
 
     try {
         const triggerNode = (flow.nodes || []).find(n => n.type === 'trigger');
@@ -560,9 +674,11 @@ async function executeFlow(flow, context) {
             return;
         }
 
-        const { isPaused } = await walkFlowNodes(flow, execution, [triggerNode.id], context);
+        const { isPaused, failed } = await walkFlowNodes(flow, execution, [triggerNode.id], context);
 
-        if (!isPaused) {
+        if (failed) {
+            await finishExecution(execution, 'failed');
+        } else if (!isPaused) {
             await finishExecution(execution, 'completed');
             logger.info(`Bot flow "${flow.name}" completed for chat ${chat._id}`);
         } else {
@@ -605,9 +721,11 @@ async function resumeFlow(flow, execution, replyId, context) {
         }
 
         execution.status = 'running';
-        const { isPaused } = await walkFlowNodes(flow, execution, [matchedEdge.target], context);
+        const { isPaused, failed } = await walkFlowNodes(flow, execution, [matchedEdge.target], context);
 
-        if (!isPaused) {
+        if (failed) {
+            await finishExecution(execution, 'failed');
+        } else if (!isPaused) {
             await finishExecution(execution, 'completed');
             logger.info(`Bot flow "${flow.name}" completed for chat ${chat._id}`);
         } else {
@@ -675,8 +793,10 @@ async function resumeDelayedFlow(executionId) {
 
     const context = { waba, phoneNumberId: chat.phoneNumberId, chat, message: null, text: '' };
     try {
-        const { isPaused } = await walkFlowNodes(flow, execution, nextStartIds, context);
-        if (!isPaused) {
+        const { isPaused, failed } = await walkFlowNodes(flow, execution, nextStartIds, context);
+        if (failed) {
+            await finishExecution(execution, 'failed');
+        } else if (!isPaused) {
             await finishExecution(execution, 'completed');
             logger.info(`Bot flow "${flow.name}" completed (after delay) for chat ${chat._id}`);
         } else {
@@ -746,16 +866,21 @@ async function executeNode(node, context) {
             const resolvedBody = await resolveMessageTemplate(config.bodyText || '', chat);
             const resolvedFooter = config.footerText ? await resolveMessageTemplate(config.footerText, chat) : undefined;
 
+            // Each button carries its permanent id, which is what the flow arrows are linked to.
+            const buttonIds = optionIds(config, 'button');
             const payload = {
                 type: 'button',
                 header: resolvedHeader ? { type: 'text', text: resolvedHeader } : undefined,
                 body: { text: resolvedBody },
                 footer: resolvedFooter ? { text: resolvedFooter } : undefined,
                 action: {
-                    buttons: (config.buttons || []).map((btn, i) => ({
-                        type: 'reply',
-                        reply: { id: `btn_${i}`, title: btn.substring(0, 20) },
-                    })),
+                    buttons: (config.buttons || [])
+                        .map((btn, i) => ({ btn: String(btn || ''), id: buttonIds[i] }))
+                        .filter(({ btn }) => btn.trim())
+                        .map(({ btn, id }) => ({
+                            type: 'reply',
+                            reply: { id, title: btn.substring(0, 20) },
+                        })),
                 },
             };
             const waResult = await whatsappService.sendInteractiveMessage(
@@ -778,10 +903,12 @@ async function executeNode(node, context) {
             const resolvedButton = config.buttonText ? await resolveMessageTemplate(config.buttonText, chat) : 'View Options';
             const resolvedFooter = config.footerText ? await resolveMessageTemplate(config.footerText, chat) : undefined;
 
-            const listItems = (config.listItems || []).map((item, i) => ({
-                id: `item_${i}`,
-                title: item.substring(0, 24),
-            }));
+            // Each row carries its permanent id, which is what the flow arrows are linked to.
+            const itemIds = optionIds(config, 'list');
+            const listItems = (config.listItems || [])
+                .map((item, i) => ({ item: String(item || ''), id: itemIds[i] }))
+                .filter(({ item }) => item.trim())
+                .map(({ item, id }) => ({ id, title: item.substring(0, 24) }));
             const payload = {
                 type: 'list',
                 header: resolvedHeader ? { type: 'text', text: resolvedHeader } : undefined,
