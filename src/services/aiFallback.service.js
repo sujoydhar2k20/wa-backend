@@ -86,13 +86,15 @@ async function callOpenAI(systemPrompt, userMessage) {
         const response = await axios.post(
             'https://api.openai.com/v1/chat/completions',
             {
-                model: 'gpt-4o-mini',
+                model: 'gpt-5-nano',
                 messages: [
                     { role: 'system', content: systemPrompt },
                     { role: 'user', content: userMessage },
                 ],
-                max_completion_tokens: 500,
-                temperature: 0.1,
+                // gpt-5 models spend part of this budget on internal reasoning,
+                // so keep headroom above the ~100 tokens the JSON answer needs.
+                max_completion_tokens: 2000,
+                reasoning_effort: 'minimal',
             },
             {
                 headers: {
