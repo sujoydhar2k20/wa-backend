@@ -29,8 +29,9 @@ async function sendMediaInline({ chat, type, mediaUrl, caption, replyWamid, want
     if (mediaUrl.startsWith('http')) {
         let prepared;
         try {
-            prepared = await media.prepareMedia({ type, mediaUrl, wantsVoice, voiceRejected });
-            const up = await media.uploadToMeta(chat, prepared.file);
+            const r = await media.prepareAndUpload(chat, { type, mediaUrl, wantsVoice, voiceRejected });
+            prepared = r.prepared;
+            const up = r.up;
             mediaIdToSend = up.mediaId;
             sentAsVoice = prepared.sentAsVoice;
             voiceNotice = prepared.voiceNotice;

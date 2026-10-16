@@ -42,14 +42,29 @@ Converted files are kept in `<VPS dir>/prepared/` until the message is sent (so 
 again) and removed on success; leftovers are deleted after 3 days by 'cleanup-prepared-media'. A Meta media id
 is reused for retries for 25 days.
 
+## Concurrency (limit of 5)
+
+One gate, `mediaTaskSlots` in `mediaPipeline.js` (size `MEDIA_MAX_CONCURRENT`, default 5), counts every media file
+being processed. It is entered at the three places that prepare/upload media:
+
+- background jobs: `mediaMessageService.defineJobs` wraps `processMessage` for both `media-message:process` and the
+  retry job `media-message:later` (kind `process`), so retries share the same 5 slots;
+- inline (older clients) and bulk sends: `prepareAndUpload()` in `mediaPipeline.js`.
+
+The slot is taken before the message is claimed, so a message waiting for a slot stays `queued` and its lease does
+not start. The slot is released on success, failure or throw (failed files never block the queue). The per-resource
+limits (ffmpeg, image, Meta upload) are clamped to the master limit, so they can only narrow it.
+Text/template messages, dispatch retries (`kind: dispatch`) and inbound media are not counted.
+The limit is per Node process: with PM2 cluster mode or several instances each process has its own 5.
+
 ## Settings (environment, all optional)
 
 | Variable | Default | Meaning |
 |---|---|---|
-| MEDIA_FFMPEG_CONCURRENCY | 1 | ffmpeg processes at once (per Node process) |
-| MEDIA_IMAGE_CONCURRENCY | 2 | sharp transforms at once |
-| MEDIA_META_UPLOAD_CONCURRENCY | 3 | uploads to Meta at once |
-| MEDIA_JOB_CONCURRENCY | 4 | background media jobs at once |
+| MEDIA_MAX_CONCURRENT | 5 | **Master limit**: media files being processed (read, converted, uploaded to Meta) at the same time, shared by background sends, retries, inline sends and bulk sends. The rest wait in arrival order. (Old name MEDIA_JOB_CONCURRENCY still works.) |
+| MEDIA_FFMPEG_CONCURRENCY | CPU cores (max 5) | ffmpeg processes at once; CPU-bound, so one per core by default |
+| MEDIA_IMAGE_CONCURRENCY | 5 | sharp transforms at once |
+| MEDIA_META_UPLOAD_CONCURRENCY | 5 | uploads to Meta at once |
 | MEDIA_MAX_PENDING | 200 | unfinished async media messages before new ones get 503 (retryable) |
 | META_SEND_TIMEOUT_MS | 30000 | POST /messages (text + media) |
 | META_UPLOAD_TIMEOUT_MS | 180000 | POST /media |

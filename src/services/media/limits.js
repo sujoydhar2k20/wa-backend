@@ -29,12 +29,24 @@ function int(name, fallback, min = 1) {
   return Number.isFinite(v) && v >= min ? v : fallback;
 }
 
-/** Concurrency limits for this Node process (tune after measuring the VPS; see docs/MEDIA_PIPELINE.md). */
+/**
+ * Concurrency limits for this Node process (tune after measuring the VPS; see docs/MEDIA_PIPELINE.md).
+ *
+ * `tasks` is THE master limit: at most this many media files are being processed (read, converted, uploaded
+ * to Meta) at the same time, across background sends, inline sends and bulk sends. Everything above it waits
+ * in FIFO order. The per-resource limits below can only narrow that further (they are clamped to `tasks`),
+ * so no combination of settings can ever run more than `tasks` media files at once.
+ */
+const MAX_TASKS = int('MEDIA_MAX_CONCURRENT', int('MEDIA_JOB_CONCURRENCY', 5)); // old name still honoured
+const cpuCount = Math.max(1, (require('os').cpus() || []).length);
+const clamp = (n) => Math.min(MAX_TASKS, n);
 const CONCURRENCY = {
-  ffmpeg: int('MEDIA_FFMPEG_CONCURRENCY', 1),          // video/audio conversions at once
-  image: int('MEDIA_IMAGE_CONCURRENCY', 2),            // sharp transforms at once
-  metaUpload: int('MEDIA_META_UPLOAD_CONCURRENCY', 3), // uploads to graph.facebook.com at once
-  jobs: int('MEDIA_JOB_CONCURRENCY', 4),               // background media jobs at once
+  tasks: MAX_TASKS,
+  // ffmpeg is CPU-bound (x264 already uses every core): default to one process per core, never above `tasks`.
+  ffmpeg: clamp(int('MEDIA_FFMPEG_CONCURRENCY', Math.min(MAX_TASKS, cpuCount))),
+  image: clamp(int('MEDIA_IMAGE_CONCURRENCY', MAX_TASKS)),            // sharp transforms at once
+  metaUpload: clamp(int('MEDIA_META_UPLOAD_CONCURRENCY', MAX_TASKS)), // uploads to graph.facebook.com at once
+  jobs: MAX_TASKS,                                                    // Agenda worker slots for media jobs
 };
 
 /** Back-pressure: refuse new async media sends (503, retryable) above this many unfinished ones. */

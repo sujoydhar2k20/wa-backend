@@ -106,8 +106,9 @@ async function sendOneBulkMessage(message, chat) {
   let prepared;
   if (message.mediaUrl && message.mediaUrl.startsWith('http')) {
     try {
-      prepared = await media.prepareMedia({ type: message.type, mediaUrl: message.mediaUrl });
-      const up = await media.uploadToMeta(chat, prepared.file);
+      const r = await media.prepareAndUpload(chat, { type: message.type, mediaUrl: message.mediaUrl });
+      prepared = r.prepared;
+      const up = r.up;
       mediaIdToSend = up.mediaId;
       Object.assign(timings, {
         prepareEndedAt: iso(), sourceMs: prepared.timings.sourceMs, sourceLocal: prepared.timings.sourceLocal,

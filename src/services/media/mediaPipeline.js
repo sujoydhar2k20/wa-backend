@@ -26,6 +26,12 @@ const { Semaphore } = require('./semaphore');
 const { CONCURRENCY, META_MEDIA_REUSE_MS } = require('./limits');
 
 const metaUploadSlots = new Semaphore(CONCURRENCY.metaUpload, 'metaUpload');
+/**
+ * The ONE gate for "a media file is being processed" (CONCURRENCY.tasks, default 5). Every entry point that
+ * prepares/uploads media goes through it: the background job (mediaMessageService.defineJobs), inline sends
+ * and bulk sends (prepareAndUpload below). Never acquire it while already holding it (no nesting).
+ */
+const mediaTaskSlots = new Semaphore(CONCURRENCY.tasks, 'mediaTask');
 const MEDIA_TYPES = ['image', 'video', 'audio', 'document'];
 
 /** Classify an error from a Meta HTTP call. */
@@ -171,6 +177,24 @@ async function uploadToMeta(chat, file) {
 }
 
 /**
+ * Prepare + upload one file for the inline and bulk send paths, inside a media task slot.
+ * Returns { prepared, up }; the caller must call prepared.cleanup() when done. On failure the prepared
+ * temp files are already cleaned up and the error is rethrown (the slot is always released).
+ */
+async function prepareAndUpload(chat, prepareOpts) {
+  return mediaTaskSlots.run(async () => {
+    const prepared = await prepareMedia(prepareOpts);
+    try {
+      const up = await uploadToMeta(chat, prepared.file);
+      return { prepared, up };
+    } catch (err) {
+      await prepared.cleanup().catch(() => {});
+      throw err;
+    }
+  });
+}
+
+/**
  * Send the WhatsApp media message once. Returns
  *   { ok:true, wamid, ms } | { ok:false, kind:'fatal'|'retry'|'ambiguous', error, ms }
  * Only 429 / "connection never made" / Meta-answered 5xx are retried here (max 2 extra tries);
@@ -237,6 +261,8 @@ module.exports = {
   MEDIA_TYPES,
   prepareMedia,
   uploadToMeta,
+  prepareAndUpload,
+  mediaTaskSlots,
   sendOnce,
   classifyMetaError,
   uploadWithRetry,

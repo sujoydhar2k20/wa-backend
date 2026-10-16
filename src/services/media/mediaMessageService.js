@@ -574,10 +574,19 @@ async function sweep() {
 // ---------------------------------------------------------------------------------------------------------
 // Agenda wiring
 
+/**
+ * Run processMessage inside the shared media task slot. The slot is taken BEFORE the message is claimed, so a
+ * message that is waiting for a slot stays 'queued' (honest status, its lease does not start ticking) and a
+ * duplicate run of the same job finds it already claimed. The slot is released on success, failure or throw.
+ */
+function processInSlot(messageId) {
+  return pipe.mediaTaskSlots.run(() => processMessage(messageId));
+}
+
 function defineJobs(agenda) {
   agenda.define(JOB_PROCESS, { concurrency: CONCURRENCY.jobs, lockLifetime: LEASE_MS }, async (job) => {
     try {
-      await processMessage(job.attrs.data.messageId);
+      await processInSlot(job.attrs.data.messageId);
     } finally {
       // Finished jobs are not kept (one per message would pile up); the message row holds the state.
       await job.remove().catch(() => {});
@@ -585,7 +594,7 @@ function defineJobs(agenda) {
   });
   agenda.define(JOB_LATER, { concurrency: CONCURRENCY.jobs, lockLifetime: LEASE_MS }, async (job) => {
     const d = job.attrs.data || {};
-    if (d.kind === 'process' && d.messageId) await processMessage(d.messageId);
+    if (d.kind === 'process' && d.messageId) await processInSlot(d.messageId);
     else if (d.kind === 'dispatch' && d.chatId) await dispatchChat(d.chatId);
     await job.remove().catch(() => {});
   });
