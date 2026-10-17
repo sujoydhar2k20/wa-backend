@@ -276,6 +276,58 @@ function withHostedHeaderImage(components, url) {
   );
 }
 
+/**
+ * Reads the variables a template TEXT component (header/body) expects, straight from the
+ * synced template definition. Meta counts each DISTINCT placeholder once ({{1}} used twice
+ * is still one parameter) and templates may use positional ({{1}}) or named ({{name}})
+ * variables. Returns { named, keys } where keys are in the order Meta expects.
+ */
+function templateTextVariables(text, parameterFormat) {
+  const keys = [];
+  const re = /\{\{\s*([A-Za-z0-9_]+)\s*\}\}/g;
+  let m;
+  while ((m = re.exec(text || '')) !== null) {
+    if (!keys.includes(m[1])) keys.push(m[1]);
+  }
+  const named = String(parameterFormat || '').toUpperCase() === 'NAMED'
+    || keys.some((k) => !/^\d+$/.test(k));
+  if (!named) keys.sort((a, b) => Number(a) - Number(b));
+  return { named, keys };
+}
+
+/**
+ * Builds the parameters for a header/body component so their count always matches the
+ * template (avoids Meta #132000 "Number of parameters does not match").
+ */
+function buildTextComponentParameters(templateName, section, dbComp, clientComp, parameterFormat) {
+  const { named, keys } = templateTextVariables(dbComp.text, parameterFormat);
+  if (!keys.length) return null; // template section has no variables -> send no parameters
+
+  const supplied = Array.isArray(clientComp?.parameters) ? clientComp.parameters : [];
+  const byName = new Map(supplied.filter((p) => p && p.parameter_name).map((p) => [p.parameter_name, p]));
+
+  const params = keys.map((key, i) => {
+    const p = (named && byName.get(key)) || supplied[i];
+    if (!p || typeof p.text !== 'string' || p.text.trim() === '') return null;
+    const out = { type: 'text', text: p.text };
+    if (named) out.parameter_name = key;
+    return out;
+  });
+
+  const missing = keys.filter((_, i) => !params[i]);
+  if (missing.length) {
+    const err = new Error(
+      `Template "${templateName}" ${section} needs ${keys.length} value(s) but ${missing.length} ${missing.length === 1 ? 'is' : 'are'} missing: ${missing.map((k) => `{{${k}}}`).join(', ')}. Please fill in every variable and try again.`
+    );
+    err.statusCode = 400;
+    throw err;
+  }
+  if (supplied.length > keys.length) {
+    logger.warn(`Template ${templateName}: ${section} got ${supplied.length} parameters, template expects ${keys.length}. Extra values dropped.`);
+  }
+  return params;
+}
+
 async function sendTemplateMessage(wabaId, phoneNumberId, to, templateName, language = 'en', components = [], forceRefreshMedia = false) {
   await checkContactBlockedOrOptedOut(to);
   const path = `/${phoneNumberId}/messages`;
@@ -318,6 +370,7 @@ async function sendTemplateMessage(wabaId, phoneNumberId, to, templateName, lang
   }
   
   let finalComponents = [];
+  const parameterFormat = templateDoc?.metaData?.parameter_format;
   
   if (templateDoc && templateDoc.components) {
     // Build map of mobile components for easy lookup (handle both singular and plural)
@@ -339,11 +392,9 @@ async function sendTemplateMessage(wabaId, phoneNumberId, to, templateName, lang
       
       if (compType === 'header') {
         // For TEXT headers: send with parameters if provided
-        if (format === 'TEXT' && mobileComp && mobileComp.parameters) {
-          finalComponents.push({
-            type: 'header',
-            parameters: mobileComp.parameters,
-          });
+        if (format === 'TEXT') {
+          const params = buildTextComponentParameters(templateName, 'header', dbComp, mobileComp, parameterFormat);
+          if (params) finalComponents.push({ type: 'header', parameters: params });
         }
         // For media headers Meta still expects the header component, but example
         // preview URLs from synced templates are not stable delivery assets.
@@ -371,21 +422,11 @@ async function sendTemplateMessage(wabaId, phoneNumberId, to, templateName, lang
           // If neither imageMediaId nor imageUrl exist, we cannot provide a valid media header.
         }
       } else if (compType === 'body') {
-        // Include body if mobile app sent parameters for it
-        if (mobileComp && mobileComp.parameters) {
-          finalComponents.push({
-            type: 'body',
-            parameters: mobileComp.parameters,
-          });
-        }
+        // Parameter count comes from the template's own body text, not the client.
+        const params = buildTextComponentParameters(templateName, 'body', dbComp, mobileComp, parameterFormat);
+        if (params) finalComponents.push({ type: 'body', parameters: params });
       } else if (compType === 'footer') {
-        // Include footer if mobile app sent parameters for it
-        if (mobileComp && mobileComp.parameters) {
-          finalComponents.push({
-            type: 'footer',
-            parameters: mobileComp.parameters,
-          });
-        }
+        // Footers can't contain variables, so Meta never accepts footer parameters.
       } else if (compType === 'buttons') {
         // Build button components from the TEMPLATE definition (source of truth), not just
         // whatever the client happened to send. A URL button whose url contains {{n}} is
