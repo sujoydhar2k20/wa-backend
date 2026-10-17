@@ -2,6 +2,7 @@ const fs = require('fs');
 const { Contact } = require('../models');
 
 const { escapeRegex, phoneSearchTerm } = require('../utils/regex');
+const { normalizePhone } = require('../utils/waIdentity');
 async function list(req, res, next) {
     try {
         const { page = 1, limit = 20, q, isOptedOut, isBlocked, tag } = req.query;
@@ -158,7 +159,8 @@ async function importContacts(req, res, next) {
         const ops = [];
         for (const line of dataLines) {
             const cols = line.split(',').map((c) => c.trim().replace(/^"|"$/g, ''));
-            const phoneNumber = cols[0]?.replace(/\D/g, '');
+            // Full international number: "9874085669" -> "919874085669" (see utils/waIdentity)
+            const phoneNumber = normalizePhone(cols[0]);
             if (!phoneNumber || phoneNumber.length < 7) continue;
             ops.push({
                 updateOne: {
@@ -167,7 +169,7 @@ async function importContacts(req, res, next) {
                         $setOnInsert: { phoneNumber },
                         $set: {
                             ...(cols[1] ? { name: cols[1] } : {}),
-                            ...(cols[2] ? { waId: cols[2] } : {}),
+                            ...(normalizePhone(cols[2]) ? { waId: normalizePhone(cols[2]) } : {}),
                         },
                     },
                     upsert: true,

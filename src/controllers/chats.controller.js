@@ -945,7 +945,8 @@ async function startWithPhone(req, res, next) {
         }
 
         // Normalize phone number (remove any non-digits except leading +)
-        const normalizedPhone = phoneNumber.replace(/\D/g, '');
+        // Full international number: "9874085669" -> "919874085669" (see utils/waIdentity)
+        const normalizedPhone = require('../utils/waIdentity').normalizePhone(phoneNumber);
         if (!normalizedPhone || normalizedPhone.length < 10) {
             return res.status(400).json({ success: false, message: 'Invalid phone number format' });
         }

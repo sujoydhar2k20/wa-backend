@@ -245,42 +245,6 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
         if (!(await Chat.exists({ wabaId: waba._id, bsuid: newId, _id: { $ne: chat._id } }))) chat.bsuid = newId;
     }
 
-    // Auto-assign new chat to the least-loaded active staff member on this WABA (round-robin by open chat count)
-    const { isMonthly } = require('../utils/tag');
-    const isMonthlyCustomer = await isMonthly({ chat, contact });
-    if (isNewChat && !chat.assignedTo && !isMonthlyCustomer) {
-        try {
-            const staffMembers = await User.find({
-                isActive: true,
-                role: 'staff',
-                assignedWabaId: waba._id,
-            }).select('_id').lean();
-
-            if (staffMembers.length > 0) {
-                // Count open chats per staff member, pick the one with fewest
-                const chatCounts = await Promise.all(
-                    staffMembers.map(async (staff) => {
-                        const count = await Chat.countDocuments({
-                            assignedTo: staff._id,
-                            status: { $ne: 'closed' },
-                        });
-                        return { staffId: staff._id, count };
-                    })
-                );
-
-                // Sort by count ascending, pick the least loaded staff
-                chatCounts.sort((a, b) => a.count - b.count);
-                const leastLoaded = chatCounts[0];
-                chat.assignedTo = leastLoaded.staffId;
-                logger.info(
-                    `Auto-assigned new chat (${senderKey}) to staff ${leastLoaded.staffId} (open chats: ${leastLoaded.count})`
-                );
-            }
-        } catch (err) {
-            logger.error('Error auto-assigning staff to chat:', err);
-        }
-    }
-
     // Update chat metadata. WhatsApp system notices (number/ID changes) are not customer messages:
     // they neither open the 24-hour window nor reopen or mark the chat unread.
     chat.lastMessageAt = new Date();
@@ -309,6 +273,16 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
     }
 
     await chat.save();
+
+    // Automatic assignment: every customer message (new chat, existing unassigned chat, broadcast
+    // reply) goes to a random eligible staff member unless the chat already has an active assignee or
+    // the customer is tagged "monthly". Done after the save, as a compare-and-set, so concurrent
+    // messages / retries cannot assign twice. Never throws. WhatsApp system notices are not customer
+    // messages and do not trigger it. Rules: services/autoAssign.service.js.
+    let autoAssign = { action: 'none', reason: 'system_event' };
+    if (!parsed.isSystemEvent) {
+        autoAssign = await require('./autoAssign.service').autoAssignIncomingChat({ chat, contact, wabaId: waba._id });
+    }
 
     // Create message
     const messageData = {
@@ -391,6 +365,17 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
                 });
             } catch (e) {
                 logger.warn('Socket emit failed for reaction:', e.message);
+            }
+        }
+
+        // A reaction can be the customer's first response (e.g. to a broadcast). The normal
+        // chat:update below is not reached, so publish the new assignee here.
+        if (autoAssign.action === 'assigned') {
+            try {
+                const { loadChatForSocket } = require('../utils/chatSocket');
+                getIO().emit('chat:update', { chatId: chat._id.toString(), chat: await loadChatForSocket(chat._id) });
+            } catch (e) {
+                logger.warn('Socket emit failed for auto-assigned reaction chat:', e.message);
             }
         }
 

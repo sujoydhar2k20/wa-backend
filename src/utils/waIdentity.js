@@ -66,4 +66,52 @@ function displayIdentity({ waId, phoneNumber, username, bsuid } = {}) {
   return 'WhatsApp user';
 }
 
-module.exports = { BSUID_RE, isBsuid, isParentBsuid, phoneDigits, recipientFields, addressOf, identityFilter, displayIdentity };
+/**
+ * Country code added to numbers typed or imported WITHOUT one (e.g. a CSV with "9874085669").
+ * WhatsApp identifies customers by the full international number (wa_id "919874085669"), so a bare
+ * national number would become a second contact / chat for the same customer. Override with
+ * DEFAULT_COUNTRY_CODE in .env (digits only) if ever needed.
+ */
+const DEFAULT_COUNTRY_CODE = String(process.env.DEFAULT_COUNTRY_CODE || '91').replace(/\D/g, '') || '91';
+
+/**
+ * Full international phone digits for a number typed by staff or imported from a file.
+ *   "9874085669", "09874085669", "+91 98740 85669", "0091 9874085669"  ->  "919874085669"
+ * For India (the default) only a 10-digit MOBILE number (starts with 6-9), optionally with a
+ * leading 0, gets "91" added; anything else (already international, landlines, other lengths) is
+ * returned as its digits, unchanged. Returns '' for a BSUID or a value without digits.
+ * Only for staff/file input: never use it on webhook wa_ids (those are already international).
+ */
+function normalizePhone(value, countryCode = DEFAULT_COUNTRY_CODE) {
+  let d = phoneDigits(value);
+  if (!d) return '';
+  const cc = String(countryCode || '').replace(/\D/g, '');
+  if (!cc) return d;
+  if (d.startsWith('00') && d.length > 11) d = d.slice(2); // international dialling prefix
+  if (cc === '91') {
+    if (/^0[6-9]\d{9}$/.test(d)) d = d.slice(1);
+    return /^[6-9]\d{9}$/.test(d) ? `91${d}` : d;
+  }
+  if (d.length === 11 && d.startsWith('0')) d = d.slice(1);
+  return d.length === 10 ? `${cc}${d}` : d;
+}
+
+/**
+ * Every stored form a number may have: as given (digits), normalised, and — for normalised
+ * numbers of the default country — the bare national number. Used to find rows saved before
+ * normalisation existed (e.g. broadcast list members stored as "9874085669").
+ */
+function phoneVariants(value, countryCode = DEFAULT_COUNTRY_CODE) {
+  const digits = phoneDigits(value);
+  const full = normalizePhone(value, countryCode);
+  const out = new Set([digits, full]);
+  const cc = String(countryCode || '').replace(/\D/g, '');
+  if (cc && full.startsWith(cc) && full.length === cc.length + 10) out.add(full.slice(cc.length));
+  out.delete('');
+  return [...out];
+}
+
+module.exports = {
+  BSUID_RE, isBsuid, isParentBsuid, phoneDigits, recipientFields, addressOf, identityFilter, displayIdentity,
+  DEFAULT_COUNTRY_CODE, normalizePhone, phoneVariants,
+};

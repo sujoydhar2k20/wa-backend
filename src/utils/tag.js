@@ -2,13 +2,18 @@ const { Tag, Contact, Chat } = require('../models');
 
 /**
  * Checks if the "monthly" tag exists and retrieves its ID.
+ * @param {Object} [options]
+ * @param {boolean} [options.strict=false] - rethrow database errors instead of answering "no tag".
+ *   Callers that would otherwise act on a customer (e.g. automatic assignment) use strict mode so a
+ *   failed lookup never makes a monthly customer look untagged.
  * @returns {Promise<string|null>} The Tag ID as string, or null.
  */
-async function getMonthlyTagId() {
+async function getMonthlyTagId({ strict = false } = {}) {
     try {
         const tag = await Tag.findOne({ name: { $regex: /^monthly$/i } });
         return tag ? tag._id.toString() : null;
     } catch (err) {
+        if (strict) throw err;
         return null;
     }
 }
@@ -18,11 +23,12 @@ async function getMonthlyTagId() {
  * @param {Object} params
  * @param {Object} [params.chat] - Chat mongoose document or object.
  * @param {Object} [params.contact] - Contact mongoose document or object.
+ * @param {Object} [options] - { strict }: see getMonthlyTagId.
  * @returns {Promise<boolean>}
  */
-async function isMonthly(params = {}) {
+async function isMonthly(params = {}, { strict = false } = {}) {
     const { chat, contact } = params;
-    const monthlyTagId = await getMonthlyTagId();
+    const monthlyTagId = await getMonthlyTagId({ strict });
     if (!monthlyTagId) return false;
 
     // Helper to check if tags array contains monthlyTagId

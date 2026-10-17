@@ -3,6 +3,20 @@ const whatsappService = require('./whatsapp.service');
 const { getIO } = require('../websocket/socket.server');
 const { logger } = require('../utils/logger');
 const { loadChatForSocket } = require('../utils/chatSocket');
+const { normalizePhone, phoneVariants } = require('../utils/waIdentity');
+
+/**
+ * The contact for a broadcast recipient. A customer may exist twice (full number from WhatsApp,
+ * bare national number from an old import); prefer the full-number contact, which is the one the
+ * customer's chats, tags and block / opt-out state belong to.
+ */
+async function findContactByVariants(variants, full, select) {
+  if (!variants.length) return null;
+  let q = Contact.find({ phoneNumber: { $in: variants } }).limit(5);
+  if (select) q = q.select(`${select} phoneNumber`);
+  const found = await q;
+  return found.find((c) => c.phoneNumber === full) || found[0] || null;
+}
 
 /**
  * Get the messaging limit for a WABA phone number.
@@ -360,6 +374,10 @@ async function processBroadcastBatch(batchId) {
   for (const phoneNumber of phonesToSend) {
     // Declare contactId outside try so it's accessible in catch
     let contactId = null;
+    // `phoneNumber` is the stored form (a list may hold "9874085669"); WhatsApp and our chats use
+    // the full international number. Lookups accept every stored form of the same number.
+    const to = normalizePhone(phoneNumber) || phoneNumber;
+    const variants = phoneVariants(phoneNumber);
     try {
       // Find the member or contact — fetch full doc if we have dynamic vars
       let isBlocked = false;
@@ -372,7 +390,7 @@ async function processBroadcastBatch(batchId) {
           : 'isBlocked isOptedOut';
         const member = await BroadcastListMember.findOne({
           broadcastListId: broadcast.broadcastListId,
-          phoneNumber,
+          phoneNumber: { $in: variants },
         }).populate('contactId', populateFields);
 
         if (member && member.contactId) {
@@ -386,8 +404,8 @@ async function processBroadcastBatch(batchId) {
       // If no member found or no list used, check Contact model directly
       if (!contactId) {
         const contact = hasDynamicVars
-          ? await Contact.findOne({ phoneNumber })
-          : await Contact.findOne({ phoneNumber }).select('_id isBlocked isOptedOut');
+          ? await findContactByVariants(variants, to)
+          : await findContactByVariants(variants, to, '_id isBlocked isOptedOut');
         if (contact) {
           contactId = contact._id;
           isBlocked = contact.isBlocked;
@@ -408,7 +426,7 @@ async function processBroadcastBatch(batchId) {
       const result = await whatsappService.sendTemplateMessage(
         broadcast.wabaId,
         broadcast.phoneNumberId,
-        phoneNumber,
+        to,
         template.name,
         template.language,
         perContactComponents
@@ -422,7 +440,7 @@ async function processBroadcastBatch(batchId) {
       await BroadcastMessage.create({
         broadcastId: broadcast._id,
         contactId,
-        phoneNumber,
+        phoneNumber: to,
         messageId,
         status: 'sent',
       });
@@ -432,7 +450,7 @@ async function processBroadcastBatch(batchId) {
       await recordBroadcastInChat({
         broadcast,
         template,
-        phoneNumber,
+        phoneNumber: to,
         contactId,
         messageId,
         contactResolvedText: hasDynamicVars
@@ -443,7 +461,7 @@ async function processBroadcastBatch(batchId) {
 
       if (broadcast.broadcastListId) {
         await BroadcastListMember.updateOne(
-          { broadcastListId: broadcast.broadcastListId, phoneNumber },
+          { broadcastListId: broadcast.broadcastListId, phoneNumber: { $in: variants } },
           { status: 'sent' }
         );
       }
@@ -454,7 +472,7 @@ async function processBroadcastBatch(batchId) {
       await BroadcastMessage.create({
         broadcastId: broadcast._id,
         contactId,
-        phoneNumber,
+        phoneNumber: to,
         status: isSkipped ? 'skipped' : 'failed',
         errorCode: err.response?.data?.error?.code || (isSkipped ? 403 : 500),
         errorMessage: err.response?.data?.error?.message || err.message,
@@ -462,7 +480,7 @@ async function processBroadcastBatch(batchId) {
 
       if (broadcast.broadcastListId) {
         await BroadcastListMember.updateOne(
-          { broadcastListId: broadcast.broadcastListId, phoneNumber },
+          { broadcastListId: broadcast.broadcastListId, phoneNumber: { $in: variants } },
           { status: isSkipped ? 'opted_out' : 'failed' }
         );
       }

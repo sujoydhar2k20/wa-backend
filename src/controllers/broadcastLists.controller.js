@@ -3,6 +3,7 @@ const path = require('path');
 const { BroadcastList, BroadcastListMember, Contact } = require('../models');
 
 const { escapeRegex, phoneSearchTerm } = require('../utils/regex');
+const { normalizePhone } = require('../utils/waIdentity');
 async function list(req, res, next) {
     try {
         const { page = 1, limit = 20, wabaId, search, q } = req.query;
@@ -90,7 +91,8 @@ async function importMembers(req, res, next) {
             const cols = line.split(',').map(c => c.trim().replace(/^"|"$/g, ''));
             if (cols.length <= phoneColIdx) continue;
 
-            const phoneNumber = cols[phoneColIdx]?.replace(/\D/g, '');
+            // Full international number: "9874085669" -> "919874085669" (see utils/waIdentity)
+            const phoneNumber = normalizePhone(cols[phoneColIdx]);
             if (!phoneNumber || phoneNumber.length < 7) continue;
 
             const name = nameColIdx !== -1 && cols.length > nameColIdx ? cols[nameColIdx] : '';
@@ -214,7 +216,7 @@ async function addMembers(req, res, next) {
             const rawPhone = member.phoneNumber;
             if (!rawPhone) continue;
 
-            const phoneNumber = rawPhone.toString().trim().replace(/\D/g, '');
+            const phoneNumber = normalizePhone(rawPhone);
             if (phoneNumber.length < 7) continue;
 
             const name = member.name?.toString().trim() || '';
@@ -307,7 +309,7 @@ async function importCustomers(req, res, next) {
         if (!broadcastList) return res.status(404).json({ success: false, message: 'Broadcast list not found' });
 
         // Fetch all contacts from the database
-        const allContacts = await Contact.find({}).select('_id phoneNumber name tags');
+        const allContacts = await Contact.find({}).select('_id phoneNumber waId name tags');
         
         if (allContacts.length === 0) {
             const memberCount = await BroadcastListMember.countDocuments({ broadcastListId: broadcastList._id });
@@ -321,19 +323,21 @@ async function importCustomers(req, res, next) {
             });
         }
 
-        // Get existing members in the broadcast list
+        // Members are stored with the full international number ("9874085669" -> "919874085669",
+        // see utils/waIdentity). Existing members are compared in that form too, so a member added
+        // earlier as "9874085669" counts as already in the list.
         const existingMembers = await BroadcastListMember.find({ broadcastListId: broadcastList._id }).select('phoneNumber');
-        const existingPhoneNumbers = new Set(existingMembers.map(m => m.phoneNumber));
+        const existingPhoneNumbers = new Set(existingMembers.map(m => normalizePhone(m.phoneNumber)).filter(Boolean));
 
         // Prepare data for import
-        const toImport = new Map(); // phoneNumber -> { name, tags, contactId }
+        const toImport = new Map(); // full phone number -> { name, tags, contactId }
         let failedCount = 0;
         let duplicateCount = 0;
 
         for (const contact of allContacts) {
-            const phoneNumber = contact.phoneNumber;
+            const phoneNumber = normalizePhone(contact.phoneNumber || contact.waId);
             
-            // Skip if phone number is invalid or too short
+            // Skip if phone number is invalid or too short (incl. customers known only by WhatsApp user ID)
             if (!phoneNumber || phoneNumber.length < 7) {
                 failedCount++;
                 continue;
@@ -345,13 +349,16 @@ async function importCustomers(req, res, next) {
                 continue;
             }
 
-            // Store contact info for bulk import
-            if (!toImport.has(phoneNumber)) {
-                toImport.set(phoneNumber, {
-                    name: contact.name || phoneNumber,
-                    tags: contact.tags || [],
-                    contactId: contact._id
-                });
+            const entry = { name: contact.name || phoneNumber, tags: contact.tags || [], contactId: contact._id };
+            const prev = toImport.get(phoneNumber);
+            if (!prev) {
+                toImport.set(phoneNumber, entry);
+            } else {
+                // The same customer saved twice (full number from WhatsApp + bare number from an old
+                // import): one member, linked to the full-number contact (the one their chats,
+                // tags and block / opt-out state belong to).
+                duplicateCount++;
+                if (contact.phoneNumber === phoneNumber) toImport.set(phoneNumber, entry);
             }
         }
 

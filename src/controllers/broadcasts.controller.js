@@ -2,6 +2,7 @@ const { Broadcast, BroadcastList, BroadcastListMember, BroadcastMessage, Broadca
 const whatsappService = require('../services/whatsapp.service');
 const broadcastService = require('../services/broadcast.service');
 const { getIO } = require('../websocket/socket.server');
+const { normalizePhone } = require('../utils/waIdentity');
 
 async function list(req, res, next) {
     try {
@@ -112,13 +113,21 @@ async function send(req, res, next) {
 
         // C. Target Specific Phone Numbers (if provided in request body)
         if (req.body.targetPhoneNumbers && Array.isArray(req.body.targetPhoneNumbers) && req.body.targetPhoneNumbers.length > 0) {
-            const bodyPhones = req.body.targetPhoneNumbers;
-            // Only keep these if we're filtering
-            phoneNumbers = phoneNumbers.filter(p => bodyPhones.includes(p));
+            const bodyPhones = new Set(req.body.targetPhoneNumbers.map((p) => normalizePhone(p)).filter(Boolean));
+            // Only keep these if we're filtering (compared in full international form)
+            phoneNumbers = phoneNumbers.filter(p => bodyPhones.has(normalizePhone(p)));
         }
 
-        // Deduplicate
-        phoneNumbers = [...new Set(phoneNumbers)];
+        // Deduplicate by the full international number, so "9874085669" and "919874085669" (one
+        // customer stored both ways) get ONE message. The stored form is kept: the batch job uses
+        // it to find the list member, and sends to the normalised number. Rows without a phone
+        // (customers known only by WhatsApp user ID) are skipped: they used to fail one by one.
+        const byFull = new Map();
+        for (const p of phoneNumbers) {
+            const full = normalizePhone(p);
+            if (full && !byFull.has(full)) byFull.set(full, p);
+        }
+        phoneNumbers = [...byFull.values()];
 
         if (phoneNumbers.length === 0) {
             return res.status(400).json({ success: false, message: 'No valid contacts to send to. All selected contacts might be opted-out or blocked.' });

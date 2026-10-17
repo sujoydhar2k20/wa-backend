@@ -15,7 +15,8 @@ const sendTemplate = async (req, res) => {
         }
 
         // Clean phone number (remove +, spaces, etc.)
-        const waId = to.replace(/\D/g, '');
+        // Full international number: "9874085669" -> "919874085669" (see utils/waIdentity)
+        const waId = require('../utils/waIdentity').normalizePhone(to);
 
         // Find or create contact
         let contact = await Contact.findOne({ waId });
