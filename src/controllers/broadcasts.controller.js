@@ -370,7 +370,170 @@ async function bulkDelete(req, res, next) {
     }
 }
 
-module.exports = { list, create, get, getStats, getTodayStats, getStatusCounts, send, test, getMessages, getBatches, bulkDelete };
+async function pause(req, res, next) {
+    try {
+        const broadcast = await Broadcast.findById(req.params.id);
+        if (!broadcast) return res.status(404).json({ success: false, message: 'Broadcast not found' });
+        if (!['sending', 'scheduled'].includes(broadcast.status)) {
+            return res.status(400).json({ success: false, message: 'Only sending or scheduled broadcasts can be paused' });
+        }
+
+        // Update broadcast as paused
+        const updated = await Broadcast.findByIdAndUpdate(
+            req.params.id,
+            {
+                status: 'paused',
+                pausedAt: new Date(),
+                isPausedManually: true,
+            },
+            { new: true }
+        );
+
+        // Also pause the current sending batch if any
+        await BroadcastBatch.updateOne(
+            { broadcastId: req.params.id, status: 'sending' },
+            { status: 'paused', pausedAt: new Date() }
+        );
+
+        // Emit socket event
+        try {
+            const io = getIO();
+            io.emit('broadcast:update', updated);
+        } catch (e) {
+            console.warn('Socket emit failed:', e.message);
+        }
+
+        res.json({ success: true, message: 'Broadcast paused', broadcast: updated });
+    } catch (e) {
+        next(e);
+    }
+}
+
+async function resume(req, res, next) {
+    try {
+        const broadcast = await Broadcast.findById(req.params.id);
+        if (!broadcast) return res.status(404).json({ success: false, message: 'Broadcast not found' });
+        if (broadcast.status !== 'paused') {
+            return res.status(400).json({ success: false, message: 'Only paused broadcasts can be resumed' });
+        }
+
+        // Update broadcast as sending
+        const updated = await Broadcast.findByIdAndUpdate(
+            req.params.id,
+            {
+                status: 'sending',
+                resumedAt: new Date(),
+                isPausedManually: false,
+            },
+            { new: true }
+        );
+
+        // Resume the paused batch
+        const pausedBatch = await BroadcastBatch.findOne({ broadcastId: req.params.id, status: 'paused' });
+        if (pausedBatch) {
+            await BroadcastBatch.updateOne(
+                { _id: pausedBatch._id },
+                { status: 'pending' }
+            );
+
+            // Immediately process the batch
+            setImmediate(async () => {
+                try {
+                    const { logger } = require('../utils/logger');
+                    await broadcastService.processBroadcastBatch(pausedBatch._id);
+                } catch (err) {
+                    const { logger } = require('../utils/logger');
+                    logger.error('Failed to resume batch:', err.message);
+                }
+            });
+        }
+
+        // Emit socket event
+        try {
+            const io = getIO();
+            io.emit('broadcast:update', updated);
+        } catch (e) {
+            console.warn('Socket emit failed:', e.message);
+        }
+
+        res.json({ success: true, message: 'Broadcast resumed', broadcast: updated });
+    } catch (e) {
+        next(e);
+    }
+}
+
+async function getFailedMessages(req, res, next) {
+    try {
+        const { page = 1, limit = 50 } = req.query;
+        const skip = (parseInt(page, 10) - 1) * parseInt(limit, 10);
+
+        const [messages, total] = await Promise.all([
+            BroadcastMessage.find({ broadcastId: req.params.id, status: 'failed' })
+                .sort({ createdAt: -1 })
+                .skip(skip)
+                .limit(parseInt(limit, 10))
+                .populate('contactId', 'name nameOnWhatsApp profilePicture'),
+            BroadcastMessage.countDocuments({ broadcastId: req.params.id, status: 'failed' }),
+        ]);
+
+        res.json({ data: messages, total, page: parseInt(page, 10), limit: parseInt(limit, 10) });
+    } catch (e) {
+        next(e);
+    }
+}
+
+async function createRetryBroadcast(req, res, next) {
+    try {
+        const { name, phoneNumberId } = req.body;
+        if (!name || !phoneNumberId) {
+            return res.status(400).json({ success: false, message: 'name and phoneNumberId are required' });
+        }
+
+        const originalBroadcast = await Broadcast.findById(req.params.id)
+            .populate('templateId', 'name language status components');
+        if (!originalBroadcast) {
+            return res.status(404).json({ success: false, message: 'Original broadcast not found' });
+        }
+
+        // Get all failed messages
+        const failedMessages = await BroadcastMessage.find({
+            broadcastId: req.params.id,
+            status: 'failed',
+        }).select('phoneNumber');
+
+        if (failedMessages.length === 0) {
+            return res.status(400).json({ success: false, message: 'No failed messages found for this broadcast' });
+        }
+
+        const phoneNumbers = failedMessages.map(msg => msg.phoneNumber);
+
+        // Create new broadcast with same template
+        const newBroadcast = new Broadcast({
+            name,
+            wabaId: originalBroadcast.wabaId,
+            phoneNumberId,
+            templateId: originalBroadcast.templateId._id,
+            status: 'draft',
+            components: originalBroadcast.components,
+            variableMapping: originalBroadcast.variableMapping,
+            createdBy: req.user._id,
+        });
+
+        await newBroadcast.save();
+
+        // Return the new broadcast with the failed phone numbers
+        res.status(201).json({
+            success: true,
+            message: 'Retry campaign created',
+            broadcast: newBroadcast,
+            failedPhoneNumbers: phoneNumbers,
+        });
+    } catch (e) {
+        next(e);
+    }
+}
+
+module.exports = { list, create, get, getStats, getTodayStats, getStatusCounts, send, test, getMessages, getBatches, bulkDelete, pause, resume, getFailedMessages, createRetryBroadcast };
 
 
 

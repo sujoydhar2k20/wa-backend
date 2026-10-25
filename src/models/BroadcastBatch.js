@@ -5,13 +5,17 @@ const broadcastBatchSchema = new mongoose.Schema(
     broadcastId: { type: mongoose.Schema.Types.ObjectId, ref: 'Broadcast', required: true, index: true },
     batchNumber: { type: Number, required: true },
     scheduledAt: { type: Date, required: true },
-    status: { type: String, enum: ['pending', 'sending', 'completed', 'failed'], default: 'pending', index: true },
+    status: { type: String, enum: ['pending', 'sending', 'paused', 'completed', 'failed'], default: 'pending', index: true },
     memberPhones: [{ type: String }], // Phone numbers assigned to this batch
     memberCount: { type: Number, default: 0 },
     sentCount: { type: Number, default: 0 },
     failedCount: { type: Number, default: 0 },
+    skippedCount: { type: Number, default: 0 },
+    processedCount: { type: Number, default: 0 }, // Total processed in this batch
+    lastProcessedIndex: { type: Number, default: 0 }, // For resuming from where it was paused
     startedAt: { type: Date },
     completedAt: { type: Date },
+    pausedAt: { type: Date },
   },
   { timestamps: true }
 );

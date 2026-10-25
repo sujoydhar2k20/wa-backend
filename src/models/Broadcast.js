@@ -8,6 +8,7 @@ const statsSchema = new mongoose.Schema({
   replied: { type: Number, default: 0 },
   failed: { type: Number, default: 0 },
   optedOut: { type: Number, default: 0 },
+  processed: { type: Number, default: 0 }, // Total processed (sent + failed + optedOut)
 }, { _id: false });
 
 const broadcastSchema = new mongoose.Schema(
@@ -22,9 +23,13 @@ const broadcastSchema = new mongoose.Schema(
     scheduledAt: { type: Date },
     startedAt: { type: Date },
     completedAt: { type: Date },
+    pausedAt: { type: Date }, // When the broadcast was paused
+    resumedAt: { type: Date }, // When the broadcast was resumed
     totalBatches: { type: Number, default: 1 },
     currentBatch: { type: Number, default: 1 },
     nextBatchAt: { type: Date },
+    lastProcessedIndex: { type: Number, default: 0 }, // For tracking resume position within a batch
+    isPausedManually: { type: Boolean, default: false }, // Flag to track if paused by user vs system
     dailyLimit: { type: Number }, // Snapshot of the WABA limit when broadcast was created
     components: { type: [mongoose.Schema.Types.Mixed], default: [] }, // Template variable components sent to Meta API
     variableMapping: { type: [mongoose.Schema.Types.Mixed], default: [] }, // Maps variables to contact fields for dynamic resolution
