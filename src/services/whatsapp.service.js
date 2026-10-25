@@ -796,7 +796,7 @@ async function syncTemplatesWithSummary(wabaId) {
           components: processedComponents,
           metaData: t,
         },
-        { upsert: true, new: true }
+        { upsert: true, returnDocument: 'after' }
       );
     }
 

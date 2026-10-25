@@ -77,7 +77,7 @@ async function markRead(req, res, next) {
         const notification = await Notification.findOneAndUpdate(
             { _id: id, recipientId: userId },
             { $set: { isRead: true } },
-            { new: true }
+            { returnDocument: 'after' }
         );
 
         if (!notification) {
@@ -102,7 +102,7 @@ async function toggleDnd(req, res, next) {
         const user = await User.findByIdAndUpdate(
             userId,
             { $set: { isDnd: !!isDnd } },
-            { new: true }
+            { returnDocument: 'after' }
         ).select('name phone role isDnd');
 
         res.json({ success: true, isDnd: user.isDnd, user });

@@ -222,7 +222,7 @@ async function answered({ callLogId, endpoint }) {
     update.answeredBy = callLog.initiatedBy;
   }
   // Atomic: only the first answer wins
-  const res = await CallLog.findOneAndUpdate({ _id: callLogId, status: 'ringing' }, { $set: update }, { new: true });
+  const res = await CallLog.findOneAndUpdate({ _id: callLogId, status: 'ringing' }, { $set: update }, { returnDocument: 'after' });
   if (!res) return 'ok';
   const answeredBy = res.answeredBy ? await User.findById(res.answeredBy).select('name').lean() : null;
   const payload = payloadFor(res, { answeredBy: answeredBy ? { id: String(answeredBy._id), name: answeredBy.name } : null });

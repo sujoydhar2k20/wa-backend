@@ -37,7 +37,7 @@ async function claim({ chatId, clientMessageId, userId, now = new Date() }) {
     const taken = await SendRequest.findOneAndUpdate(
       { key, status: 'pending', claimedAt: row.claimedAt },
       { $set: { claimedAt: now, userId } },
-      { new: true },
+      { returnDocument: 'after' },
     );
     if (taken) return { claimed: true, key };
   }

@@ -28,7 +28,7 @@ async function recordReply({ wabaId, phoneNumberId, waId, reply }) {
         lastReplyAt: new Date(),
       },
     },
-    { upsert: true, new: true, setDefaultsOnInsert: true },
+    { upsert: true, returnDocument: 'after', setDefaultsOnInsert: true },
   );
   logger.info(`[calls] permission ${doc.status} for ${waId} on ${phoneNumberId} (${doc.source}${doc.isPermanent ? ', permanent' : ''})`);
   return doc;

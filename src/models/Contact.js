@@ -36,9 +36,8 @@ const contactSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-contactSchema.pre('validate', function requireIdentity(next) {
+contactSchema.pre('validate', function requireIdentity() {
   if (!this.mergedInto && !this.phoneNumber && !this.waId && !this.bsuid) this.invalidate('phoneNumber', 'A contact needs a phone number or a WhatsApp user ID');
-  next();
 });
 
 contactSchema.index({ phoneNumber: 1, waId: 1 });

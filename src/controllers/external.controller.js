@@ -187,7 +187,7 @@ const toggleKey = async (req, res) => {
         const key = await ApiKey.findOneAndUpdate(
             { _id: id, createdBy: req.user._id },
             { isActive },
-            { new: true }
+            { returnDocument: 'after' }
         );
         if (!key) return res.status(404).json({ error: 'Key not found' });
         res.json(key);

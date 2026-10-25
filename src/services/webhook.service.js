@@ -677,7 +677,7 @@ async function handleStatusUpdate(statusObj) {
             message = await Message.findOneAndUpdate(
                 { messageId, ...statusGuard(status) },
                 { $set: updatePayload },
-                { new: true }
+                { returnDocument: 'after' }
             );
             if (!message) {
                 logger.info(`Status update: ${messageId} already past "${status}", ignored`);
@@ -727,7 +727,7 @@ async function handleStatusUpdate(statusObj) {
                         });
 
                         if (Object.keys(statsUpdate).length > 0) {
-                            const updatedBroadcast = await Broadcast.findByIdAndUpdate(broadcastMessage.broadcastId, { $set: statsUpdate }, { new: true });
+                            const updatedBroadcast = await Broadcast.findByIdAndUpdate(broadcastMessage.broadcastId, { $set: statsUpdate }, { returnDocument: 'after' });
                             try {
                                 const io = getIO();
                                 io.emit('broadcast:update', updatedBroadcast);
@@ -775,7 +775,7 @@ async function handleStatusUpdate(statusObj) {
                     const updatedChat = await Chat.findByIdAndUpdate(
                         message.chatId,
                         { $set: { lastMessageStatus: status } },
-                        { new: true }
+                        { returnDocument: 'after' }
                     )
                     .populate('contactId', 'name nameOnWhatsApp nickname profilePicture isOptedOut isBlocked customFields')
                     .populate('assignedTo', 'name phone')
@@ -836,7 +836,7 @@ async function handleStatusUpdate(statusObj) {
                     });
 
                     if (Object.keys(statsUpdate).length > 0) {
-                        const updatedBroadcast = await Broadcast.findByIdAndUpdate(broadcastMessage.broadcastId, { $set: statsUpdate }, { new: true });
+                        const updatedBroadcast = await Broadcast.findByIdAndUpdate(broadcastMessage.broadcastId, { $set: statsUpdate }, { returnDocument: 'after' });
 
                         try {
                             const io = getIO();
@@ -1272,7 +1272,7 @@ async function processTemplateStatusWebhook(entry) {
         const template = await require('../models/Template').findOneAndUpdate(
             { wabaId: waba._id, name: templateName, language: language },
             { $set: { status: eventStatus, templateId: value.message_template_id } },
-            { new: true }
+            { returnDocument: 'after' }
         );
 
         if (template) {

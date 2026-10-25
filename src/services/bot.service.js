@@ -219,7 +219,7 @@ async function processIncomingMessage({
                                     awaitingReply: { $ne: false },
                                 },
                                 { $set: { awaitingReply: false } },
-                                { new: true }
+                                { returnDocument: 'after' }
                             );
                             if (!claimed) {
                                 logger.info(`Bot flow "${flow.name}": reply "${replyId}" ignored, node ${currentNode.id} was already answered`);

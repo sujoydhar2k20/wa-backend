@@ -140,7 +140,7 @@ async function update(req, res, next) {
         const product = await Product.findByIdAndUpdate(
             req.params.id,
             productData,
-            { new: true, runValidators: true }
+            { returnDocument: 'after', runValidators: true }
         );
         res.json(product);
     } catch (e) {
@@ -326,7 +326,7 @@ async function importProducts(req, res, next) {
                         // If still no price (e.g. rate not found), and the file HAS a price, 
                         // we still ignore it as per user requirement: "we will not import the price from it"
                         
-                        await Product.findOneAndUpdate({ code }, productData, { upsert: true, new: true, runValidators: true });
+                        await Product.findOneAndUpdate({ code }, productData, { upsert: true, returnDocument: 'after', runValidators: true });
                         logs.push({ rowNumber: i + 2, status: 'success', data: productData });
                         successCount++;
                     } catch (err) {

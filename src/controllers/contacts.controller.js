@@ -84,7 +84,7 @@ async function update(req, res, next) {
         const contact = await Contact.findByIdAndUpdate(
             req.params.id,
             req.body,
-            { new: true, runValidators: true }
+            { returnDocument: 'after', runValidators: true }
         );
         if (!contact) return res.status(404).json({ success: false, message: 'Contact not found' });
         res.json(contact);
@@ -98,7 +98,7 @@ async function optOut(req, res, next) {
         const contact = await Contact.findByIdAndUpdate(
             req.params.id,
             { isOptedOut: true, optedOutAt: new Date() },
-            { new: true }
+            { returnDocument: 'after' }
         );
         if (!contact) return res.status(404).json({ success: false, message: 'Contact not found' });
         res.json(contact);
@@ -112,7 +112,7 @@ async function optIn(req, res, next) {
         const contact = await Contact.findByIdAndUpdate(
             req.params.id,
             { isOptedOut: false, optedOutAt: null },
-            { new: true }
+            { returnDocument: 'after' }
         );
         if (!contact) return res.status(404).json({ success: false, message: 'Contact not found' });
         res.json(contact);

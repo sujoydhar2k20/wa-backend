@@ -108,7 +108,7 @@ async function checkAndAnnounce({ fetch = fetchManifest, send = defaultSend, for
   const claimed = await AppRelease.findOneAndUpdate(
     claimFilter,
     { $inc: { attempts: 1 }, $set: { versionName: m.versionName, mandatory: m.mandatory, message: m.message } },
-    { new: true }
+    { returnDocument: 'after' }
   );
   if (!claimed) return { action: 'known', versionCode: m.versionCode };
 

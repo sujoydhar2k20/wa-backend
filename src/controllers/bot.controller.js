@@ -71,7 +71,7 @@ async function updateFlow(req, res, next) {
         const flow = await BotFlow.findByIdAndUpdate(
             req.params.id,
             body,
-            { new: true, runValidators: true }
+            { returnDocument: 'after', runValidators: true }
         );
         if (!flow) return res.status(404).json({ success: false, message: 'Flow not found' });
         res.json(flow);
@@ -95,7 +95,7 @@ async function enable(req, res, next) {
         const flow = await BotFlow.findByIdAndUpdate(
             req.params.id,
             { isEnabled: true },
-            { new: true }
+            { returnDocument: 'after' }
         );
         if (!flow) return res.status(404).json({ success: false, message: 'Flow not found' });
         res.json(flow);
@@ -109,7 +109,7 @@ async function disable(req, res, next) {
         const flow = await BotFlow.findByIdAndUpdate(
             req.params.id,
             { isEnabled: false },
-            { new: true }
+            { returnDocument: 'after' }
         );
         if (!flow) return res.status(404).json({ success: false, message: 'Flow not found' });
         res.json(flow);

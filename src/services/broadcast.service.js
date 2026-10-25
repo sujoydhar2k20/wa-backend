@@ -196,7 +196,7 @@ async function recordBroadcastInChat({
           isUnread: false,
         },
       },
-      { new: true, upsert: true, setDefaultsOnInsert: true }
+      { returnDocument: 'after', upsert: true, setDefaultsOnInsert: true }
     );
 
     const hostedHeaderUrl = await whatsappService.getTemplateHeaderImageUrl(broadcast.wabaId, template.name, template.language);
@@ -709,7 +709,7 @@ async function processBroadcastBatch(batchId) {
     broadcastUpdate.nextBatchAt = nextPendingBatch?.scheduledAt;
   }
 
-  const updatedBroadcast = await Broadcast.findByIdAndUpdate(broadcast._id, broadcastUpdate, { new: true });
+  const updatedBroadcast = await Broadcast.findByIdAndUpdate(broadcast._id, broadcastUpdate, { returnDocument: 'after' });
 
   // Emit socket event
   try {

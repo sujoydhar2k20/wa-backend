@@ -49,7 +49,7 @@ async function issueOtp(phone) {
   await OtpCode.findOneAndUpdate(
     { phone },
     { $set: { otp, expiresAt, lastSentAt: new Date(now), sendCount: 1, failedAttempts: 0 } },
-    { upsert: true, new: true }
+    { upsert: true, returnDocument: 'after' }
   );
   return { otp, expiresAt, shouldSend: true, retryAfterSec: 0 };
 }

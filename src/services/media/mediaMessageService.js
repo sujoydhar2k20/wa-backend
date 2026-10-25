@@ -85,7 +85,7 @@ async function transition(id, filter, set, { unset, inc } = {}) {
     $inc: { 'pipeline.version': 1, ...(inc || {}) },
   };
   if (unset) update.$unset = unset;
-  const doc = await Message.findOneAndUpdate({ _id: id, ...filter }, update, { new: true }).select('+mediaWork');
+  const doc = await Message.findOneAndUpdate({ _id: id, ...filter }, update, { returnDocument: 'after' }).select('+mediaWork');
   if (doc) emitPipeline(doc);
   return doc;
 }
@@ -464,7 +464,7 @@ async function reconcileFromWebhook(statusObj) {
       $unset: { errorCode: 1, errorMessage: 1 },
       $inc: { 'pipeline.version': 1 },
     },
-    { new: true },
+    { returnDocument: 'after' },
   );
   if (res) {
     logger.info(`[media] message ${id} matched to ${statusObj.id} via webhook callback data`);
@@ -513,7 +513,7 @@ async function retryAsync(messageId) {
     { _id: msg._id, status: 'failed' },
     // errorCode is kept until the send succeeds: 131053 makes the voice retry go out as plain audio.
     { $set: { status: 'queued', pipeline }, $unset: { errorMessage: 1 } },
-    { new: true },
+    { returnDocument: 'after' },
   ).select('+mediaWork');
   if (!updated) return { error: 409, message: msg };
   emitPipeline(updated);

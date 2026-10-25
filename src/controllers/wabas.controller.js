@@ -36,7 +36,7 @@ async function get(req, res, next) {
 
 async function update(req, res, next) {
     try {
-        const waba = await Waba.findByIdAndUpdate(req.params.id, req.body, { new: true, runValidators: true });
+        const waba = await Waba.findByIdAndUpdate(req.params.id, req.body, { returnDocument: 'after', runValidators: true });
         if (!waba) {
             return res.status(404).json({ success: false, message: 'WABA not found' });
         }
@@ -252,7 +252,7 @@ async function embeddedSignup(req, res, next) {
             const waba = await Waba.findOneAndUpdate(
                 { wabaId: wabaDetails.id },
                 wabaData,
-                { new: true, upsert: true, runValidators: true }
+                { returnDocument: 'after', upsert: true, runValidators: true }
             );
 
             // 5. Register Phone Numbers

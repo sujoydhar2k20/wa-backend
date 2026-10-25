@@ -32,7 +32,7 @@ async function updateCategory(req, res, next) {
         if (link !== undefined) update.link = link;
         if (subcategories !== undefined) update.subcategories = subcategories;
 
-        const category = await AiCategory.findByIdAndUpdate(id, { $set: update }, { new: true });
+        const category = await AiCategory.findByIdAndUpdate(id, { $set: update }, { returnDocument: 'after' });
         if (!category) return res.status(404).json({ success: false, message: 'Category not found' });
         res.json({ success: true, data: category });
     } catch (e) {
@@ -61,7 +61,7 @@ async function addSubcategory(req, res, next) {
         const category = await AiCategory.findByIdAndUpdate(
             id,
             { $push: { subcategories: { name, link } } },
-            { new: true }
+            { returnDocument: 'after' }
         );
         if (!category) return res.status(404).json({ success: false, message: 'Category not found' });
         res.json({ success: true, data: category });
@@ -82,7 +82,7 @@ async function updateSubcategory(req, res, next) {
         const category = await AiCategory.findOneAndUpdate(
             { _id: id, 'subcategories._id': subId },
             { $set: update },
-            { new: true }
+            { returnDocument: 'after' }
         );
         if (!category) return res.status(404).json({ success: false, message: 'Category or subcategory not found' });
         res.json({ success: true, data: category });
@@ -98,7 +98,7 @@ async function deleteSubcategory(req, res, next) {
         const category = await AiCategory.findByIdAndUpdate(
             id,
             { $pull: { subcategories: { _id: subId } } },
-            { new: true }
+            { returnDocument: 'after' }
         );
         if (!category) return res.status(404).json({ success: false, message: 'Category not found' });
         res.json({ success: true, data: category });

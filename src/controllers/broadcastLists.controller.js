@@ -49,7 +49,7 @@ async function update(req, res, next) {
         const broadcastList = await BroadcastList.findByIdAndUpdate(
             req.params.id,
             req.body,
-            { new: true, runValidators: true }
+            { returnDocument: 'after', runValidators: true }
         );
         if (!broadcastList) return res.status(404).json({ success: false, message: 'Broadcast list not found' });
         res.json(broadcastList);

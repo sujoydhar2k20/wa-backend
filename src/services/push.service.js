@@ -15,27 +15,27 @@ function configureFirebase() {
     const clientEmail = process.env.FIREBASE_CLIENT_EMAIL;
     let privateKey = process.env.FIREBASE_PRIVATE_KEY;
 
-    if (privateKey) {
-        // Handle newline formatting from environment string
-        privateKey = privateKey.replace(/\\n/g, '\n');
+    // Check all required credentials are present
+    if (!projectId || !clientEmail || !privateKey) {
+        logger.warn('Firebase Cloud Messaging VAPID/Credentials are not configured. Push notifications will be bypassed.');
+        return;
     }
 
-    if (projectId && clientEmail && privateKey) {
-        try {
-            admin.initializeApp({
-                credential: admin.credential.cert({
-                    projectId,
-                    clientEmail,
-                    privateKey
-                })
-            });
-            isInitialized = true;
-            logger.info('Firebase Admin SDK initialized successfully.');
-        } catch (error) {
-            logger.error(`Failed to initialize Firebase Admin SDK: ${error.message}`);
-        }
-    } else {
-        logger.warn('Firebase Cloud Messaging VAPID/Credentials are not configured. Push notifications will be bypassed.');
+    try {
+        // Handle newline formatting from environment string
+        privateKey = privateKey.replace(/\\n/g, '\n');
+
+        admin.initializeApp({
+            credential: admin.credential.cert({
+                projectId,
+                clientEmail,
+                privateKey
+            })
+        });
+        isInitialized = true;
+        logger.info('Firebase Admin SDK initialized successfully.');
+    } catch (error) {
+        logger.error(`Failed to initialize Firebase Admin SDK: ${error.message}`);
     }
 }
 

@@ -34,7 +34,7 @@ async function update(req, res, next) {
         const tag = await Tag.findByIdAndUpdate(
             req.params.id,
             req.body,
-            { new: true, runValidators: true }
+            { returnDocument: 'after', runValidators: true }
         );
         if (!tag) return res.status(404).json({ success: false, message: 'Tag not found' });
         res.json(tag);

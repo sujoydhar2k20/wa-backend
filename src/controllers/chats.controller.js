@@ -548,7 +548,7 @@ async function markRead(req, res, next) {
         const chat = await Chat.findByIdAndUpdate(
             req.params.id,
             { isUnread: false, isManuallyUnread: false },
-            { new: true }
+            { returnDocument: 'after' }
         );
         if (!chat) return res.status(404).json({ success: false, message: 'Chat not found' });
         res.json({ success: true });
@@ -562,7 +562,7 @@ async function markUnread(req, res, next) {
         const chat = await Chat.findByIdAndUpdate(
             req.params.id,
             { isUnread: true, isManuallyUnread: true },
-            { new: true }
+            { returnDocument: 'after' }
         );
         if (!chat) return res.status(404).json({ success: false, message: 'Chat not found' });
         res.json({ success: true });
@@ -694,7 +694,7 @@ async function toggleDnd(req, res, next) {
         const chat = await Chat.findByIdAndUpdate(
             req.params.id,
             { isDnd: !!isDnd },
-            { new: true }
+            { returnDocument: 'after' }
         );
         if (!chat) return res.status(404).json({ success: false, message: 'Chat not found' });
         res.json(chat);

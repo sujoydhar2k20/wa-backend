@@ -77,7 +77,7 @@ async function assignChatToAnswerer(callLog, deps = {}) {
   const updated = await models.Chat.findOneAndUpdate(
     { _id: chat._id, assignedTo: chat.assignedTo || null },
     { $set: { assignedTo: callLog.answeredBy } },
-    { new: true },
+    { returnDocument: 'after' },
   );
   if (!updated) {
     logger.info(`[calls] ${callLog._id}: chat ${chat._id} assignment changed meanwhile, not overwritten`);

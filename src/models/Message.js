@@ -152,7 +152,7 @@ messageSchema.post('save', async function(doc) {
       const updatedChat = await Chat.findByIdAndUpdate(
         doc.chatId,
         { $set: updateData },
-        { new: true }
+        { returnDocument: 'after' }
       )
       .populate('contactId', 'name nameOnWhatsApp nickname profilePicture isOptedOut isBlocked customFields')
       .populate('assignedTo', 'name phone')

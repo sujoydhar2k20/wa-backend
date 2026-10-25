@@ -386,7 +386,7 @@ async function pause(req, res, next) {
                 pausedAt: new Date(),
                 isPausedManually: true,
             },
-            { new: true }
+            { returnDocument: 'after' }
         );
 
         // Also pause the current sending batch if any
@@ -425,7 +425,7 @@ async function resume(req, res, next) {
                 resumedAt: new Date(),
                 isPausedManually: false,
             },
-            { new: true }
+            { returnDocument: 'after' }
         );
 
         // Resume the paused batch
