@@ -1,4 +1,4 @@
-const Agenda = require('agenda').default || require('agenda');
+const Agenda = require('agenda');
 const { logger } = require('../utils/logger');
 
 let agenda;
