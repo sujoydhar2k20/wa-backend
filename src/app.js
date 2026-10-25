@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
+const { ipKeyGenerator } = require('express-rate-limit');
 
 const routes = require('./routes');
 const { errorHandler } = require('./middleware/errorHandler.middleware');
@@ -62,8 +63,8 @@ const limiter = rateLimit({
     return req.path === '/api/webhook' || req.path.startsWith('/api/webhook/');
   },
   keyGenerator: (req, res) => {
-    // Rate limit per user ID if authenticated, otherwise by IP
-    return req.user?._id?.toString() || req.ip;
+    // Rate limit per user ID if authenticated, otherwise by IP (IPv6-safe)
+    return req.user?._id?.toString() || ipKeyGenerator(req, res);
   },
 });
 
