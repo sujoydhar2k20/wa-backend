@@ -464,6 +464,7 @@ async function processBroadcastBatch(batchId) {
   /**
    * Process messages concurrently with rate limiting
    * Default concurrency of 5 respects WhatsApp API rate limits while parallelizing
+   * CRITICAL: Save BroadcastMessage IMMEDIATELY after API call to prevent webhook race condition
    */
   const messageResults = await pLimit(async (phoneNumber) => {
     let contactId = null;
@@ -518,7 +519,42 @@ async function processBroadcastBatch(batchId) {
         messageId = result.messages[0].id;
       }
 
-      // Return success result with data for processing
+      // CRITICAL: Save BroadcastMessage IMMEDIATELY to avoid webhook race condition
+      // WhatsApp can call webhook within milliseconds, so we must save now
+      await BroadcastMessage.create({
+        broadcastId: broadcast._id,
+        contactId,
+        phoneNumber: to,
+        messageId,
+        status: 'sent',
+      });
+
+      // Also record in chat history (non-blocking to avoid timing issues)
+      recordBroadcastInChat({
+        broadcast,
+        template,
+        phoneNumber: to,
+        contactId,
+        messageId,
+        contactResolvedText: hasDynamicVars
+          ? resolveTemplateTextForContact(templateDoc, perContactComponents)
+          : resolvedTemplateText,
+        resolvedTemplateComponents,
+      }).catch(err => {
+        logger.warn(`Failed to record broadcast in chat for ${to}: ${err.message}`);
+      });
+
+      // Update broadcast list member
+      if (broadcast.broadcastListId) {
+        BroadcastListMember.updateOne(
+          { broadcastListId: broadcast.broadcastListId, phoneNumber: { $in: variants } },
+          { status: 'sent' }
+        ).catch(err => {
+          logger.warn(`Failed to update broadcast list member for ${to}: ${err.message}`);
+        });
+      }
+
+      // Return success result
       return {
         status: 'success',
         phoneNumber: to,
@@ -544,89 +580,61 @@ async function processBroadcastBatch(batchId) {
     }
   }, phonesToSend, 5); // 5 concurrent API calls respects rate limits
 
-  // Process results and save to database
+  // Process results - just count outcomes (records already saved in concurrent loop)
   let sentCount = 0;
   let failedCount = 0;
   let skippedCount = 0;
 
-  const dbOperations = [];
-
   for (const result of messageResults) {
-    const { phoneNumber, contactId, variants } = result;
-
     if (result.status === 'success') {
-      // Save successful message
-      dbOperations.push(
-        BroadcastMessage.create({
-          broadcastId: broadcast._id,
-          contactId,
-          phoneNumber,
-          messageId: result.messageId,
-          status: 'sent',
-        })
-      );
-
-      // Record in chat history
-      dbOperations.push(
-        recordBroadcastInChat({
-          broadcast,
-          template,
-          phoneNumber,
-          contactId,
-          messageId: result.messageId,
-          contactResolvedText: hasDynamicVars
-            ? resolveTemplateTextForContact(templateDoc, result.perContactComponents)
-            : resolvedTemplateText,
-          resolvedTemplateComponents,
-        })
-      );
-
-      // Update broadcast list member
-      if (broadcast.broadcastListId) {
-        dbOperations.push(
-          BroadcastListMember.updateOne(
-            { broadcastListId: broadcast.broadcastListId, phoneNumber: { $in: variants } },
-            { status: 'sent' }
-          )
-        );
-      }
-
       sentCount++;
     } else {
-      // Save failed or skipped message
-      const isSkipped = result.isSkipped;
-      
-      dbOperations.push(
+      if (result.isSkipped) {
+        skippedCount++;
+        // Save skipped message
         BroadcastMessage.create({
           broadcastId: broadcast._id,
-          contactId,
-          phoneNumber,
-          status: isSkipped ? 'skipped' : 'failed',
+          contactId: result.contactId,
+          phoneNumber: result.phoneNumber,
+          status: 'skipped',
           errorCode: result.errorCode,
           errorMessage: result.errorMessage,
-        })
-      );
+        }).catch(err => {
+          logger.warn(`Failed to save skipped message for ${result.phoneNumber}: ${err.message}`);
+        });
 
-      if (broadcast.broadcastListId) {
-        dbOperations.push(
+        if (broadcast.broadcastListId && result.variants) {
           BroadcastListMember.updateOne(
-            { broadcastListId: broadcast.broadcastListId, phoneNumber: { $in: variants } },
-            { status: isSkipped ? 'opted_out' : 'failed' }
-          )
-        );
-      }
-
-      if (isSkipped) {
-        skippedCount++;
+            { broadcastListId: broadcast.broadcastListId, phoneNumber: { $in: result.variants } },
+            { status: 'opted_out' }
+          ).catch(err => {
+            logger.warn(`Failed to update opted-out member: ${err.message}`);
+          });
+        }
       } else {
         failedCount++;
+        // Save failed message
+        BroadcastMessage.create({
+          broadcastId: broadcast._id,
+          contactId: result.contactId,
+          phoneNumber: result.phoneNumber,
+          status: 'failed',
+          errorCode: result.errorCode,
+          errorMessage: result.errorMessage,
+        }).catch(err => {
+          logger.warn(`Failed to save failed message for ${result.phoneNumber}: ${err.message}`);
+        });
+
+        if (broadcast.broadcastListId && result.variants) {
+          BroadcastListMember.updateOne(
+            { broadcastListId: broadcast.broadcastListId, phoneNumber: { $in: result.variants } },
+            { status: 'failed' }
+          ).catch(err => {
+            logger.warn(`Failed to update failed member: ${err.message}`);
+          });
+        }
       }
     }
-  }
-
-  // Execute all database operations in parallel
-  if (dbOperations.length > 0) {
-    await Promise.allSettled(dbOperations);
   }
 
   // If some phones exceeded the daily limit mid-batch, create a spillover batch
