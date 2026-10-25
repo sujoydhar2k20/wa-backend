@@ -571,7 +571,7 @@ async function handleMessage(waba, phoneNumberId, msg, contacts) {
 
     // One bot decision per customer message. For a brand-new or reopened chat this also
     // covers "open conversation" flows, so the customer never gets two welcome flows.
-    logger.info(`[bot] incoming message for chat ${chat._id} (${senderKey}): isNewChat=${isNewChat}, wasReopened=${wasReopened}`);
+    logger.info(`[bot] incoming message for chat ${chat._id} (${senderKey}): msg.type=${msg?.type}, msgText="${msgText}", isNewChat=${isNewChat}, wasReopened=${wasReopened}`);
     if (!isCallGenerated) {
         botService.processIncomingMessage({
             waba, phoneNumberId, chat, message, text: msgText || '',

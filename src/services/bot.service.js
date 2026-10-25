@@ -11,6 +11,7 @@ const whatsappService = require('./whatsapp.service');
 const { logger } = require('../utils/logger');
 const { addressOf } = require('../utils/waIdentity');
 const { optionIds, optionIdForText } = require('../utils/botOptionIds');
+const { normalizeText } = require('../utils/textNormalization');
 
 // An execution in one of these states is still "in progress" for its chat.
 const ACTIVE_STATUSES = ['running', 'waiting'];
@@ -248,12 +249,17 @@ async function processIncomingMessage({
 
             // 3. Message-based flows
             const flows = await findFlowsForWaba(waba);
+            logger.info(`[bot] Chat ${chat._id}: Checking ${flows.length} flows with text: "${text}"`);
             for (const flow of flows) {
+                logger.debug(`[bot] Flow "${flow.name}": trigger.type=${flow.trigger?.type}, keywords=${JSON.stringify(flow.trigger?.keywords || [])}`);
                 const triggerResult = evaluateTrigger(flow.trigger, {
                     chat, message, text, isNewChat, previousCustomerMessageAt,
                 });
-                if (!triggerResult.matched) continue;
-
+                if (!triggerResult.matched) {
+                    logger.debug(`[bot] Flow "${flow.name}" trigger did not match`);
+                    continue;
+                }
+                logger.info(`[bot] ✓ MATCHED Flow "${flow.name}" with keyword: "${triggerResult.matchedKeyword}"`);
                 const matchedKeyword = triggerResult.matchedKeyword || '';
                 // Keyword triggers default to a 24-hour cooldown when none is set.
                 const isKeywordTrigger = flow.trigger?.type === 'on_message' && flow.trigger?.keywords?.length > 0;
@@ -316,6 +322,50 @@ function istDayKey(date) {
 }
 
 /**
+ * Check if a keyword matches the text using the specified match type.
+ * Supports multi-language matching (Bengali, Hindi, English, etc.)
+ */
+function keywordMatches(text, keyword, matchType) {
+    if (!text || !keyword) return false;
+    
+    try {
+        switch (matchType) {
+            case 'exact': {
+                const normalizedText = normalizeText(text);
+                const normalizedKeyword = normalizeText(keyword);
+                return normalizedText === normalizedKeyword;
+            }
+            
+            case 'regex': {
+                try {
+                    const regex = new RegExp(keyword, 'iu');
+                    return regex.test(text);
+                } catch (regexErr) {
+                    logger.warn(`Invalid regex pattern: ${keyword}`, regexErr);
+                    return false;
+                }
+            }
+            
+            case 'partial':
+            default: {
+                const normalizedText = normalizeText(text);
+                const normalizedKeyword = normalizeText(keyword);
+                
+                // Check if any word in the keyword matches any word in text
+                const keywordWords = normalizedKeyword.split(/\s+/).filter(w => w.length > 0);
+                if (keywordWords.length === 0) return false;
+                
+                // All keyword words must appear in the text (in any order)
+                return keywordWords.every(kw => normalizedText.includes(kw));
+            }
+        }
+    } catch (err) {
+        logger.error(`Error in keywordMatches: ${err.message}`);
+        return false;
+    }
+}
+
+/**
  * Check if a trigger matches the context.
  * Returns { matched: boolean, matchedKeyword?: string }
  */
@@ -327,26 +377,13 @@ function evaluateTrigger(trigger, { chat, message, text, isNewChat, previousCust
             // If no keywords defined, match ALL messages
             if (!trigger.keywords || trigger.keywords.length === 0) return { matched: true };
             if (!text) return { matched: false };
-            const lowerText = text.toLowerCase().trim();
+            
             for (const keyword of trigger.keywords) {
-                const lowerKeyword = keyword.toLowerCase().trim();
-                if (!lowerKeyword) continue;
-                let keywordMatched = false;
-                switch (trigger.matchType) {
-                    case 'exact':
-                        keywordMatched = lowerText === lowerKeyword;
-                        break;
-                    case 'regex':
-                        try { keywordMatched = new RegExp(keyword, 'i').test(text); }
-                        catch { keywordMatched = false; }
-                        break;
-                    case 'partial':
-                    default:
-                        keywordMatched = lowerText.includes(lowerKeyword);
-                        break;
-                }
-                if (keywordMatched) {
-                    return { matched: true, matchedKeyword: lowerKeyword };
+                if (!keyword || typeof keyword !== 'string') continue;
+                
+                const matchType = trigger.matchType || 'partial';
+                if (keywordMatches(text, keyword, matchType)) {
+                    return { matched: true, matchedKeyword: normalizeText(keyword) };
                 }
             }
             return { matched: false };
@@ -1150,21 +1187,31 @@ async function executeNode(node, context) {
 }
 
 /**
- * Evaluate a condition expression.
+ * Evaluate a condition expression with multi-language support.
+ * Uses the same normalization as keyword matching to handle Bengali, Hindi, etc.
  */
 function evaluateCondition(fieldValue, operator, value) {
-    const fv = (fieldValue || '').toLowerCase();
-    const v = (value || '').toLowerCase();
-    switch (operator) {
-        case 'equals': return fv === v;
-        case 'not_equals': return fv !== v;
-        case 'contains': return fv.includes(v);
-        case 'not_contains': return !fv.includes(v);
-        case 'starts_with': return fv.startsWith(v);
-        case 'ends_with': return fv.endsWith(v);
-        case 'is_empty': return !fv;
-        case 'is_not_empty': return !!fv;
-        default: return false;
+    // For is_empty and is_not_empty, just check the raw value
+    if (operator === 'is_empty') return !fieldValue;
+    if (operator === 'is_not_empty') return !!fieldValue;
+    
+    // For other operators, normalize text for comparison (handles multi-language)
+    try {
+        const fv = normalizeText(fieldValue || '');
+        const v = normalizeText(value || '');
+        
+        switch (operator) {
+            case 'equals': return fv === v;
+            case 'not_equals': return fv !== v;
+            case 'contains': return fv.includes(v);
+            case 'not_contains': return !fv.includes(v);
+            case 'starts_with': return fv.startsWith(v);
+            case 'ends_with': return fv.endsWith(v);
+            default: return false;
+        }
+    } catch (err) {
+        logger.error(`Error evaluating condition: ${err.message}`);
+        return false;
     }
 }
 

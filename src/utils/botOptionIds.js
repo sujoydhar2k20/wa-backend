@@ -9,6 +9,8 @@
  * position-based ones ("btn_0", "item_2"), which is exactly what their arrows use.
  */
 
+const { normalizeText } = require('./textNormalization');
+
 const KINDS = {
     button: { values: 'buttons', ids: 'buttonIds', prefix: 'btn' },
     list: { values: 'listItems', ids: 'listItemIds', prefix: 'item' },
@@ -22,14 +24,20 @@ function optionIds(config = {}, kind = 'button') {
     return values.map((_, i) => (ids && ids[i]) ? String(ids[i]) : `${k.prefix}_${i}`);
 }
 
-/** Id of the option whose title matches the customer's typed text (case-insensitive), or null. */
+/**
+ * Id of the option whose title matches the customer's typed text (case-insensitive),
+ * with multi-language support for Bengali, Hindi, etc.
+ * Returns null if no match found.
+ */
 function optionIdForText(config = {}, kind = 'button', text = '') {
     const k = KINDS[kind];
     const values = Array.isArray(config[k.values]) ? config[k.values] : [];
-    const wanted = String(text || '').toLowerCase().trim();
+    const wanted = normalizeText(text || '');
     if (!wanted) return null;
-    const idx = values.findIndex(v => String(v || '').toLowerCase().trim() === wanted);
+    
+    const idx = values.findIndex(v => normalizeText(String(v || '')) === wanted);
     return idx === -1 ? null : optionIds(config, kind)[idx];
 }
 
 module.exports = { optionIds, optionIdForText };
+

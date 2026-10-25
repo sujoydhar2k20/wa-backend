@@ -809,6 +809,39 @@ async function getAutoMessages(req, res, next) {
     }
 }
 
+async function getBotExecutionLogs(req, res, next) {
+    try {
+        const chatId = req.params.id;
+        const { limit = 20 } = req.query;
+
+        // Fetch bot execution logs for this chat
+        const executions = await require('../models/BotExecution').find({ chatId })
+            .populate('flowId', 'name')
+            .sort({ startedAt: -1 })
+            .limit(parseInt(limit, 10))
+            .lean();
+
+        if (!executions || executions.length === 0) {
+            return res.json({ executions: [], total: 0 });
+        }
+
+        // Calculate execution duration and enrich data
+        const enriched = executions.map(exec => ({
+            ...exec,
+            duration: exec.completedAt ? new Date(exec.completedAt).getTime() - new Date(exec.startedAt).getTime() : null,
+            flowName: exec.flowId?.name || 'Unknown Flow',
+            stepCount: (exec.executionLog || []).length,
+        }));
+
+        res.json({ 
+            executions: enriched,
+            total: await require('../models/BotExecution').countDocuments({ chatId })
+        });
+    } catch (e) {
+        next(e);
+    }
+}
+
 async function getAllAutoMessages(req, res, next) {
     try {
         const { page = 1, limit = 50 } = req.query;
@@ -1054,6 +1087,7 @@ module.exports = {
     getAutoMessages,
     getAllAutoMessages,
     deleteAllAutoMessages,
+    getBotExecutionLogs,
     stats,
     toggleDnd,
     startWithPhone,

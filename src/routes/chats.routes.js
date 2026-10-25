@@ -24,6 +24,7 @@ router.get('/:id/activities', chatsController.getActivities);
 router.post('/:id/block', require('../controllers/block.controller').blockChat);
 router.get('/:id/block', require('../controllers/block.controller').blockStatus);
 router.get('/:id/auto-messages', chatsController.getAutoMessages);
+router.get('/:id/bot-execution-logs', chatsController.getBotExecutionLogs);
 router.patch('/:id/dnd', chatsController.toggleDnd);
 
 module.exports = router;
