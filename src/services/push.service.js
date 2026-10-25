@@ -15,40 +15,27 @@ function configureFirebase() {
     const clientEmail = process.env.FIREBASE_CLIENT_EMAIL;
     let privateKey = process.env.FIREBASE_PRIVATE_KEY;
 
-    // Check all required credentials are present
-    if (!projectId || !clientEmail || !privateKey) {
-        logger.warn('Firebase Cloud Messaging VAPID/Credentials are not configured. Push notifications will be bypassed.');
-        return;
+    if (privateKey) {
+        // Handle newline formatting from environment string
+        privateKey = privateKey.replace(/\\n/g, '\n');
     }
 
-    try {
-        // Remove surrounding quotes if present
-        if (privateKey.startsWith('"') && privateKey.endsWith('"')) {
-            privateKey = privateKey.slice(1, -1);
+    if (projectId && clientEmail && privateKey) {
+        try {
+            admin.initializeApp({
+                credential: admin.credential.cert({
+                    projectId,
+                    clientEmail,
+                    privateKey
+                })
+            });
+            isInitialized = true;
+            logger.info('Firebase Admin SDK initialized successfully.');
+        } catch (error) {
+            logger.error(`Failed to initialize Firebase Admin SDK: ${error.message}`);
         }
-        
-        // Handle newline formatting from environment string
-        // Replace both escaped newlines (\\n as string) and actual newline sequences
-        privateKey = privateKey.replace(/\\n/g, '\n');
-
-        // Validate private key format
-        if (!privateKey.includes('BEGIN PRIVATE KEY') || !privateKey.includes('END PRIVATE KEY')) {
-            logger.error('Firebase private key format is invalid. Must contain BEGIN and END PRIVATE KEY markers.');
-            return;
-        }
-
-        admin.initializeApp({
-            credential: admin.credential.cert({
-                projectId,
-                clientEmail,
-                privateKey
-            })
-        });
-        isInitialized = true;
-        logger.info('Firebase Admin SDK initialized successfully.');
-    } catch (error) {
-        logger.error(`Failed to initialize Firebase Admin SDK: ${error.message}`);
-        if (error.stack) logger.error(`Stack: ${error.stack}`);
+    } else {
+        logger.warn('Firebase Cloud Messaging VAPID/Credentials are not configured. Push notifications will be bypassed.');
     }
 }
 

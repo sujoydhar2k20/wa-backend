@@ -56,9 +56,10 @@ const chatSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-chatSchema.pre('validate', function requireIdentity() {
+chatSchema.pre('validate', function requireIdentity(next) {
   // A chat folded into another one keeps neither identity (they moved to the surviving chat).
   if (!this.mergedInto && !this.waId && !this.bsuid) this.invalidate('waId', 'A chat needs a phone number (waId) or a WhatsApp user ID (bsuid)');
+  next();
 });
 
 // One chat per customer identity per WABA. Partial indexes so chats without a phone (BSUID-only) or
