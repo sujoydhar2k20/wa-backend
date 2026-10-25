@@ -22,8 +22,20 @@ function configureFirebase() {
     }
 
     try {
+        // Remove surrounding quotes if present
+        if (privateKey.startsWith('"') && privateKey.endsWith('"')) {
+            privateKey = privateKey.slice(1, -1);
+        }
+        
         // Handle newline formatting from environment string
+        // Replace both escaped newlines (\\n as string) and actual newline sequences
         privateKey = privateKey.replace(/\\n/g, '\n');
+
+        // Validate private key format
+        if (!privateKey.includes('BEGIN PRIVATE KEY') || !privateKey.includes('END PRIVATE KEY')) {
+            logger.error('Firebase private key format is invalid. Must contain BEGIN and END PRIVATE KEY markers.');
+            return;
+        }
 
         admin.initializeApp({
             credential: admin.credential.cert({
@@ -36,6 +48,7 @@ function configureFirebase() {
         logger.info('Firebase Admin SDK initialized successfully.');
     } catch (error) {
         logger.error(`Failed to initialize Firebase Admin SDK: ${error.message}`);
+        if (error.stack) logger.error(`Stack: ${error.stack}`);
     }
 }
 
