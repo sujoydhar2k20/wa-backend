@@ -288,8 +288,6 @@ async function processBroadcastBatch(batchId) {
   });
 
   const template = broadcast.templateId;
-  let sentCount = 0;
-  let failedCount = 0;
 
   // Get the components from the broadcast (stored when the send was initiated)
   const components = broadcast.components || [];
